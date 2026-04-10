@@ -1,0 +1,39 @@
+# Virtual environments
+venv/
+.venv/
+Qpark/
+env/
+*.egg-info/
+
+# ONNX / model weights (too large for GitHub)
+*.onnx
+*.pt
+*.engine
+*.flatbuffers
+models/
+
+# Videos
+*.mp4
+*.avi
+*.m4v
+
+# Debug snapshots (can be thousands of files)
+debug_snapshots/
+captured_dataset/
+
+# Logs
+LOGs/
+*.log
+
+# Detection output
+Detections_JSON/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS
+.DS_Store
+Thumbs.db

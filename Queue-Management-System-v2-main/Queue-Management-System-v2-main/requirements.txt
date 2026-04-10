@@ -1,0 +1,25 @@
+# hydra-core
+PyYAML
+# Ensemble prediction dependencies
+prophet
+xgboost
+tensorflow
+scikit-learn
+psycopg2-binary
+python-dotenv
+pyrootutils
+opencv-python
+numpy
+colorlog
+Pillow
+scipy
+scikit-image
+shapely
+ipyfilechooser
+onnx
+onnxruntime
+norfair
+requests
+pandas
+tqdm
+uniface

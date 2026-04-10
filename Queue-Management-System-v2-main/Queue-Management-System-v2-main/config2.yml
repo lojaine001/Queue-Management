@@ -1,0 +1,27 @@
+# (conf, area, ratio)
+debug_mode: True
+
+expect_fps: 3
+
+max_age: 6
+
+max_distance_between_points: 6
+
+save_one: True
+
+min_iou: 0.01
+
+tip_offset: 0.5
+
+min_elapsed_time: 10 #seconds
+
+TaxiSign: 
+- 0.5
+- 150
+- 0.5
+
+allowed_countries:
+- FRA
+
+country_sync_window: 5
+

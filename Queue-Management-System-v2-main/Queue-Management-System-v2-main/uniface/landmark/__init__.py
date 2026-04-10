@@ -1,0 +1,29 @@
+# Copyright 2025-2026 Yakhyokhuja Valikhujaev
+# Author: Yakhyokhuja Valikhujaev
+# GitHub: https://github.com/yakhyo
+
+from .base import BaseLandmarker
+from .models import Landmark106
+
+
+def create_landmarker(method: str = '2d106det', **kwargs) -> BaseLandmarker:
+    """
+    Factory function to create facial landmark predictors.
+
+    Args:
+        method (str): Landmark prediction method.
+            Options: '2d106det' (default), 'landmark106', '106'.
+        **kwargs: Model-specific parameters.
+
+    Returns:
+        Initialized landmarker instance.
+    """
+    method = method.lower()
+    if method in ('2d106det', 'landmark106', '106'):
+        return Landmark106(**kwargs)
+    else:
+        available = ['2d106det', 'landmark106', '106']
+        raise ValueError(f"Unsupported method: '{method}'. Available: {available}")
+
+
+__all__ = ['BaseLandmarker', 'Landmark106', 'create_landmarker']

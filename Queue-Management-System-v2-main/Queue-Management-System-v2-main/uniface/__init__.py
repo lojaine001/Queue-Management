@@ -1,0 +1,121 @@
+# Copyright 2025-2026 Yakhyokhuja Valikhujaev
+#
+# Licensed under the MIT License.
+# You may obtain a copy of the License at
+#
+#     https://opensource.org/licenses/MIT
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""UniFace: A comprehensive library for face analysis.
+
+This library provides unified APIs for:
+- Face detection (RetinaFace, SCRFD, YOLOv5Face, YOLOv8Face)
+- Face recognition (AdaFace, ArcFace, MobileFace, SphereFace)
+- Face tracking (ByteTrack with Kalman filtering)
+- Facial landmarks (106-point detection)
+- Face parsing (semantic segmentation)
+- Gaze estimation
+- Age, gender, and emotion prediction
+- Face anti-spoofing
+- Privacy/anonymization
+"""
+
+from __future__ import annotations
+
+__license__ = 'MIT'
+__author__ = 'Yakhyokhuja Valikhujaev'
+__version__ = '3.1.1'
+
+import contextlib
+
+from uniface.face_utils import compute_similarity, face_alignment
+from uniface.log import Logger, enable_logging
+from uniface.model_store import download_models, get_cache_dir, set_cache_dir, verify_model_weights
+
+from .analyzer import FaceAnalyzer
+from .attribute import AgeGender, Emotion, FairFace
+from .detection import (
+    SCRFD,
+    RetinaFace,
+    YOLOv5Face,
+    YOLOv8Face,
+    create_detector,
+    list_available_detectors,
+)
+from .gaze import MobileGaze, create_gaze_estimator
+from .landmark import Landmark106, create_landmarker
+from .parsing import BiSeNet, XSeg, create_face_parser
+from .privacy import BlurFace
+from .recognition import AdaFace, ArcFace, MobileFace, SphereFace, create_recognizer
+from .spoofing import MiniFASNet, create_spoofer
+from .tracking import BYTETracker
+from .types import AttributeResult, EmotionResult, Face, GazeResult, SpoofingResult
+
+# Optional: FAISS vector store (requires `pip install faiss-cpu`)
+with contextlib.suppress(ImportError):
+    from .indexing import FAISS
+
+__all__ = [
+    # Metadata
+    '__author__',
+    '__license__',
+    '__version__',
+    # Core classes
+    'Face',
+    'FaceAnalyzer',
+    # Factory functions
+    'create_detector',
+    'create_face_parser',
+    'create_gaze_estimator',
+    'create_landmarker',
+    'create_recognizer',
+    'create_spoofer',
+    'list_available_detectors',
+    # Detection models
+    'RetinaFace',
+    'SCRFD',
+    'YOLOv5Face',
+    'YOLOv8Face',
+    # Recognition models
+    'AdaFace',
+    'ArcFace',
+    'MobileFace',
+    'SphereFace',
+    # Landmark models
+    'Landmark106',
+    # Gaze models
+    'GazeResult',
+    'MobileGaze',
+    # Parsing models
+    'BiSeNet',
+    'XSeg',
+    # Attribute models
+    'AgeGender',
+    'AttributeResult',
+    'Emotion',
+    'EmotionResult',
+    'FairFace',
+    # Spoofing models
+    'MiniFASNet',
+    'SpoofingResult',
+    # Tracking
+    'BYTETracker',
+    # Privacy
+    'BlurFace',
+    # Indexing (optional)
+    'FAISS',
+    # Utilities
+    'Logger',
+    'compute_similarity',
+    'download_models',
+    'enable_logging',
+    'face_alignment',
+    'get_cache_dir',
+    'set_cache_dir',
+    'verify_model_weights',
+]

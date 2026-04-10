@@ -1,0 +1,40 @@
+auth_type: basic
+camID: Bourgogne_Sortie_Gauche
+pretrained_model: models/yolov9s.onnx
+digitalio_close_path: /rcp.xml?command=0x01c1&type=F_FLAG&direction=WRITE&num=1&payload=0
+digitalio_mode: pulse
+digitalio_open_path: /api/relay/output1/trigger
+endpoint: ''
+iou_score: 0.3
+ip_address: '' #http://127.0.0.1:8080/video_feed
+min_delay: 0.45
+min_score: 0.3
+mode: digitalIO
+model: standard.pt
+password: Qpark54!!
+pattern_classes:
+- TaxiSign
+points:
+- - 246
+  - 318
+- - 375
+  - 311
+- - 377
+  - 436
+- - 151
+  - 438
+
+  
+# points:
+# - - 0
+#   - 0
+# - - 640
+#   - 0
+# - - 640
+#   - 480
+# - - 0
+#   - 480
+score: 0.3
+face_score: 0.5
+username: service
+webhook_port: 5015

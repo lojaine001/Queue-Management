@@ -1,0 +1,19 @@
+# hydra-core
+PyYAML
+python-dotenv
+pyrootutils
+opencv-python
+numpy
+colorlog
+Pillow
+scipy
+scikit-image
+shapely
+ipyfilechooser
+onnx
+onnxruntime
+norfair
+requests
+pandas
+tqdm
+uniface
