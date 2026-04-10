@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 IQMS - Intelligent Queue Management System
 Report Generator
@@ -537,7 +538,7 @@ def build_html(stats, charts):
       <tr><td>Days with data</td><td>{stats.get('days_monitored',0)}</td></tr>
       <tr><td>Avg visitors / day</td><td>{stats.get('avg_daily',0)}</td></tr>
       <tr><td>Avg entrance dwell</td><td>{stats.get('avg_dwell_entrance','—')} s</td></tr>
-      <tr><td>Prediction engine</td><td>Ready after 3–5 days of data</td></tr>
+      <tr><td>Prediction engine</td><td>Ready after 3-5 days of data</td></tr>
     </table>
   """))}
 </div>
