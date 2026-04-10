@@ -470,7 +470,7 @@ def build_html(stats, charts):
 <div class="header">
   <h1>Intelligent Queue Management System</h1>
   <p>Operational Report &nbsp;·&nbsp; Generated: {now} &nbsp;·&nbsp;
-     Period: {stats.get('date_from','—')} → {stats.get('date_to','—')}</p>
+     Period: {stats.get('date_from','-')} to {stats.get('date_to','-')}</p>
 </div>
 
 <!-- KPIs -->
@@ -533,7 +533,7 @@ def build_html(stats, charts):
       <tr><th>Metric</th><th>Value</th></tr>
       <tr><td>Entrance records</td><td><span class="badge">{stats.get('total_visitors',0)}</span></td></tr>
       <tr><td>Checkout records</td><td><span class="badge">{stats.get('total_checkout_events',0)}</span></td></tr>
-      <tr><td>Monitoring period</td><td>{stats.get('date_from','—')} → {stats.get('date_to','—')}</td></tr>
+      <tr><td>Monitoring period</td><td>{stats.get('date_from','-')} to {stats.get('date_to','-')}</td></tr>
       <tr><td>Days with data</td><td>{stats.get('days_monitored',0)}</td></tr>
       <tr><td>Avg visitors / day</td><td>{stats.get('avg_daily',0)}</td></tr>
       <tr><td>Avg entrance dwell</td><td>{stats.get('avg_dwell_entrance','—')} s</td></tr>
