@@ -6,35 +6,66 @@ digitalio_mode: pulse
 digitalio_open_path: /api/relay/output1/trigger
 endpoint: ''
 iou_score: 0.3
-ip_address: '' #http://127.0.0.1:8080/video_feed
+ip_address: '192.168.1.48:554/?inst=3'
+username: service
+password: 'Cam10003!'
 min_delay: 0.45
 min_score: 0.3
 mode: digitalIO
 model: standard.pt
-password: Qpark54!!
 disable_headpose_identification_mode: True
 pattern_classes:
 - TaxiSign
-# points:
-# - - 449
-#   - 328
-# - - 209
-#   - 290
-# - - 340
-#   - 152
-# - - 460
-#   - 165
 points:
-- - 111
-  - 468
-- - 94
-  - 156
-- - 509
-  - 158
-- - 524
+- - 234
+  - 18
+- - 309
+  - 20
+- - 309
+  - 109
+- - 305
+  - 144
+- - 307
+  - 183
+- - 315
+  - 222
+- - 347
+  - 220
+- - 373
+  - 249
+- - 412
+  - 246
+- - 427
+  - 244
+- - 436
+  - 231
+- - 441
+  - 214
+- - 443
+  - 179
+- - 437
+  - 150
+- - 431
+  - 128
+- - 420
+  - 95
+- - 389
+  - 28
+- - 508
+  - 19
+- - 573
+  - 113
+- - 545
+  - 231
+- - 508
+  - 358
+- - 550
+  - 417
+- - 561
   - 443
-- []
-pretrained_model: yolov9-t.pt
+- - 542
+  - 477
+- - 64
+  - 478
 score: 0.3
-username: service
 webhook_port: 5015
