@@ -312,10 +312,10 @@ def main():
             start_time = time.time()
             im0 = thread.read()
 
-            # if im0 is None:
-            #     systems_logger.warning('Received empty frame from video stream!')
-            #     time.sleep(0.01) # Sleep briefly before trying to read again
-            #     continue
+            if im0 is None:
+                systems_logger.warning('Received empty frame from video stream!')
+                time.sleep(0.1)
+                continue
 
             # Resize frame to 640x480 for consistent processing
             im0 = cv2.resize(im0, (640, 480))
