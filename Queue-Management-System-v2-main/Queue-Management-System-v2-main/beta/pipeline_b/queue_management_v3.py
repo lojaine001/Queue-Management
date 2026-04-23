@@ -121,12 +121,6 @@ class OnnxDetector:
         return boxes
 
 
-def _line_side(cx: float, cy: float, p1: list, p2: list) -> int:
-    """Return +1 or -1 indicating which side of the line segment p1→p2 the point is on."""
-    cross = (p2[0] - p1[0]) * (cy - p1[1]) - (p2[1] - p1[1]) * (cx - p1[0])
-    return 1 if cross >= 0 else -1
-
-
 def commandline_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--img_size', type=int, default=640, help='inference size (pixels)')
@@ -181,6 +175,59 @@ def draw_text_lines(frame, lines, position="bottom_left", padding_ratio=0.02, co
         cv2.putText(frame, line, (x, line_y), font, font_scale, color, thickness, cv2.LINE_AA)
 
 
+def person_anchor_from_box(box):
+    x1, y1, x2, y2 = box
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def point_in_zones(point_xy, zones):
+    point = Point(point_xy[0], point_xy[1])
+    return any(zone.contains(point) or zone.touches(point) for zone in zones)
+
+
+def zone_index_for_point(point_xy, zones):
+    if not zones:
+        return 0
+
+    point = Point(point_xy[0], point_xy[1])
+    for index, zone in enumerate(zones):
+        if zone.contains(point) or zone.touches(point):
+            return index
+    return None
+
+
+def signed_line_side(point_xy, line_start, line_end):
+    return (
+        (line_end[0] - line_start[0]) * (point_xy[1] - line_start[1])
+        - (line_end[1] - line_start[1]) * (point_xy[0] - line_start[0])
+    )
+
+
+def crossed_entry_line(previous_point, current_point, entry_line_points, direction):
+    if previous_point is None or current_point is None or len(entry_line_points) != 2:
+        return False
+
+    line_start = tuple(entry_line_points[0])
+    line_end = tuple(entry_line_points[1])
+    previous_side = signed_line_side(previous_point, line_start, line_end)
+    current_side = signed_line_side(current_point, line_start, line_end)
+    epsilon = 1e-6
+
+    if abs(previous_side) <= epsilon:
+        previous_side = 0.0
+    if abs(current_side) <= epsilon:
+        current_side = 0.0
+
+    if direction == "forward":
+        return previous_side < 0 <= current_side
+    if direction == "reverse":
+        return previous_side > 0 >= current_side
+    return (
+        (previous_side < 0 <= current_side)
+        or (previous_side > 0 >= current_side)
+    )
+
+
 def main():
     args = commandline_args()
 
@@ -206,7 +253,7 @@ def main():
     username = stored_config.get('username', 'admin')
     password = stored_config.get('password', 'Wt@5651%')
 
-    pretrained_model = stored_config.get('pretrained_model', 'models/yolov9s.onnx')
+    pretrained_model = stored_config.get('pretrained_model', 'models/yolov9t.onnx')
 
     score = stored_config.get('score', 0.3)
     face_score = stored_config.get('face_score', 0.5)
@@ -216,29 +263,15 @@ def main():
     device = args.device
 
     debug_mode = config2.get('debug_mode', True)
-    save_snapshots = config2.get('save_snapshots', True)
     max_distance_between_points = config2.get('max_distance_between_points', 2)
     max_age = config2.get('max_age', 10)
     expect_fps = config2.get('expect_fps', 3)
     min_elapsed_time = config2.get('min_elapsed_time', 1)
     SNAPSHOT_INTERVAL = config2.get('snapshot_interval', 10)
-    face_skip_frames     = max(1, int(config2.get('face_skip_frames', 1)))
-    counting_mode        = config2.get('counting_mode', 'roi').lower()
-    entry_line_points    = config2.get('entry_line_points', [])
-    entry_line_direction = config2.get('entry_line_direction', 'forward').lower()
-
-    # Validate line crossing config
-    line_p1 = line_p2 = None
-    if counting_mode == 'line_crossing':
-        if len(entry_line_points) >= 2:
-            line_p1 = entry_line_points[0]
-            line_p2 = entry_line_points[1]
-            print(f"[COUNTER] Line crossing mode | line={line_p1}→{line_p2} | direction={entry_line_direction}")
-        else:
-            print("[COUNTER] WARNING: counting_mode=line_crossing but entry_line_points not set — falling back to roi")
-            counting_mode = 'roi'
-    else:
-        print("[COUNTER] ROI counting mode")
+    entry_confirmation_seconds = float(config2.get('entry_confirmation_seconds', 1.5))
+    counting_mode = str(config2.get('counting_mode', 'roi')).lower()
+    entry_line_points = config2.get('entry_line_points', [])
+    entry_line_direction = str(config2.get('entry_line_direction', 'forward')).lower()
 
     detector = OnnxDetector(
         device=device,
@@ -261,6 +294,20 @@ def main():
     if len(polygon) > 0:
         polygons.append(polygon.copy())
         polygon.clear()
+
+    zones = [Polygon(np.array(poly, dtype=np.int32)) for poly in polygons]
+
+    if counting_mode not in {"roi", "line_crossing"}:
+        print(f"[COUNT] WARNING: unsupported counting_mode={counting_mode}. Falling back to roi mode.")
+        counting_mode = "roi"
+
+    if entry_line_direction not in {"forward", "reverse", "any"}:
+        print(f"[COUNT] WARNING: unsupported entry_line_direction={entry_line_direction}. Falling back to forward.")
+        entry_line_direction = "forward"
+
+    if counting_mode == "line_crossing" and len(entry_line_points) != 2:
+        print("[COUNT] WARNING: counting_mode=line_crossing but entry_line_points is invalid. Falling back to roi mode.")
+        counting_mode = "roi"
 
     face_analyzer = FaceAnalyzer(
         detector=RetinaFace(confidence_threshold=face_score),
@@ -322,12 +369,8 @@ def main():
     track_data = {}        # track_id -> {gender, age, confidence, best_conf} accumulated while alive
     prev_track_ids = set() # track_ids active in the previous frame
     counted_entry_times = deque()
-    track_prev_side: dict[int, int] = {}   # line crossing: last known side per track
-    track_crossed:   set[int]       = set()  # tracks that already triggered a count
-    track_cross_candidate: dict[int, int] = {}  # track_id → frames held on new side
-    _last_faces:     list           = []   # cached face results for skip-frame
-    _frame_count:    int            = 0    # frame counter for skip-frame logic
-
+    track_first_seen_times = {}
+    track_anchor_points = {}
     try:
         while True:
             start_time = time.time()
@@ -352,11 +395,10 @@ def main():
             for poly in polygons:
                 pts = np.array(poly, dtype=np.int32)
                 cv2.polylines(viz_img, [pts], True, (0, 255, 255), 3, lineType=cv2.LINE_AA)
-
-            if counting_mode == 'line_crossing' and line_p1 and line_p2:
-                cv2.line(viz_img, tuple(line_p1), tuple(line_p2), (0, 0, 255), 2, cv2.LINE_AA)
-                cv2.putText(viz_img, "ENTRY LINE", (line_p1[0], line_p1[1] - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+            if counting_mode == "line_crossing":
+                p1 = tuple(int(v) for v in entry_line_points[0])
+                p2 = tuple(int(v) for v in entry_line_points[1])
+                cv2.line(viz_img, p1, p2, (255, 140, 0), 2, cv2.LINE_AA)
 
             timestamp_str = get_datetime_str()
 
@@ -368,47 +410,33 @@ def main():
                 # Collect bag detections anywhere in frame
                 if class_id in BAG_CLASSES:
                     bag_boxes.append(p_box)
+                    if debug_mode:
+                        cv2.rectangle(viz_img, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 165, 255), 1)
+                        cv2.putText(viz_img, 'bag', (p_box[0], p_box[1] - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
                     continue
 
                 if class_id != 0:
                     continue
 
-                # In line_crossing mode track everyone in frame — the line acts as the gate
-                if counting_mode == 'line_crossing':
-                    p_dets.append(p_box)
-                    p_confs.append(p_score)
-                    cv2.rectangle(viz_img, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 255, 0), 1)
-                    continue
+                anchor_point = person_anchor_from_box(p_box)
+                in_zone = point_in_zones(anchor_point, zones) if zones else False
+                keep_detection = in_zone or counting_mode == "line_crossing"
 
-                ROI_Incl = False
-                tip_point = None
-
-                for poly in polygons:
-                    pts = np.array(poly, dtype=np.int32)
-                    tip_offset = min(config2.get('tip_offset', 1.0), 1.0)
-                    tip_point = Point(p_box[0] + (p_box[2] - p_box[0]) * tip_offset, p_box[3] - (p_box[3] - p_box[1]) / 5)
-                    zone = Polygon(pts)
-                    if zone.contains(tip_point):
-                        ROI_Incl = True
-                        break
-
-                if ROI_Incl:
+                if keep_detection:
                     p_dets.append(p_box)
                     p_confs.append(p_score)
 
-                    cv2.rectangle(viz_img, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 255, 0), 1)
-                    if tip_point:
-                        cv2.circle(viz_img, ((int(tip_point.x), int(tip_point.y))), 1, (0, 0, 255), -1, cv2.LINE_AA)
+                    box_color = (0, 255, 0) if in_zone else (0, 200, 255)
+                    cv2.rectangle(viz_img, (p_box[0], p_box[1]), (p_box[2], p_box[3]), box_color, 1)
+                    cv2.circle(viz_img, (int(anchor_point[0]), int(anchor_point[1])), 2, (0, 0, 255), -1, cv2.LINE_AA)
 
-            _frame_count += 1
             if len(p_dets) > 0:
-                if _frame_count % face_skip_frames == 0:
-                    _last_faces = face_analyzer.analyze(im0)
-                faces = _last_faces
-                f_dets   = [f.bbox       for f in faces]
-                f_confs  = [f.confidence for f in faces]
-                f_genders = [f.sex       for f in faces]
-                f_ages   = [f.age        for f in faces]
+                faces = face_analyzer.analyze(im0)
+                f_dets = [f.bbox for f in faces]
+                f_confs = [f.confidence for f in faces]
+                f_genders = [f.sex for f in faces]
+                f_ages = [f.age for f in faces]
 
             min_iou = config2.get('min_iou', 0.5)
 
@@ -460,61 +488,25 @@ def main():
                 track_id = obj.global_id
                 current_track_ids.add(track_id)
 
-                # Compute centroid from tracker estimate
-                _raw = obj.estimate
-                _cx = int((_raw[0][0] + _raw[1][0]) / 2)
-                _cy = int((_raw[0][1] + _raw[1][1]) / 2)
+                estimate = obj.estimate.astype(int)
+                bx1, by1 = estimate[0]
+                bx2, by2 = estimate[1]
+                anchor_point = person_anchor_from_box([bx1, by1, bx2, by2])
+                current_zone_id = zone_index_for_point(anchor_point, zones)
+                previous_anchor = track_anchor_points.get(track_id)
+                track_anchor_points[track_id] = anchor_point
 
-                if track_id not in track_start_times:
-                    track_start_times[track_id] = current_time
-                    # ROI mode: count immediately on first appearance
-                    if counting_mode == 'roi':
-                        counted_entry_times.append(current_time)
+                if track_id not in track_first_seen_times:
+                    track_first_seen_times[track_id] = current_time  # first appearance, not yet confirmed
                     track_data[track_id] = {
                         "gender_votes": {"male": 0.0, "female": 0.0, "unknown": 0.0},
                         "age_sum": 0.0,
                         "age_weight": 0.0,
                         "best_conf": 0.0,
                         "has_bag": False,
-                        "entry_dt": datetime.now(),
+                        "entry_dt": None,
+                        "zone_id": current_zone_id,
                     }
-
-                # ── Line crossing check ───────────────────────────────────────
-                if counting_mode == 'line_crossing' and line_p1 and line_p2:
-                    curr_side = _line_side(_cx, _cy, line_p1, line_p2)
-                    systems_logger.debug(f"[LINE] id={track_id} pos=({_cx},{_cy}) side={curr_side}")
-                    if track_id not in track_prev_side:
-                        # New track: if it appears already on the entry side, count immediately
-                        # (person walked through door before tracker picked them up)
-                        already_entered = (
-                            (entry_line_direction == 'forward' and curr_side == 1)
-                            or (entry_line_direction == 'reverse' and curr_side == -1)
-                            or entry_line_direction == 'any'
-                        )
-                        if already_entered and track_id not in track_crossed:
-                            counted_entry_times.append(current_time)
-                            track_crossed.add(track_id)
-                            systems_logger.info(f"[COUNTER] New track already past line id={track_id} side={curr_side}")
-                    elif track_id not in track_crossed:
-                        prev_side = track_prev_side[track_id]
-                        if prev_side != curr_side:
-                            # Require 2 consecutive frames on new side to avoid glitches
-                            track_cross_candidate[track_id] = track_cross_candidate.get(track_id, 0) + 1
-                            if track_cross_candidate[track_id] >= 2:
-                                crossed_forward = (prev_side == -1 and curr_side == 1)
-                                should_count = (
-                                    entry_line_direction == 'any'
-                                    or (entry_line_direction == 'forward' and crossed_forward)
-                                    or (entry_line_direction == 'reverse' and not crossed_forward)
-                                )
-                                if should_count:
-                                    counted_entry_times.append(current_time)
-                                    track_crossed.add(track_id)
-                                    systems_logger.info(f"[COUNTER] Line crossed id={track_id} direction={'fwd' if crossed_forward else 'rev'}")
-                                track_cross_candidate.pop(track_id, None)
-                        else:
-                            track_cross_candidate.pop(track_id, None)
-                    track_prev_side[track_id] = curr_side
 
                 person_conf = 0.0
                 if hasattr(obj.last_detection, "data") and obj.last_detection.data:
@@ -543,6 +535,34 @@ def main():
                             track_data[track_id]["best_conf"], person_conf
                         )
 
+                track_age = current_time - track_first_seen_times[track_id]
+                is_confirmed = track_id in track_start_times
+                if not is_confirmed and track_age >= entry_confirmation_seconds:
+                    if counting_mode == "line_crossing":
+                        should_confirm = crossed_entry_line(
+                            previous_anchor,
+                            anchor_point,
+                            entry_line_points,
+                            entry_line_direction,
+                        )
+                    else:
+                        should_confirm = True
+
+                    if should_confirm:
+                        track_start_times[track_id] = current_time
+                        counted_entry_times.append(current_time)
+                        track_data[track_id]["entry_dt"] = datetime.now()
+                        track_data[track_id]["zone_id"] = current_zone_id
+
+                        is_confirmed = True
+                        print(f"[COUNT] Confirmed entry track_id={track_id} via {counting_mode} after {track_age:.1f}s")
+
+                if not is_confirmed:
+                    continue
+
+                if current_zone_id is not None:
+                    track_data[track_id]["zone_id"] = current_zone_id
+
                 track_dur = current_time - track_start_times[track_id]
                 time_elapsed = float(obj.age / expect_fps)
 
@@ -551,7 +571,7 @@ def main():
                     p_logger.person_id = track_id
                     person_loggers[track_id] = p_logger
 
-                    if debug_mode and save_snapshots:
+                    if debug_mode:
                         debug_image_path = os.path.join(snapshot_path, f'snapshot_{no_snapshots}.jpg')
                         cv2.imwrite(debug_image_path, viz_img)
                         no_snapshots += 1
@@ -562,18 +582,13 @@ def main():
             died_ids = prev_track_ids - current_track_ids
             for track_id in died_ids:
                 if track_id not in track_start_times:
-                    continue
-                dwell = current_time - track_start_times[track_id]
-                # In line_crossing mode only insert if person actually crossed the line
-                if counting_mode == 'line_crossing' and track_id not in track_crossed:
-                    systems_logger.debug(f"[DB] Skipped id={track_id} — never crossed entry line")
-                    track_start_times.pop(track_id, None)
+                    track_first_seen_times.pop(track_id, None)
+                    track_anchor_points.pop(track_id, None)
                     track_data.pop(track_id, None)
                     person_loggers.pop(track_id, None)
-                    track_prev_side.pop(track_id, None)
-                    track_cross_candidate.pop(track_id, None)
                     continue
-                if dwell >= min_elapsed_time:
+                dwell = current_time - track_start_times[track_id]
+                if dwell >= min_elapsed_time and dwell > (max_age * expect_fps):
                     td = track_data.get(track_id, {})
 
                     # Gender: highest confidence-weighted vote
@@ -590,24 +605,43 @@ def main():
                     conf     = td.get("best_conf", 0.0)
                     has_bag  = td.get("has_bag", False)
                     entry_dt = td.get("entry_dt")
-                    db.insert_entrance(track_id, gender, age, conf, camID,
-                                       dwell_seconds=round(dwell, 2),
-                                       entry_time=entry_dt,
-                                       has_bag=has_bag)
-                    detection_logger.info(f"[DB] Track died  track_id={track_id} | dwell={dwell:.1f}s "
-                                          f"| gender={gender} | age={age} | bag={has_bag} | conf={conf:.2f}")
+                    zone_id = td.get("zone_id")
+
+                    if zone_id is None and zones:
+                        print(f"[SUPPRESS] Skipped insert for track_id={track_id}, no valid zone assigned.")
+                    else:
+                        eff_zone = zone_id if zone_id is not None else 0
+                        active_zone_dwells = [
+                            current_time - track_start_times[active_track_id]
+                            for active_track_id in current_track_ids
+                            if active_track_id in track_start_times
+                            and active_track_id != track_id
+                            and track_data.get(active_track_id, {}).get("zone_id", 0 if not zones else None) == eff_zone
+                        ]
+                        active_zone_max_dwell = max(active_zone_dwells) if active_zone_dwells else 0.0
+
+                        if dwell > active_zone_max_dwell:
+                            db.insert_entrance(track_id, gender, age, conf, camID,
+                                               dwell_seconds=round(dwell, 2),
+                                               entry_time=entry_dt,
+                                               has_bag=has_bag)
+                            zone_str = f"zone {eff_zone}" if zones else "global zone 0"
+                            detection_logger.info(f"[DB] Track died  track_id={track_id} | dwell={dwell:.1f}s "
+                                                  f"| {zone_str} | gender={gender} | age={age} | bag={has_bag} | conf={conf:.2f}")
+                        else:
+                            zone_str = f"zone {eff_zone}" if zones else "global zone 0"
+                            detection_logger.info(f"[SUPPRESS] Skipped insert for track_id={track_id} in {zone_str}, "
+                                                  f"dwell={dwell:.1f}s <= active_max={active_zone_max_dwell:.1f}s")
                 track_start_times.pop(track_id, None)
+                track_first_seen_times.pop(track_id, None)
+                track_anchor_points.pop(track_id, None)
                 track_data.pop(track_id, None)
                 person_loggers.pop(track_id, None)
-                track_prev_side.pop(track_id, None)
-                track_crossed.discard(track_id)
-                track_cross_candidate.pop(track_id, None)
-
             prev_track_ids = current_track_ids
 
             # ── Periodic queue-state snapshot ────────────────────────────────
             if current_time - last_snapshot_time >= SNAPSHOT_INTERVAL:
-                active_ids = [obj.global_id for obj in tracked_objects]
+                active_ids = [obj.global_id for obj in tracked_objects if obj.global_id in track_start_times]
                 queue_count = len(active_ids)
                 dwells = [current_time - track_start_times[tid]
                           for tid in active_ids if tid in track_start_times]
@@ -627,7 +661,7 @@ def main():
             count_1_hour = sum(1 for ts in counted_entry_times if current_time - ts <= 3600)
             count_1_day = len(counted_entry_times)
 
-            active_person_count = len(current_track_ids)
+            active_person_count = len([track_id for track_id in current_track_ids if track_id in track_start_times])
             track_label = f"Persons: {active_person_count}"
             write_text(viz_img, track_label, position="top_right")
             draw_text_lines(
@@ -636,6 +670,7 @@ def main():
                     f"3 min: {count_3_min}",
                     f"1 hour: {count_1_hour}",
                     f"1 day: {count_1_day}",
+                    f"Mode: {'line' if counting_mode == 'line_crossing' else 'roi'}",
                 ],
                 position="bottom_left",
             )
@@ -652,7 +687,7 @@ def main():
                 print(f"INFO: Performance - FPS: {FPS:.1f} | Latency: {(end_time - start_time) * 1000:.0f}ms")
 
             if args.view_img:
-                im_show = cv2.resize(viz_img, (800, 600), interpolation=cv2.INTER_AREA)
+                im_show = cv2.resize(viz_img, (600, 400), interpolation=cv2.INTER_AREA)
                 cv2.imshow('Queue Management System', im_show)
                 if cv2.waitKey(1) in {ord("q"), ord("Q"), 27}:
                     break

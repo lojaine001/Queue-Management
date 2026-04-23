@@ -1,29 +1,20 @@
 auth_type: basic
-camID: Bosch_Camera_169
-pretrained_model: models/yolov9s.onnx
-digitalio_close_path: /rcp.xml?command=0x01c1&type=F_FLAG&direction=WRITE&num=1&payload=0
-digitalio_mode: pulse
-digitalio_open_path: /api/relay/output1/trigger
-endpoint: ''
+camID: Bosch_Camera_Entrance
+pretrained_model: models/yolov9t.onnx
 iou_score: 0.3
-ip_address: '192.168.169.1:554/?inst=2'
+ip_address: '192.168.169.1:554/?inst=4'
 username: service
 password: 'Cam10003!'
 min_delay: 0.45
 min_score: 0.3
-mode: digitalIO
 model: standard.pt
-pattern_classes:
-- TaxiSign
 points:
-- - 246
-  - 318
-- - 375
-  - 311
-- - 377
-  - 436
-- - 151
-  - 438
-score: 0.3
-face_score: 0.5
-webhook_port: 5015
+- - 217
+  - 196
+- - 448
+  - 194
+- - 559
+  - 376
+- - 183
+  - 433
+face_score: 0.3

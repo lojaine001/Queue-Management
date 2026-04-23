@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Queue Simulator Canvas</title>
+    <style>
+:root {
+    --bg-panel: rgba(15, 23, 42, 0.85);
+    --border-glass: rgba(255, 255, 255, 0.1);
+    --text-main: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    --glass-blur: blur(12px);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;   /* never let content push a scrollbar — that causes height jitter */
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: var(--text-main);
+    background: transparent;
+}
+
+.main-view {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    height: 100vh;      /* exactly the iframe viewport — no calc() mismatch */
+    padding: 8px;
+    box-sizing: border-box;
+}
+
+.glass-panel {
+    background: var(--bg-panel);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--border-glass);
+    border-radius: 12px;
+    box-shadow: var(--card-shadow);
+}
+
+.metrics-bar {
+    display: flex;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.metric {
+    flex: 1;
+    padding: 8px 4px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+}
+
+.metric-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+}
+
+.metric-value {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.metric-value.highlight {
+    color: var(--accent);
+}
+
+.canvas-container {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    min-height: 0;      /* allow flex shrink below content size */
+}
+
+canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+    </style>
+</head>
+<body>
+    <div class="main-view">
+        <div class="metrics-bar">
+            <div class="metric glass-panel">
+                <span class="metric-label">Status</span>
+                <span class="metric-value highlight" id="metric-status" style="font-size:16px; color:#f97316">Waiting...</span>
+            </div>
+            <div class="metric glass-panel">
+                <span class="metric-label">Sim Time</span>
+                <span class="metric-value" id="metric-time">--:--</span>
+            </div>
+            <div class="metric glass-panel">
+                <span class="metric-label">Entrance</span>
+                <span class="metric-value" id="metric-entrance" style="color:#22c55e">0</span>
+            </div>
+            <div class="metric glass-panel">
+                <span class="metric-label">Bakery Now</span>
+                <span class="metric-value" id="metric-bakery" style="color:#fbbf24">0</span>
+            </div>
+            <div class="metric glass-panel">
+                <span class="metric-label">Caddy Now</span>
+                <span class="metric-value" id="metric-caddy" style="color:#60a5fa">0</span>
+            </div>
+            <div class="metric glass-panel">
+                <span class="metric-label">In Shop</span>
+                <span class="metric-value" id="metric-shop">0</span>
+            </div>
+            <div class="metric glass-panel">
+                <span class="metric-label">Queue / Svc</span>
+                <span class="metric-value" id="metric-queue">0</span>
+            </div>
+            <div class="metric glass-panel">
+                <span class="metric-label">Completed</span>
+                <span class="metric-value highlight" id="metric-completed">0</span>
+            </div>
+        </div>
+
+        <div class="canvas-container glass-panel">
+            <canvas id="sim-canvas"></canvas>
+        </div>
+    </div>
+
+    <script>
+const canvas = document.getElementById('sim-canvas');
+const ctx = canvas.getContext('2d');
+let ws;
+
+function resizeCanvas() {
+    const p = canvas.parentElement;
+    if (!p) return;
+    const w = Math.floor(p.clientWidth);
+    const h = Math.floor(p.clientHeight);
+    if (canvas.width === w && canvas.height === h) return; // skip if nothing changed
+    canvas.width  = w;
+    canvas.height = h;
+}
+
+// ResizeObserver watches the canvas container directly.
+// It only fires when the container's actual pixel size changes — unlike
+// window.resize which fires on any layout event (e.g. sidebar rerenders).
+let _resizeTimer = 0;
+const _ro = new ResizeObserver(() => {
+    clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(resizeCanvas, 120);
+});
+_ro.observe(canvas.parentElement);
+resizeCanvas();
+
+const entities = new Map();
+let lanesCount = 2;
+const lanesData = {};   // lane_id -> { wait_sec, queue_len }
+
+function fmtSec(sec) {
+    if (sec <= 0) return '0s';
+    if (sec < 60)  return sec + 's';
+    const m = Math.floor(sec / 60), s = sec % 60;
+    return s > 0 ? `${m}m${String(s).padStart(2,'0')}s` : `${m}m`;
+}
+
+function fmtSimClock(value) {
+    const dt = new Date(value);
+    const date = dt.toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' });
+    const time = dt.toLocaleTimeString([], { hour: '2-digit', minute:'2-digit', second:'2-digit' });
+    return `${date} ${time}`;
+}
+
+function initWebSocket() {
+    ws = new WebSocket('ws://127.0.0.1:8080');
+    ws.onopen = () => {
+        const sm = document.getElementById('metric-status');
+        sm.innerText = 'Connected';
+        sm.style.color = '#22c55e';
+    };
+    ws.onclose = () => {
+        const sm = document.getElementById('metric-status');
+        sm.innerText = 'Reconnecting...';
+        sm.style.color = '#f97316';
+        setTimeout(initWebSocket, 2000);
+    };
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'status') {
+            const sm = document.getElementById('metric-status');
+            sm.innerText = data.message;
+            if (data.message === "Simulation Started") {
+                sm.style.color = '#a855f7';
+                entities.clear();
+                if (data.effective_start) {
+                    document.getElementById('metric-time').innerText = fmtSimClock(data.effective_start);
+                }
+            } else if (data.message === "Simulation Stopped") {
+                sm.style.color = '#f97316';
+            } else if (data.message === "Simulation Complete") {
+                sm.style.color = '#22c55e';
+            }
+        } else if (data.type === 'update') {
+            updateState(data);
+        }
+    };
+}
+
+function computeShopProgress(person, currentTime) {
+    if (!person.shopping_end_eta || !person.entry_time) return 0;
+    const entry = new Date(person.entry_time).getTime();
+    const end = new Date(person.shopping_end_eta).getTime();
+    const now = new Date(currentTime).getTime();
+    if (end <= entry) return 0;
+    const p = (now - entry) / Math.max(end - entry, 1);
+    return Math.min(Math.max(p, 0), 1);
+}
+
+function updateState(data) {
+    const timeStr = fmtSimClock(data.time);
+    const entrancePeople = (data.entrance || []);
+    const bakeryNow = entrancePeople.filter(p => p.picks_bakery).length;
+    const caddyNow = entrancePeople.filter(p => p.has_caddy).length;
+    document.getElementById('metric-time').innerText = timeStr;
+    document.getElementById('metric-entrance').innerText = entrancePeople.length;
+    document.getElementById('metric-bakery').innerText = bakeryNow;
+    document.getElementById('metric-caddy').innerText = caddyNow;
+    document.getElementById('metric-shop').innerText = data.shop.length;
+    document.getElementById('metric-completed').innerText = data.completed;
+
+    lanesCount = data.lanes.length;
+    let qCount = 0;
+    data.lanes.forEach(l => {
+        qCount += l.queue.length + (l.current ? 1 : 0);
+    });
+    document.getElementById('metric-queue').innerText = qCount;
+
+    const currentIds = new Set();
+
+    // 0. Process entrance people
+    entrancePeople.forEach(p => {
+        currentIds.add('entr_'+p.id);
+        const { px, py } = entrancePos(p.id, p);
+        updateEntity('entr_'+p.id, p, px, py, 'entrance');
+        // store entrance_progress on the entity
+        const e = entities.get('entr_'+p.id);
+        if (e) e.entrance_progress = p.entrance_progress || 0;
+    });
+
+    // 1. Process shoppers
+    data.shop.forEach(p => {
+        currentIds.add('shop_'+p.id);
+        const shopProgress = computeShopProgress(p, data.time);
+
+        const { px, py } = shopPathPos(shopProgress, p.id);
+        updateEntity('shop_'+p.id, p, px, py, 'shopping');
+    });
+    
+    // 2. Process lanes (queue and service)
+    data.lanes.forEach((lane, idx) => {
+        // Store wait data for the render loop
+        lanesData[lane.lane_id] = {
+            wait_sec:  lane.wait_sec || 0,
+            queue_len: lane.queue.length + (lane.current ? 1 : 0),
+        };
+
+        const STAT_H   = 28;
+        const LANE_BOX = Math.min(canvas.height * 0.13,
+                         Math.floor((canvas.height - 50) / Math.max(data.lanes.length,1)) - STAT_H - 6);
+        const slotH  = LANE_BOX + STAT_H + 6;
+        const boxY   = 42 + idx * slotH + STAT_H;
+        const laneX  = canvas.width * 0.80 + canvas.width * 0.09;
+        const laneY  = boxY + LANE_BOX / 2;
+
+        if (lane.current) {
+            currentIds.add('svc_'+lane.current.id);
+            updateEntity('svc_'+lane.current.id, lane.current, laneX + 25, laneY, 'service');
+        }
+
+        lane.queue.forEach((p, qIdx) => {
+            currentIds.add('q_'+p.id);
+            updateEntity('q_'+p.id, p, laneX - 30 - (qIdx * 25), laneY, 'queue');
+        });
+    });
+    
+    // 3. Remove stale
+    for (let key of entities.keys()) {
+        if (!currentIds.has(key)) {
+            entities.delete(key);
+        }
+    }
+}
+
+function updateEntity(key, data, tx, ty, simState) {
+    if (!entities.has(key)) {
+        let sx = tx - 50; 
+        if (simState === 'shopping') sx = canvas.width * 0.1;
+        entities.set(key, { ...data, x: sx, y: ty, tx, ty, state: simState });
+    } else {
+        const e = entities.get(key);
+        e.tx = tx;
+        e.ty = ty;
+        e.state = simState;
+        e.gender           = data.gender;
+        e.age              = data.age              || 35;
+        e.is_group         = data.is_group;
+        e.has_bag          = data.has_bag;
+        e.has_caddy        = data.has_caddy;
+        e.picks_bakery     = data.picks_bakery     || false;
+        e.is_express       = data.is_express       || false;
+        e.dwell_sec        = data.dwell_sec        || 0;
+        e.queue_wait_sec   = data.queue_wait_sec   || 0;
+        e.service_wait_sec = data.service_wait_sec || 0;
+    }
+}
+
+// ── Emoji helpers ────────────────────────────────────────────────────────────
+function personEmoji(e) {
+    if (e.is_group) return '👪';
+    const young = e.age < 25;
+    const old   = e.age > 65;
+    if (e.gender === 'female') return young ? '👧' : old ? '👵' : '👩';
+    return young ? '👦' : old ? '👴' : '👨';
+}
+
+function itemEmoji(e) {
+    if (e.has_caddy && e.picks_bakery)            return '🛒🥐';
+    if (e.has_caddy)                              return '🛒';
+    if (e.state === 'entrance' && e.picks_bakery) return '🥐';
+    if (e.is_express)                             return '⚡';
+    if (e.has_bag)                                return '🛍';
+    return null;
+}
+
+function clamp01(v) {
+    return Math.min(Math.max(v, 0), 1);
+}
+
+function lerp(a, b, t) {
+    return a + (b - a) * t;
+}
+
+function lerpPoint(a, b, t) {
+    return { px: lerp(a.px, b.px, t), py: lerp(a.py, b.py, t) };
+}
+
+function hashedOffsets(trackId) {
+    const h  = (trackId * 2654435761) >>> 0;
+    const h2 = (h * 1664525 + 1013904223) >>> 0;
+    const ox = ((h % 1000) / 1000 - 0.5);
+    const oy = ((h2 % 1000) / 1000 - 0.5);
+    return { ox, oy };
+}
+
+function entranceAnchor(trackId, rx, ry, spreadX = 0.0, spreadY = 0.0) {
+    const EW = canvas.width * 0.09;
+    const EH = canvas.height - 20;
+    const ex = 8, ey = 10;
+    const { ox, oy } = hashedOffsets(trackId);
+    return {
+        px: ex + EW * (rx + ox * spreadX),
+        py: ey + EH * (ry + oy * spreadY),
+    };
+}
+
+function lingerAround(anchor, trackId, progress, radiusX = 8, radiusY = 10) {
+    const h = (trackId * 1103515245 + 12345) >>> 0;
+    const phase = (h % 628) / 100;
+    return {
+        px: anchor.px + Math.cos(progress * Math.PI * 2 + phase) * radiusX,
+        py: anchor.py + Math.sin(progress * Math.PI * 2 + phase) * radiusY,
+    };
+}
+
+// ── Position inside the entrance zone — visibly route customers through
+//    bakery / caddy activities instead of parking them in one static point.
+function entrancePos(trackId, p) {
+    const progress = clamp01(p?.entrance_progress || 0);
+    const doorOutside = entranceAnchor(trackId, 0.32, 0.50, 0.02, 0.04);
+    const doorInside  = entranceAnchor(trackId, 0.78, 0.50, 0.02, 0.05);
+    const passZone    = entranceAnchor(trackId, 0.55, 0.50, 0.10, 0.10);
+    const bakeryZone  = entranceAnchor(trackId, 0.52, 0.23, 0.10, 0.10);
+    const caddyZone   = entranceAnchor(trackId, 0.52, 0.78, 0.10, 0.10);
+
+    if (p?.has_caddy && p?.picks_bakery) {
+        if (progress < 0.18) {
+            return lerpPoint(doorOutside, caddyZone, progress / 0.18);
+        }
+        if (progress < 0.46) {
+            return lingerAround(caddyZone, trackId, (progress - 0.18) / 0.28, 7, 9);
+        }
+        if (progress < 0.68) {
+            return lerpPoint(caddyZone, bakeryZone, (progress - 0.46) / 0.22);
+        }
+        if (progress < 0.90) {
+            return lingerAround(bakeryZone, trackId, (progress - 0.68) / 0.22, 8, 8);
+        }
+        return lerpPoint(bakeryZone, doorInside, (progress - 0.90) / 0.10);
+    }
+
+    if (p?.has_caddy) {
+        if (progress < 0.22) {
+            return lerpPoint(doorOutside, caddyZone, progress / 0.22);
+        }
+        if (progress < 0.74) {
+            return lingerAround(caddyZone, trackId, (progress - 0.22) / 0.52, 8, 10);
+        }
+        return lerpPoint(caddyZone, doorInside, (progress - 0.74) / 0.26);
+    }
+
+    if (p?.picks_bakery) {
+        if (progress < 0.22) {
+            return lerpPoint(doorOutside, bakeryZone, progress / 0.22);
+        }
+        if (progress < 0.74) {
+            return lingerAround(bakeryZone, trackId, (progress - 0.22) / 0.52, 8, 8);
+        }
+        return lerpPoint(bakeryZone, doorInside, (progress - 0.74) / 0.26);
+    }
+
+    if (progress < 0.45) {
+        return lerpPoint(doorOutside, passZone, progress / 0.45);
+    }
+    return lerpPoint(passZone, doorInside, (progress - 0.45) / 0.55);
+}
+
+// ── Ring colour by state ──────────────────────────────────────────────────────
+function ringColor(e) {
+    if (e.state === 'service')  return '#dc2626';
+    if (e.state === 'queue')    return '#f97316';
+    if (e.state === 'entrance') return '#22c55e';
+    return e.gender === 'female' ? '#f472b6' : '#38bdf8';
+}
+
+// ── Radius by age / state ─────────────────────────────────────────────────────
+function entityRadius(e) {
+    const base = e.state === 'service' ? 22
+               : e.is_group           ? 20
+               : e.age > 65           ? 19
+               : e.age < 25           ? 16
+               :                        18;
+    return base;
+}
+
+function drawEntity(ctx, e) {
+    const r     = entityRadius(e);
+    const color = ringColor(e);
+
+    // ── 1. Solid coloured disc — strongly visible on the dark floor ──────────
+    ctx.shadowBlur  = 0;
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, r + 2, 0, Math.PI * 2);
+    ctx.fillStyle = color;          // full ring color as fill
+    ctx.globalAlpha = 0.30;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // ── 3. Ring + glow (drawn after the disc so glow radiates outward) ─────
+    if      (e.state === 'service')  { ctx.shadowColor = '#dc2626'; ctx.shadowBlur = 20; }
+    else if (e.state === 'queue')    { ctx.shadowColor = '#f97316'; ctx.shadowBlur = 14; }
+    else if (e.state === 'entrance') { ctx.shadowColor = '#22c55e'; ctx.shadowBlur = 12; }
+
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = e.is_group ? 3 : 2.5;
+    ctx.stroke();
+    if (e.is_group) {
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, r + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = color + '55';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // ── 4. Person emoji — full opacity, full black fillStyle ──────────────
+    const EF = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",serif';
+    ctx.globalAlpha  = 1;
+    ctx.fillStyle    = '#000000';   // force opaque before fillText
+    ctx.font         = `${Math.round(r * 1.65)}px ${EF}`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(personEmoji(e), e.x, e.y + 1);
+
+    // ── 5. Item emoji — top-right corner ──────────────────────────────────
+    const item = itemEmoji(e);
+    if (item) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle   = '#000000';
+        ctx.font = `${Math.round(r * 1.55)}px ${EF}`;
+        ctx.fillText(item, e.x + r * 0.90, e.y - r * 0.90);
+    }
+
+    // Activity badge above ring (entrance only)
+    if (e.state === 'entrance') {
+        const actTxt   = e.picks_bakery && e.has_caddy ? 'CADDY + BAKERY'
+                       : e.picks_bakery               ? 'BAKERY'
+                       : e.has_caddy                  ? 'CADDY'
+                       :                  'ENTERING';
+        const actColor = e.picks_bakery && e.has_caddy ? '#c084fc'
+                       : e.picks_bakery               ? '#fbbf24'
+                       : e.has_caddy                  ? '#60a5fa'
+                       :                  '#22c55e';
+        ctx.font = 'bold 9px system-ui, sans-serif';
+        const aw = ctx.measureText(actTxt).width + 8;
+        const ah = 12, ay = e.y - r - 17;
+        ctx.fillStyle = 'rgba(10, 18, 35, 0.88)';
+        ctx.beginPath(); ctx.roundRect(e.x - aw/2, ay, aw, ah, 4); ctx.fill();
+        ctx.strokeStyle = actColor + '99'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.roundRect(e.x - aw/2, ay, aw, ah, 4); ctx.stroke();
+        ctx.fillStyle    = actColor;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(actTxt, e.x, ay + ah / 2);
+    }
+
+    // Progress arc (entrance only)
+    if (e.state === 'entrance' && e.entrance_progress > 0) {
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, r + 3, -Math.PI/2, -Math.PI/2 + Math.PI*2*e.entrance_progress);
+        ctx.strokeStyle = '#22c55eaa';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+    }
+
+    // Dwell / wait label — pill badge below the ring
+    const labelSec = e.state === 'entrance' ? e.dwell_sec
+                   : e.state === 'queue'    ? e.queue_wait_sec
+                   : e.state === 'service'  ? e.service_wait_sec
+                   : 0;
+    if (labelSec > 0) {
+        const labelColor = e.state === 'entrance' ? '#22c55e'
+                         : e.state === 'queue'    ? '#fbbf24'
+                         :                          '#f87171';
+        const labelTxt = fmtSec(labelSec);
+        ctx.font = 'bold 12px system-ui, sans-serif';
+        const tw = ctx.measureText(labelTxt).width;
+        const ph = 14, pw = tw + 10;
+        const px = e.x - pw / 2, py = e.y + r + 4;
+        // Dark pill background
+        ctx.fillStyle = 'rgba(10, 18, 35, 0.82)';
+        ctx.beginPath(); ctx.roundRect(px, py, pw, ph, 5); ctx.fill();
+        // Coloured border
+        ctx.strokeStyle = labelColor + '88'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.roundRect(px, py, pw, ph, 5); ctx.stroke();
+        // Text
+        ctx.fillStyle    = labelColor;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(labelTxt, e.x, py + ph / 2);
+    }
+    ctx.textBaseline = 'alphabetic';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SUPERMARKET FLOOR LAYOUT
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Shop area bounds (must match what renderLoop uses for lanes)
+function sa() {
+    return { x: canvas.width * 0.1 + 20, y: 10, w: canvas.width * 0.65, h: canvas.height - 20 };
+}
+
+// Serpentine customer path through 3 aisles (normalised within shop area 0-1)
+//  Enter left → top cross-aisle → down aisle 1 → bottom cross → up aisle 2
+//  → top cross → down aisle 3 → exit right
+const SHOP_PATH = [
+    [0.00, 0.50],  // enter shop from entrance door
+    [0.05, 0.50],
+    [0.05, 0.09],  // reach top cross-aisle
+    [0.25, 0.09],  // top of aisle 1
+    [0.25, 0.91],  // bottom of aisle 1  ↓
+    [0.50, 0.91],  // cross bottom → aisle 2
+    [0.50, 0.09],  // top of aisle 2     ↑
+    [0.75, 0.09],  // cross top → aisle 3
+    [0.75, 0.91],  // bottom of aisle 3  ↓
+    [1.00, 0.50],  // exit toward checkout
+];
+
+const AISLE_X_RELS = [0.25, 0.50, 0.75];
+const AISLE_DIRS   = ['↓',  '↑',  '↓'];
+
+const SHELF_DEFS = [
+    {
+        x1:0.07, x2:0.21,
+        label:'FRUITS & VEG',
+        accent:'#22c55e',
+        signBg:'#12321f',
+        shelfBody:'#2f3f2c',
+        floorTint:'rgba(34,197,94,0.05)',
+        colors:['#16a34a','#22c55e','#f97316','#ef4444','#fbbf24','#a3e635']
+    },
+    {
+        x1:0.30, x2:0.44,
+        label:'DAIRY & COLD',
+        accent:'#93c5fd',
+        signBg:'#12263d',
+        shelfBody:'#283544',
+        floorTint:'rgba(147,197,253,0.05)',
+        colors:['#bfdbfe','#93c5fd','#ddd6fe','#fde68a','#e0f2fe','#f0fdf4']
+    },
+    {
+        x1:0.56, x2:0.70,
+        label:'BEVERAGES',
+        accent:'#f59e0b',
+        signBg:'#37210f',
+        shelfBody:'#3c3127',
+        floorTint:'rgba(245,158,11,0.05)',
+        colors:['#dc2626','#ea580c','#ca8a04','#0369a1','#7c3aed','#065f46']
+    },
+    // x=0.75–1.00 left open as exit corridor to checkout
+];
+
+function shopPathPos(progress, trackId) {
+    const { x: sx, y: sy, w: sw, h: sh } = sa();
+    const N  = SHOP_PATH.length - 1;
+    const sp = Math.min(progress * N, N - 0.0001);
+    const si = Math.floor(sp);
+    const t  = sp - si;
+
+    const [rx1, ry1] = SHOP_PATH[si];
+    const [rx2, ry2] = SHOP_PATH[si + 1];
+
+    let px = sx + (rx1 + (rx2 - rx1) * t) * sw;
+    let py = sy + (ry1 + (ry2 - ry1) * t) * sh;
+
+    // Spread customers perpendicular to movement direction
+    const wob = (((trackId * 2654435761) >>> 0) % 9 - 4) * 7;
+    const dx = rx2 - rx1, dy = ry2 - ry1;
+    if (Math.abs(dx) > Math.abs(dy)) { py += wob; }
+    else                              { px += wob; }
+
+    return { px, py };
+}
+
+// ── Entrance: single automatic door, left side ────────────────────────────────
+function drawEntrance(ctx) {
+    const EW = canvas.width * 0.09;
+    const EH = canvas.height - 20;
+    const ex = 8, ey = 10;
+    const EF = '"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",serif';
+
+    // Door sits at vertical centre
+    const doorW = EW * 0.60, doorH = 34;
+    const doorX = ex + (EW - doorW) / 2;
+    const doorY = ey + EH / 2 - doorH / 2;
+
+    // Bakery zone: top → just above door (minus small gap + "ENTRÉE" sign)
+    const bakTop = ey + 18;
+    const bakBot = doorY - 26;        // leave room for ENTRÉE sign
+    const bakH   = bakBot - bakTop;
+
+    // Caddy zone: just below door → bottom
+    const rackTop = doorY + doorH + 22;
+    const rackBot = ey + EH - 6;
+    const rackH   = rackBot - rackTop;
+
+    // ── Building wall ─────────────────────────────────────────────────────
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(ex, ey, EW, EH, 8); ctx.clip();
+
+    ctx.fillStyle = '#0d1b2e';
+    ctx.fillRect(ex, ey, EW, EH);
+
+    // Tile grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 1;
+    for (let gx = ex; gx < ex+EW; gx+=18) { ctx.beginPath(); ctx.moveTo(gx,ey); ctx.lineTo(gx,ey+EH); ctx.stroke(); }
+    for (let gy = ey; gy < ey+EH; gy+=18) { ctx.beginPath(); ctx.moveTo(ex,gy); ctx.lineTo(ex+EW,gy); ctx.stroke(); }
+
+    // ── BAKERY stand ──────────────────────────────────────────────────────
+    if (bakH > 20) {
+        // Background fill — warm amber
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.18)';
+        ctx.fillRect(ex+2, bakTop, EW-4, bakH);
+
+        // Counter shelf line at the bottom of bakery
+        ctx.fillStyle = 'rgba(180, 120, 30, 0.70)';
+        ctx.fillRect(ex+2, bakBot - 5, EW-4, 5);
+
+        // Colourful product items on the shelf
+        const products = ['#f59e0b','#fb923c','#fde68a','#d97706','#fbbf24','#f97316'];
+        let px2 = ex + 5, pr = 0;
+        while (px2 + 7 < ex + EW - 4) {
+            pr = (pr * 1664525 + 1013904223) >>> 0;
+            const col = products[pr % products.length];
+            const iw = 5 + (pr % 5), ih = 6 + (pr % 5);
+            ctx.fillStyle = col;
+            ctx.globalAlpha = 0.85;
+            ctx.beginPath(); ctx.roundRect(px2, bakBot - 5 - ih - 2, iw, ih, 2); ctx.fill();
+            px2 += iw + 3;
+        }
+        ctx.globalAlpha = 1;
+
+        // Emoji + label — centred in zone
+        const midY = bakTop + bakH * 0.42;
+        ctx.globalAlpha  = 1;
+        ctx.fillStyle    = '#000000';
+        ctx.font         = `${Math.min(22, bakH * 0.38)}px ${EF}`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('🥐', ex + EW/2, midY);
+
+        ctx.font         = 'bold 9px system-ui, sans-serif';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle    = '#fbbf24';
+        ctx.fillText('BAKERY', ex + EW/2, bakTop + 3);
+
+        // Border
+        ctx.strokeStyle = 'rgba(251,191,36,0.55)'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(ex+2, bakTop, EW-4, bakH);
+    }
+
+    // ── CADDY rack ────────────────────────────────────────────────────────
+    if (rackH > 20) {
+        // Background fill — cool blue
+        ctx.fillStyle = 'rgba(96, 165, 250, 0.18)';
+        ctx.fillRect(ex+2, rackTop, EW-4, rackH);
+
+        // Rack bar at the top of zone
+        ctx.fillStyle = 'rgba(60, 100, 180, 0.70)';
+        ctx.fillRect(ex+2, rackTop, EW-4, 5);
+
+        // Stylised caddy silhouettes (simple rects + wheels)
+        const nCarts = Math.min(3, Math.floor((EW-10) / 20));
+        for (let i = 0; i < nCarts; i++) {
+            const cx2 = ex + 6 + i * ((EW-10) / nCarts);
+            const cy2 = rackTop + rackH * 0.4;
+            ctx.fillStyle = 'rgba(147,197,253,0.55)';
+            ctx.fillRect(cx2, cy2, 12, 8);
+            ctx.fillStyle = 'rgba(147,197,253,0.8)';
+            ctx.beginPath(); ctx.arc(cx2+2,  cy2+10, 2, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(cx2+10, cy2+10, 2, 0, Math.PI*2); ctx.fill();
+        }
+
+        // Emoji + label
+        const midY2 = rackTop + rackH * 0.62;
+        ctx.globalAlpha  = 1;
+        ctx.fillStyle    = '#000000';
+        ctx.font         = `${Math.min(36, rackH * 0.55)}px ${EF}`;
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('🛒', ex + EW/2, midY2);
+
+        ctx.font         = 'bold 9px system-ui, sans-serif';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle    = '#93c5fd';
+        ctx.fillText('CADDIES', ex + EW/2, rackBot - 3);
+
+        // Border
+        ctx.strokeStyle = 'rgba(96,165,250,0.55)'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(ex+2, rackTop, EW-4, rackH);
+    }
+
+    ctx.restore();
+
+    // Outer wall border
+    ctx.strokeStyle = '#1e3a5f'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(ex, ey, EW, EH, 8); ctx.stroke();
+
+    // ── Automatic sliding door ─────────────────────────────────────────────
+    ctx.fillStyle = '#1e3a5f';
+    ctx.fillRect(doorX - 4, doorY - 4, doorW + 8, doorH + 8);
+    const panelW = (doorW - 4) / 2;
+    const glassGrad = ctx.createLinearGradient(doorX, 0, doorX + panelW, 0);
+    glassGrad.addColorStop(0, 'rgba(147,210,255,0.35)');
+    glassGrad.addColorStop(1, 'rgba(147,210,255,0.12)');
+    ctx.fillStyle = glassGrad;
+    ctx.fillRect(doorX,              doorY, panelW, doorH);
+    ctx.fillRect(doorX + panelW + 4, doorY, panelW, doorH);
+    ctx.strokeStyle = 'rgba(147,210,255,0.55)'; ctx.lineWidth = 1;
+    ctx.strokeRect(doorX,              doorY, panelW, doorH);
+    ctx.strokeRect(doorX + panelW + 4, doorY, panelW, doorH);
+
+    // ENTRÉE sign + sensor
+    ctx.fillStyle = '#22c55e'; ctx.font = 'bold 9px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText('ENTRÉE', ex + EW/2, doorY - 10);
+    ctx.beginPath(); ctx.arc(ex + EW/2, doorY - 20, 3, 0, Math.PI*2);
+    ctx.fillStyle = '#22c55e'; ctx.fill();
+
+    // Arrow
+    ctx.fillStyle = '#22c55e'; ctx.font = '13px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText('→', ex + EW/2, doorY + doorH + 16);
+
+    // Panel label
+    ctx.fillStyle = '#64748b'; ctx.font = '600 8px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText('ENTRANCE', ex + EW/2, ey + 13);
+}
+
+// ── Main shop floor ───────────────────────────────────────────────────────────
+function drawProductFacing(ctx, x, y, w, h, colors, seedBase) {
+    const shelfCount = Math.max(4, Math.floor(h / 48));
+    const bandH = h / shelfCount;
+
+    for (let row = 0; row < shelfCount; row++) {
+        const rowTop = y + row * bandH;
+        const shelfY = rowTop + bandH - 6;
+
+        // shelf board
+        ctx.fillStyle = 'rgba(255,255,255,0.09)';
+        ctx.fillRect(x, shelfY, w, 2);
+
+        let px = x + 4;
+        let seed = seedBase + row * 9973;
+        while (px + 8 < x + w - 3) {
+            seed = (seed * 1664525 + 1013904223) >>> 0;
+            const col = colors[seed % colors.length];
+            const iw  = 7 + (seed % 10);
+            const ih  = 8 + ((seed >> 3) % 14);
+            const iy  = shelfY - ih;
+
+            ctx.fillStyle = col;
+            ctx.globalAlpha = 0.72 + ((seed >> 5) % 4) * 0.06;
+            ctx.beginPath();
+            ctx.roundRect(px, iy, iw, ih, 2);
+            ctx.fill();
+
+            // label strip
+            ctx.globalAlpha = 0.95;
+            ctx.fillStyle = 'rgba(255,255,255,0.18)';
+            ctx.fillRect(px + 1, iy + 2, Math.max(3, iw - 2), 1.5);
+            px += iw + 2;
+        }
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawGondola(ctx, shelf, bx, by, bw, bh, seedBase) {
+    const pad = 5;
+    const spineW = Math.max(10, bw * 0.10);
+    const faceGap = 3;
+    const faceW = (bw - spineW - faceGap * 2 - pad * 2) / 2;
+    const faceH = bh - 20;
+    const faceY = by + 10;
+    const leftX = bx + pad;
+    const rightX = bx + bw - pad - faceW;
+    const spineX = bx + (bw - spineW) / 2;
+
+    // Floor tint around the rayon
+    ctx.fillStyle = shelf.floorTint;
+    ctx.fillRect(bx - 10, by - 6, bw + 20, bh + 12);
+
+    // Main gondola shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.beginPath();
+    ctx.roundRect(bx + 2, by + 4, bw, bh, 6);
+    ctx.fill();
+
+    // Gondola body
+    ctx.fillStyle = shelf.shelfBody;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 6);
+    ctx.fill();
+
+    // Central metal spine
+    ctx.fillStyle = 'rgba(218,226,237,0.22)';
+    ctx.fillRect(spineX, faceY, spineW, faceH);
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    ctx.fillRect(spineX, faceY, 1.5, faceH);
+    ctx.fillRect(spineX + spineW - 1.5, faceY, 1.5, faceH);
+
+    // Left / right facings
+    ctx.fillStyle = 'rgba(8,15,28,0.46)';
+    ctx.beginPath(); ctx.roundRect(leftX, faceY, faceW, faceH, 4); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(rightX, faceY, faceW, faceH, 4); ctx.fill();
+    drawProductFacing(ctx, leftX + 2, faceY + 2, faceW - 4, faceH - 4, shelf.colors, seedBase + 11);
+    drawProductFacing(ctx, rightX + 2, faceY + 2, faceW - 4, faceH - 4, shelf.colors, seedBase + 197);
+
+    // Endcaps top / bottom
+    [['top', by - 10], ['bottom', by + bh - 12]].forEach(([_, ey]) => {
+        ctx.fillStyle = shelf.accent + '22';
+        ctx.beginPath();
+        ctx.roundRect(bx + 3, ey, bw - 6, 12, 4);
+        ctx.fill();
+        ctx.strokeStyle = shelf.accent + '88';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(bx + 3, ey, bw - 6, 12, 4);
+        ctx.stroke();
+    });
+
+    // Price rails
+    ctx.fillStyle = 'rgba(255,255,255,0.11)';
+    for (let i = 1; i <= 4; i++) {
+        const py = faceY + i * (faceH / 5) - 6;
+        ctx.fillRect(leftX + 1, py, faceW - 2, 1);
+        ctx.fillRect(rightX + 1, py, faceW - 2, 1);
+    }
+}
+
+function drawPromoIsland(ctx, x, y, w, h, label, accent, emoji) {
+    ctx.fillStyle = 'rgba(8,15,28,0.68)';
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, 8); ctx.fill();
+    ctx.strokeStyle = accent + '88';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, 8); ctx.stroke();
+
+    ctx.fillStyle = accent + '1f';
+    ctx.beginPath(); ctx.roundRect(x + 6, y + 6, w - 12, h - 12, 6); ctx.fill();
+
+    ctx.font = 'bold 18px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = accent;
+    ctx.fillText(emoji, x + w / 2, y + h * 0.42);
+
+    ctx.font = '600 9px system-ui, sans-serif';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(label, x + w / 2, y + h - 8);
+}
+
+function drawFloor(ctx) {
+    const { x: sx, y: sy, w: sw, h: sh } = sa();
+    const crossH   = sh * 0.11;
+    const shelfTop = sy + crossH;
+    const shelfBot = sy + sh - crossH;
+    const shelfH   = shelfBot - shelfTop;
+
+    // Floor base with soft supermarket tile gradient
+    const floorGrad = ctx.createLinearGradient(sx, sy, sx + sw, sy + sh);
+    floorGrad.addColorStop(0.00, '#0d1827');
+    floorGrad.addColorStop(0.45, '#101d2e');
+    floorGrad.addColorStop(1.00, '#0c1625');
+    ctx.fillStyle = floorGrad;
+    ctx.beginPath(); ctx.roundRect(sx, sy, sw, sh, 8); ctx.fill();
+
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(sx, sy, sw, sh, 8); ctx.clip();
+
+    // Floor tile grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.030)'; ctx.lineWidth = 1;
+    const T = 24;
+    for (let gx = sx; gx <= sx+sw; gx+=T) { ctx.beginPath(); ctx.moveTo(gx,sy); ctx.lineTo(gx,sy+sh); ctx.stroke(); }
+    for (let gy = sy; gy <= sy+sh; gy+=T) { ctx.beginPath(); ctx.moveTo(sx,gy); ctx.lineTo(sx+sw,gy); ctx.stroke(); }
+
+    // Main cross-aisles
+    ctx.fillStyle = 'rgba(203,213,225,0.06)';
+    ctx.fillRect(sx, sy, sw, crossH);
+    ctx.fillRect(sx, sy + sh - crossH, sw, crossH);
+    ctx.setLineDash([6, 6]); ctx.strokeStyle = 'rgba(148,163,184,0.14)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(sx,sy+crossH);   ctx.lineTo(sx+sw,sy+crossH);   ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx,sy+sh-crossH); ctx.lineTo(sx+sw,sy+sh-crossH); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Soft central walking glow
+    const aisleGlow = ctx.createLinearGradient(sx, 0, sx + sw, 0);
+    aisleGlow.addColorStop(0.0, 'rgba(0,0,0,0)');
+    aisleGlow.addColorStop(0.15, 'rgba(255,255,255,0.018)');
+    aisleGlow.addColorStop(0.50, 'rgba(255,255,255,0.032)');
+    aisleGlow.addColorStop(0.85, 'rgba(255,255,255,0.018)');
+    aisleGlow.addColorStop(1.0, 'rgba(0,0,0,0)');
+    ctx.fillStyle = aisleGlow;
+    ctx.fillRect(sx, shelfTop, sw, shelfH);
+
+    // Promo / seasonal islands near the entrance promenade
+    drawPromoIsland(ctx, sx + sw * 0.03, sy + crossH + 10, 58, 74, 'SEASONAL', '#f97316', '🍓');
+    drawPromoIsland(ctx, sx + sw * 0.03, sy + sh - crossH - 86, 58, 74, 'OFFERS', '#22c55e', '💸');
+
+    // ── Shelf units ────────────────────────────────────────────────────────
+    SHELF_DEFS.forEach((shelf, si) => {
+        const bx = sx + shelf.x1 * sw;
+        const bw = (shelf.x2 - shelf.x1) * sw;
+        drawGondola(ctx, shelf, bx, shelfTop + 10, bw, shelfH - 20, si * 7919 + 17);
+
+        // Hanging rayon sign
+        const signW = Math.min(110, bw + 14);
+        const signX = bx + bw / 2 - signW / 2;
+        const signY = sy + 8;
+        ctx.fillStyle = shelf.signBg;
+        ctx.beginPath(); ctx.roundRect(signX, signY, signW, 18, 5); ctx.fill();
+        ctx.strokeStyle = shelf.accent + 'aa'; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.roundRect(signX, signY, signW, 18, 5); ctx.stroke();
+        ctx.fillStyle = shelf.accent; ctx.font = '600 9px system-ui, sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(shelf.label, bx + bw/2, signY + 12);
+
+        // Aisle hanger rods
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bx + bw/2 - signW * 0.28, signY + 18);
+        ctx.lineTo(bx + bw/2 - signW * 0.28, sy + crossH - 2);
+        ctx.moveTo(bx + bw/2 + signW * 0.28, signY + 18);
+        ctx.lineTo(bx + bw/2 + signW * 0.28, sy + crossH - 2);
+        ctx.stroke();
+    });
+
+    // ── Aisle lighting + direction arrows ─────────────────────────────────
+    AISLE_X_RELS.forEach((xr, i) => {
+        const ax = sx + xr * sw;
+
+        // Overhead spotlights
+        [0.30, 0.65].forEach(yr => {
+            const ay = shelfTop + yr * shelfH;
+            const g = ctx.createRadialGradient(ax, ay, 0, ax, ay, 52);
+            g.addColorStop(0, 'rgba(210,235,255,0.10)');
+            g.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = g;
+            ctx.beginPath(); ctx.arc(ax, ay, 52, 0, Math.PI*2); ctx.fill();
+        });
+
+        // Direction arrow and aisle mark
+        ctx.fillStyle = '#60a5fa'; ctx.font = 'bold 15px system-ui, sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(AISLE_DIRS[i], ax, sy + crossH - 6);
+
+        ctx.fillStyle = 'rgba(15,23,42,0.92)';
+        ctx.beginPath(); ctx.roundRect(ax - 28, sy + sh - crossH + 3, 56, 14, 5); ctx.fill();
+        ctx.strokeStyle = 'rgba(148,163,184,0.25)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.roundRect(ax - 28, sy + sh - crossH + 3, 56, 14, 5); ctx.stroke();
+        ctx.fillStyle = '#cbd5e1'; ctx.font = '600 8px system-ui, sans-serif';
+        ctx.fillText('RAYON ' + (i+1), ax, sy + sh - crossH + 13);
+    });
+
+    // Exit corridor / checkout promenade (right side, no shelf)
+    const exitX = sx + 0.77 * sw;
+    const exitW = sw - 0.77 * sw;
+    const exitGrad = ctx.createLinearGradient(exitX, 0, exitX + exitW, 0);
+    exitGrad.addColorStop(0, 'rgba(239,68,68,0.05)');
+    exitGrad.addColorStop(1, 'rgba(248,113,113,0.10)');
+    ctx.fillStyle = exitGrad;
+    ctx.fillRect(exitX, shelfTop, exitW, shelfH);
+
+    // queue guide rails
+    ctx.strokeStyle = 'rgba(248,113,113,0.18)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([8, 8]);
+    for (let xx = exitX + 14; xx < sx + sw - 8; xx += 28) {
+        ctx.beginPath();
+        ctx.moveTo(xx, shelfTop + 10);
+        ctx.lineTo(xx, shelfBot - 10);
+        ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#fecaca'; ctx.font = '700 10px system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('TO CHECKOUT', exitX + exitW / 2, shelfTop + shelfH / 2);
+    ctx.fillStyle = '#fca5a5'; ctx.font = '600 9px system-ui, sans-serif';
+    ctx.fillText('priority path to caisse', exitX + exitW / 2, shelfTop + shelfH / 2 + 15);
+
+    ctx.restore();
+
+    // Outer border
+    ctx.strokeStyle = 'rgba(59,130,246,0.18)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(sx, sy, sw, sh, 8); ctx.stroke();
+
+    // Label
+    ctx.fillStyle = '#3b82f6'; ctx.font = '600 13px system-ui, sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText('Shop Floor', sx + 10, sy + 16);
+}
+
+function renderLoop() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw supermarket floor + entrance
+    drawEntrance(ctx);
+    drawFloor(ctx);
+    
+    const lx     = canvas.width * 0.80;
+    const lw     = canvas.width * 0.18;
+    const STAT_H = 28;
+    const LANE_BOX = Math.min(canvas.height * 0.13,
+                     Math.floor((canvas.height - 50) / Math.max(lanesCount,1)) - STAT_H - 6);
+    const slotH  = LANE_BOX + STAT_H + 6;
+
+    // CHECKOUT section header
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#ef4444'; ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.fillText('🏪 CHECKOUT', lx + 6, 22);
+
+    for (let i = 0; i < lanesCount; i++) {
+        const statsY = 32 + i * slotH;
+        const boxY   = statsY + STAT_H;
+        const lH     = LANE_BOX;
+
+        const ld = lanesData[i] || { wait_sec: 0, queue_len: 0 };
+        const waitSec = ld.wait_sec;
+        const waitColor = waitSec <= 0  ? '#64748b'
+                        : waitSec < 120 ? '#22c55e'
+                        : waitSec < 300 ? '#f97316'
+                        :                 '#ef4444';
+
+        // ── Stats row (ABOVE the lane box) ────────────────────────────────
+        ctx.fillStyle = '#94a3b8'; ctx.font = 'bold 11px system-ui, sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText('LANE ' + (i + 1), lx + 5, statsY + 14);
+
+        ctx.fillStyle = waitColor; ctx.font = 'bold 14px system-ui, sans-serif'; ctx.textAlign = 'right';
+        ctx.fillText(waitSec > 0 ? '⏱ ' + fmtSec(waitSec) : '— idle', lx + lw - 5, statsY + 14);
+
+        if (ld.queue_len > 0) {
+            ctx.fillStyle = '#475569'; ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'left';
+            ctx.fillText(ld.queue_len + ' waiting', lx + 5, statsY + 26);
+        }
+
+        // ── Lane box (visual only, no text inside) ─────────────────────────
+        ctx.fillStyle = waitSec <= 0  ? 'rgba(100,116,139,0.07)'
+                      : waitSec < 120 ? 'rgba(34,197,94,0.10)'
+                      : waitSec < 300 ? 'rgba(249,115,22,0.10)'
+                      :                 'rgba(239,68,68,0.14)';
+        ctx.strokeStyle = waitColor; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.roundRect(lx, boxY, lw, lH, 8);
+        ctx.fill(); ctx.stroke();
+
+        // Subtle "caisse" counter divider inside the box
+        ctx.strokeStyle = waitColor + '44'; ctx.lineWidth = 1;
+        const cx = lx + lw * 0.55;
+        ctx.beginPath(); ctx.moveTo(cx, boxY + 6); ctx.lineTo(cx, boxY + lH - 6); ctx.stroke();
+    }
+    ctx.textAlign = 'left';
+    
+    for (let e of entities.values()) {
+        e.x += (e.tx - e.x) * 0.15;
+        e.y += (e.ty - e.y) * 0.15;
+        drawEntity(ctx, e);
+    }
+    
+    requestAnimationFrame(renderLoop);
+}
+
+initWebSocket();
+requestAnimationFrame(renderLoop);
+    </script>
+</body>
+</html>

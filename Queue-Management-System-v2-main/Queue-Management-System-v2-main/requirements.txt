@@ -23,3 +23,6 @@ requests
 pandas
 tqdm
 uniface
+pygame
+streamlit
+plotly

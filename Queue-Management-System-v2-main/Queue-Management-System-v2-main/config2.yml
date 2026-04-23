@@ -3,25 +3,29 @@ debug_mode: True
 
 expect_fps: 3
 
-max_age: 6
+max_age: 3
 
-max_distance_between_points: 6
+max_distance_between_points: 3
 
 save_one: True
 
-min_iou: 0.01
+# Set to False to disable saving debug snapshot images to disk
+save_snapshots: False
+
+min_iou: 0.1
 
 tip_offset: 0.5
 
+entry_confirmation_seconds: 1.5  # delay before a person track becomes a counted entry
+counting_mode: line_crossing      # roi | line_crossing
+entry_line_direction: forward    # forward | reverse | any
+entry_line_points: [[185, 231], [470, 227]]   # tuned to door zone
+
+# Run face/age/gender analysis only every N frames (1 = every frame, 3 = every 3rd frame)
+# Increase to reduce CPU load on the entrance pipeline
+face_skip_frames: 3
+
 min_elapsed_time: 10 #seconds
 
-TaxiSign: 
-- 0.5
-- 150
-- 0.5
-
-allowed_countries:
-- FRA
-
-country_sync_window: 5
+snapshot_interval: 10  # seconds between queue_state_snapshots writes
 

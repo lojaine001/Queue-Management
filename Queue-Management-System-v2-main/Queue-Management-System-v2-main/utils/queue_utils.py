@@ -67,14 +67,14 @@ class PersonDetectionLogger:
             self.tracking_section_started = True
         
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.log_item(f"[{ts}] NEW    | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Age: {age:>5.2f}s | Conf: {conf:.2f}")
+        self.log_item(f"[{ts}] NEW    | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Track_Age: {age:>5.2f}s | Conf: {conf:.2f}")
     
     def log_tracking_update(self, track_id, track_dur, age, conf, iou=None, is_peak=False):
         """Log tracking update"""
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         iou_str = f" | IoU: {iou:.3f}" if iou is not None else ""
         peak_str = " ⭐" if is_peak else ""
-        self.log_item(f"[{ts}] UPDATE | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Age: {age:>5.2f}s | Conf: {conf:.2f}{iou_str}{peak_str}")
+        self.log_item(f"[{ts}] UPDATE | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Track_Age: {age:>5.2f}s | Conf: {conf:.2f}{iou_str}{peak_str}")
     
     def end_block(self):
         """Print detection block footer"""
