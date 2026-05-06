@@ -221,6 +221,39 @@ class DBLogger:
         except Exception as e:
             print(f"[DB] Snapshot error: {e}")
 
+    def _ensure_lane_events(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS lane_events (
+                id           BIGSERIAL,
+                timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                camera_id    VARCHAR(100),
+                active_lanes INT         NOT NULL,
+                note         TEXT
+            )
+        """)
+        try:
+            self.cursor.execute("""
+                SELECT create_hypertable('lane_events', 'timestamp',
+                    if_not_exists => TRUE, migrate_data => TRUE)
+            """)
+        except Exception:
+            pass
+
+    def get_current_lanes(self, camera_id, default=2):
+        """Return the most recently logged active lane count for this camera."""
+        if not self.enabled:
+            return default
+        try:
+            self.cursor.execute("""
+                SELECT active_lanes FROM lane_events
+                WHERE camera_id = %s
+                ORDER BY timestamp DESC LIMIT 1
+            """, (camera_id,))
+            row = self.cursor.fetchone()
+            return row[0] if row else default
+        except Exception:
+            return default
+
     def log_service_event(self, camera_id, track_id, total_dwell_sec):
         """Record a service completion (customer leaves). Used for future exit-ROI integration."""
         if not self.enabled:

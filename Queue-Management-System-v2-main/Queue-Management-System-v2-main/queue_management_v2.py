@@ -4,13 +4,12 @@ import sys
 from collections import deque
 from tracemalloc import start
 import cv2
-import copy
 import time
 import numpy as np
 import requests
 import argparse
 from datetime import datetime
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 import json
 import norfair
 from shapely.geometry import Polygon, Point
@@ -116,15 +115,75 @@ class OnnxDetector:
 
     def __call__(self, image):
         h, w, _ = image.shape
-        image = copy.deepcopy(image)
         boxes = self.model.detect(image, h, w)
         return boxes
 
 
-def _line_side(cx: float, cy: float, p1: list, p2: list) -> int:
-    """Return +1 or -1 indicating which side of the line segment p1→p2 the point is on."""
-    cross = (p2[0] - p1[0]) * (cy - p1[1]) - (p2[1] - p1[1]) * (cx - p1[0])
-    return 1 if cross >= 0 else -1
+class FaceWorker:
+    """Runs face analysis in a dedicated background thread.
+
+    Main loop calls submit(frame) — non-blocking, always returns immediately.
+    The worker processes the most recent frame at its own pace (~1 fps given
+    the cost of face analysis). results() always returns the latest cached output.
+    """
+
+    def __init__(self, analyzer):
+        self._analyzer  = analyzer
+        self._frame     = None
+        self._results   = []
+        self._lock      = Lock()
+        self._trigger   = Event()
+        self._total_ms  = 0.0
+        self._calls     = 0
+        self._thread    = Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def submit(self, frame):
+        """Pass the latest frame to the worker. Non-blocking; drops old frame if busy."""
+        with self._lock:
+            self._frame = frame.copy()
+        self._trigger.set()
+
+    def results(self):
+        """Return the latest cached face results. Always instant."""
+        with self._lock:
+            return list(self._results)
+
+    def take_stats(self):
+        """Return (avg_ms_per_call, n_calls) since the last take_stats, then reset."""
+        with self._lock:
+            n  = self._calls
+            ms = self._total_ms
+            self._calls    = 0
+            self._total_ms = 0.0
+        return (ms / n if n else 0.0), n
+
+    def _run(self):
+        while True:
+            self._trigger.wait()
+            self._trigger.clear()
+            with self._lock:
+                frame = self._frame
+            if frame is None:
+                continue
+            t0    = time.time()
+            faces = self._analyzer.analyze(frame)
+            elapsed_ms = (time.time() - t0) * 1000
+            with self._lock:
+                self._results   = faces
+                self._total_ms += elapsed_ms
+                self._calls    += 1
+
+
+def _line_signed_dist(cx: float, cy: float, p1: list, p2: list) -> float:
+    """Return signed perpendicular distance from (cx,cy) to the infinite line through p1→p2.
+    Positive = side +1, negative = side -1. Magnitude = pixels from the line."""
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = (dx * dx + dy * dy) ** 0.5
+    if length == 0:
+        return 0.0
+    return (dy * cx - dx * cy + p2[0] * p1[1] - p2[1] * p1[0]) / length
 
 
 def commandline_args():
@@ -197,7 +256,7 @@ def main():
 
     camID = stored_config.get('camID', 'camera1')
     ip_address = stored_config.get('ip_address', '192.168.1.136:1033/axis-media/media.amp')
-    active_lanes = stored_config.get('active_lanes', 2)
+
 
     endpoint = stored_config.get('endpoint', 'http://127.0.0.1:5000/vsens')
     mode = stored_config.get('mode', 'restAPI')
@@ -222,10 +281,13 @@ def main():
     expect_fps = config2.get('expect_fps', 3)
     min_elapsed_time = config2.get('min_elapsed_time', 1)
     SNAPSHOT_INTERVAL = config2.get('snapshot_interval', 10)
-    face_skip_frames     = max(1, int(config2.get('face_skip_frames', 1)))
     counting_mode        = config2.get('counting_mode', 'roi').lower()
     entry_line_points    = config2.get('entry_line_points', [])
     entry_line_direction = config2.get('entry_line_direction', 'forward').lower()
+    entry_line_width     = config2.get('entry_line_width', 0)
+    entry_line_min_disp  = config2.get('entry_line_min_displacement', 10)
+    mask_zones           = config2.get('mask_zones', [])
+    active_lanes         = config2.get('active_lanes', 2)
 
     # Validate line crossing config
     line_p1 = line_p2 = None
@@ -266,6 +328,7 @@ def main():
         detector=RetinaFace(confidence_threshold=face_score),
         age_gender=AgeGender(),
     )
+    face_worker = FaceWorker(face_analyzer)
 
     tracker = Tracker(
         distance_function=iou,
@@ -319,14 +382,19 @@ def main():
     person_loggers = {}
     track_start_times = {}
     last_snapshot_time = 0.0
+
+    # ── Inference timing accumulators ─────────────────────────────────────────
+    _t_detect = _t_track = _t_total = 0.0
+    _t_frames_counted = 0
+    _t_last_report = time.time()
+    _T_REPORT_EVERY = 30.0     # seconds between timing reports
     track_data = {}        # track_id -> {gender, age, confidence, best_conf} accumulated while alive
     prev_track_ids = set() # track_ids active in the previous frame
     counted_entry_times = deque()
-    track_prev_side: dict[int, int] = {}   # line crossing: last known side per track
-    track_crossed:   set[int]       = set()  # tracks that already triggered a count
-    track_cross_candidate: dict[int, int] = {}  # track_id → frames held on new side
-    _last_faces:     list           = []   # cached face results for skip-frame
-    _frame_count:    int            = 0    # frame counter for skip-frame logic
+    track_prev_side: dict[int, int]   = {}   # line crossing: last known side per track
+    track_crossed:   set[int]         = set()  # tracks that already triggered a count
+    track_cross_candidate: dict       = {}   # track_id → (from, to, count) for thin-line mode
+    band_entry_dist: dict[int, float] = {}   # track_id → signed_dist when it entered the band
 
     try:
         while True:
@@ -339,9 +407,13 @@ def main():
                 continue
 
             im0 = cv2.resize(im0, (640, 480))
+            for _mz in mask_zones:
+                cv2.fillPoly(im0, [np.array(_mz, dtype=np.int32)], (0, 0, 0))
             viz_img = im0.copy()
 
+            _t0 = time.time()
             detections = detector(im0)
+            _t_detect += time.time() - _t0
 
             f_dets = []; f_confs = []; f_genders = []; f_ages = []
             p_dets = []; p_confs = []
@@ -377,7 +449,6 @@ def main():
                 if counting_mode == 'line_crossing':
                     p_dets.append(p_box)
                     p_confs.append(p_score)
-                    cv2.rectangle(viz_img, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 255, 0), 1)
                     continue
 
                 ROI_Incl = False
@@ -400,15 +471,18 @@ def main():
                     if tip_point:
                         cv2.circle(viz_img, ((int(tip_point.x), int(tip_point.y))), 1, (0, 0, 255), -1, cv2.LINE_AA)
 
-            _frame_count += 1
+            # Submit current frame to face worker (non-blocking).
+            # Worker runs in background; results() returns latest cached output.
             if len(p_dets) > 0:
-                if _frame_count % face_skip_frames == 0:
-                    _last_faces = face_analyzer.analyze(im0)
-                faces = _last_faces
-                f_dets   = [f.bbox       for f in faces]
-                f_confs  = [f.confidence for f in faces]
-                f_genders = [f.sex       for f in faces]
-                f_ages   = [f.age        for f in faces]
+                face_worker.submit(im0)
+            min_face_size = config2.get('min_face_size', 40)
+            faces     = [f for f in face_worker.results()
+                         if (f.bbox[2] - f.bbox[0]) >= min_face_size
+                         and (f.bbox[3] - f.bbox[1]) >= min_face_size]
+            f_dets    = [f.bbox       for f in faces]
+            f_confs   = [f.confidence for f in faces]
+            f_genders = [f.sex        for f in faces]
+            f_ages    = [f.age        for f in faces]
 
             min_iou = config2.get('min_iou', 0.5)
 
@@ -451,7 +525,9 @@ def main():
                         cv2.putText(viz_img, 'BAG', (int(box[0]), int(box[1]) - 5),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
 
+            _t0 = time.time()
             tracked_objects = tracker.update(detections=norfair_detections)
+            _t_track += time.time() - _t0
 
             current_time = time.time()
             current_track_ids = set()
@@ -464,6 +540,12 @@ def main():
                 _raw = obj.estimate
                 _cx = int((_raw[0][0] + _raw[1][0]) / 2)
                 _cy = int((_raw[0][1] + _raw[1][1]) / 2)
+
+                if obj.hit_counter >= max_age:
+                    _x1, _y1 = int(_raw[0][0]), int(_raw[0][1])
+                    _x2, _y2 = int(_raw[1][0]), int(_raw[1][1])
+                    _id_color = (0, 200, 0) if track_id in track_crossed else (0, 140, 255)
+                    cv2.rectangle(viz_img, (_x1, _y1), (_x2, _y2), _id_color, 2)
 
                 if track_id not in track_start_times:
                     track_start_times[track_id] = current_time
@@ -481,39 +563,97 @@ def main():
 
                 # ── Line crossing check ───────────────────────────────────────
                 if counting_mode == 'line_crossing' and line_p1 and line_p2:
-                    curr_side = _line_side(_cx, _cy, line_p1, line_p2)
-                    systems_logger.debug(f"[LINE] id={track_id} pos=({_cx},{_cy}) side={curr_side}")
+                    signed_dist = _line_signed_dist(_cx, _cy, line_p1, line_p2)
+                    half_band   = entry_line_width / 2
+                    in_band     = (half_band > 0 and abs(signed_dist) <= half_band)
+                    curr_side   = 1 if signed_dist >= 0 else -1
+                    systems_logger.debug(
+                        f"[LINE] id={track_id} pos=({_cx},{_cy}) "
+                        f"side={curr_side} dist={signed_dist:.1f}"
+                        + (" [IN BAND]" if in_band else "")
+                    )
+
                     if track_id not in track_prev_side:
-                        # New track: if it appears already on the entry side, count immediately
-                        # (person walked through door before tracker picked them up)
-                        already_entered = (
-                            (entry_line_direction == 'forward' and curr_side == 1)
-                            or (entry_line_direction == 'reverse' and curr_side == -1)
-                            or entry_line_direction == 'any'
-                        )
-                        if already_entered and track_id not in track_crossed:
-                            counted_entry_times.append(current_time)
-                            track_crossed.add(track_id)
-                            systems_logger.info(f"[COUNTER] New track already past line id={track_id} side={curr_side}")
+                        # First frame for this track — check near-line birth on inside.
+                        # Only count when clearly past the line (not in band), so we don't
+                        # count someone born right inside the band who then bounces back.
+                        if (not in_band and curr_side == 1
+                                and track_id not in track_crossed
+                                and entry_line_direction in ('forward', 'any')):
+                            line_y = (line_p1[1] + line_p2[1]) / 2
+                            if abs(_cy - line_y) <= 60:
+                                counted_entry_times.append(current_time)
+                                track_crossed.add(track_id)
+                                systems_logger.info(
+                                    f"[COUNTER] Near-line birth id={track_id} "
+                                    f"at ({_cx},{_cy}) line_y={line_y:.0f} — counted as entry"
+                                )
                     elif track_id not in track_crossed:
                         prev_side = track_prev_side[track_id]
-                        if prev_side != curr_side:
-                            # Require 2 consecutive frames on new side to avoid glitches
-                            track_cross_candidate[track_id] = track_cross_candidate.get(track_id, 0) + 1
-                            if track_cross_candidate[track_id] >= 2:
-                                crossed_forward = (prev_side == -1 and curr_side == 1)
-                                should_count = (
-                                    entry_line_direction == 'any'
-                                    or (entry_line_direction == 'forward' and crossed_forward)
-                                    or (entry_line_direction == 'reverse' and not crossed_forward)
-                                )
-                                if should_count:
-                                    counted_entry_times.append(current_time)
-                                    track_crossed.add(track_id)
-                                    systems_logger.info(f"[COUNTER] Line crossed id={track_id} direction={'fwd' if crossed_forward else 'rev'}")
-                                track_cross_candidate.pop(track_id, None)
+                        if entry_line_width > 0:
+                            # ── Band / displacement mode (Arnaud) ─────────────
+                            if in_band:
+                                if track_id not in band_entry_dist and prev_side == -1:
+                                    # Just entered band from outside — record entry point
+                                    band_entry_dist[track_id] = signed_dist
+                                if track_id in band_entry_dist:
+                                    displacement = signed_dist - band_entry_dist[track_id]
+                                    if displacement >= entry_line_min_disp:
+                                        if entry_line_direction in ('forward', 'any'):
+                                            counted_entry_times.append(current_time)
+                                            track_crossed.add(track_id)
+                                            band_entry_dist.pop(track_id, None)
+                                            systems_logger.info(
+                                                f"[COUNTER] Band displacement id={track_id} "
+                                                f"disp={displacement:.1f}px"
+                                            )
+                            else:
+                                if track_id in band_entry_dist:
+                                    # Was tracking inside band — now exited
+                                    if curr_side == 1 and entry_line_direction in ('forward', 'any'):
+                                        # Exited to inside without reaching min_disp — still count
+                                        counted_entry_times.append(current_time)
+                                        track_crossed.add(track_id)
+                                        systems_logger.info(
+                                            f"[COUNTER] Band full-cross id={track_id}"
+                                        )
+                                    band_entry_dist.pop(track_id, None)
+                                elif prev_side == -1 and curr_side == 1:
+                                    # Fast mover: skipped band entirely in one frame
+                                    if entry_line_direction in ('forward', 'any'):
+                                        counted_entry_times.append(current_time)
+                                        track_crossed.add(track_id)
+                                        systems_logger.info(
+                                            f"[COUNTER] Fast cross id={track_id} — skipped band"
+                                        )
                         else:
-                            track_cross_candidate.pop(track_id, None)
+                            # ── Thin-line mode: 2-frame debounce ─────────────
+                            if prev_side != curr_side:
+                                track_cross_candidate[track_id] = (prev_side, curr_side, 1)
+                            elif track_id in track_cross_candidate:
+                                from_side, to_side, count = track_cross_candidate[track_id]
+                                if curr_side == to_side:
+                                    count += 1
+                                    if count >= 2:
+                                        crossed_forward = (from_side == -1 and to_side == 1)
+                                        should_count = (
+                                            entry_line_direction == 'any'
+                                            or (entry_line_direction == 'forward' and crossed_forward)
+                                            or (entry_line_direction == 'reverse' and not crossed_forward)
+                                        )
+                                        if should_count:
+                                            counted_entry_times.append(current_time)
+                                            track_crossed.add(track_id)
+                                            systems_logger.info(f"[COUNTER] Line crossed id={track_id} direction={'fwd' if crossed_forward else 'rev'}")
+                                        track_cross_candidate.pop(track_id, None)
+                                    else:
+                                        track_cross_candidate[track_id] = (from_side, to_side, count)
+                                else:
+                                    track_cross_candidate.pop(track_id, None)
+
+                    # Always record current side (even in band) so the track is known
+                    # next frame. When in_band we still update so the first-frame branch
+                    # doesn't keep firing.
                     track_prev_side[track_id] = curr_side
 
                 person_conf = 0.0
@@ -602,6 +742,7 @@ def main():
                 track_prev_side.pop(track_id, None)
                 track_crossed.discard(track_id)
                 track_cross_candidate.pop(track_id, None)
+                band_entry_dist.pop(track_id, None)
 
             prev_track_ids = current_track_ids
 
@@ -615,10 +756,6 @@ def main():
                 max_dwell = float(max(dwells)) if dwells else 0.0
                 db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell, active_lanes)
                 last_snapshot_time = current_time
-
-            elapsed_time = time.time() - start_time
-            sleep_time = max(0, (1.0 / thread_fps) - elapsed_time)
-            time.sleep(sleep_time)
 
             while counted_entry_times and current_time - counted_entry_times[0] > 86400:
                 counted_entry_times.popleft()
@@ -641,6 +778,8 @@ def main():
             )
 
             end_time = time.time()
+            _t_total += end_time - start_time
+            _t_frames_counted += 1
 
             if args.save_demo:
                 video_writer.write(viz_img)
@@ -648,14 +787,37 @@ def main():
             FPS = max(round(1 / (end_time - start_time)), 1)
             write_text(viz_img, f"FPS: {FPS}", position="top_left")
 
-            if int(time.time()) % 10 == 0:
-                print(f"INFO: Performance - FPS: {FPS:.1f} | Latency: {(end_time - start_time) * 1000:.0f}ms")
+            # ── Periodic per-stage timing report ──────────────────────────────
+            if end_time - _t_last_report >= _T_REPORT_EVERY and _t_frames_counted > 0:
+                n = _t_frames_counted
+                avg_total     = _t_total  / n * 1000
+                avg_detect    = _t_detect / n * 1000
+                avg_track     = _t_track  / n * 1000
+                avg_face, face_calls = face_worker.take_stats()
+                effective_fps = n / _t_total if _t_total > 0 else 0.0
+                report = (
+                    f"[TIMING] {n} frames over {_T_REPORT_EVERY:.0f}s | "
+                    f"effective FPS={effective_fps:.2f} | "
+                    f"loop={avg_total:.0f}ms | "
+                    f"YOLO={avg_detect:.0f}ms | "
+                    f"tracker={avg_track:.0f}ms | "
+                    f"face={avg_face:.0f}ms/call ({face_calls} calls, async background thread)"
+                )
+                print(report)
+                systems_logger.info(report)
+                _t_detect = _t_track = _t_total = 0.0
+                _t_frames_counted = 0
+                _t_last_report = end_time
 
             if args.view_img:
                 im_show = cv2.resize(viz_img, (800, 600), interpolation=cv2.INTER_AREA)
                 cv2.imshow('Queue Management System', im_show)
                 if cv2.waitKey(1) in {ord("q"), ord("Q"), 27}:
                     break
+
+            elapsed_time = time.time() - start_time
+            sleep_time = max(0, (1.0 / thread_fps) - elapsed_time)
+            time.sleep(sleep_time)
 
     except Exception as e:
         print(f"{get_datetime_str()} ERROR: An exception occurred - {str(e)}")

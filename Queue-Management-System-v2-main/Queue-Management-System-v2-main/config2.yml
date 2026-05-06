@@ -20,6 +20,8 @@ entry_confirmation_seconds: 1.5  # delay before a person track becomes a counted
 counting_mode: line_crossing      # roi | line_crossing
 entry_line_direction: forward    # forward | reverse | any
 entry_line_points: [[185, 231], [470, 227]]   # tuned to door zone
+entry_line_width: 20         # band total width in pixels (half on each side of line)
+entry_line_min_displacement: 10  # min forward movement (px) inside the band to confirm a crossing
 
 # Run face/age/gender analysis only every N frames (1 = every frame, 3 = every 3rd frame)
 # Increase to reduce CPU load on the entrance pipeline
@@ -27,5 +29,14 @@ face_skip_frames: 3
 
 min_elapsed_time: 10 #seconds
 
+min_face_size: 0  # 0 = no size filter (all detected faces pass through)
+
 snapshot_interval: 10  # seconds between queue_state_snapshots writes
+
+# Polygons filled with black before YOLO runs — use pick_zone.py to get coordinates
+mask_zones:
+  - - [2, 154]
+    - [217, 156]
+    - [225, 471]
+    - [1, 475]
 

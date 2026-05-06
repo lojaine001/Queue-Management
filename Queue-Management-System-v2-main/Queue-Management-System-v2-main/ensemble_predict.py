@@ -74,12 +74,22 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
     conn = psycopg2.connect(**DB_CONFIG)
     print(f"[Ensemble] Connected to PostgreSQL (Source: {source}) ✓")
 
+    # Clean data only: Apr 13-15 (before overcounting) + Apr 21 onwards (current pipeline)
+    clean_filter = """(
+        (timestamp >= '2026-04-13' AND timestamp < '2026-04-16')
+        OR timestamp >= '2026-04-21'
+    ) AND dwell_seconds >= 10"""
+    if where_clause:
+        data_filter = f"{where_clause} AND {clean_filter}"
+    else:
+        data_filter = f"WHERE {clean_filter}"
+
     query = f"""
         SELECT
             time_bucket('{BUCKET_MINUTES} minutes', timestamp) AS bucket,
             COUNT(*) AS entry_count
         FROM entrance_events
-        {where_clause}
+        {data_filter}
         GROUP BY bucket
         ORDER BY bucket
     """
@@ -278,33 +288,90 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
     print("\n[Wait] Loading current queue state from snapshots...")
     _conn_snap = psycopg2.connect(**DB_CONFIG)
     try:
-        snap = pd.read_sql(f"""
+        # Average the last 5 minutes of snapshots to smooth out per-frame noise.
+        # Use only the most recent row for queue_count (current depth) and
+        # active_lanes (current config), but average dwell over the window.
+        snap_latest = pd.read_sql("""
             SELECT timestamp, queue_count, avg_dwell_sec, active_lanes
             FROM queue_state_snapshots
-            {where_clause}
             ORDER BY timestamp DESC LIMIT 1
+        """, _conn_snap)
+        snap_avg = pd.read_sql("""
+            SELECT AVG(avg_dwell_sec) AS avg_dwell_sec
+            FROM queue_state_snapshots
+            WHERE timestamp >= NOW() - INTERVAL '5 minutes'
         """, _conn_snap)
     finally:
         _conn_snap.close()
 
     snap_age_min = None
-    if len(snap) > 0:
-        snap_ts = pd.Timestamp(snap.iloc[0]["timestamp"]).tz_localize(None)
-        snap_age_min = (pd.Timestamp.now() - snap_ts).total_seconds() / 60.0
+    if len(snap_latest) > 0:
+        snap_ts = pd.Timestamp(snap_latest.iloc[0]["timestamp"])
+        if snap_ts.tzinfo is not None:
+            snap_age_min = (pd.Timestamp.now(tz="UTC") - snap_ts.tz_convert("UTC")).total_seconds() / 60.0
+        else:
+            snap_age_min = (pd.Timestamp.now(tz="UTC").tz_localize(None) - snap_ts).total_seconds() / 60.0
 
-    if len(snap) > 0 and (snap_age_min is None or snap_age_min < SNAPSHOT_MAX_AGE_MIN):
-        current_queue = int(snap.iloc[0]["queue_count"])
-        avg_dwell_min = float(snap.iloc[0]["avg_dwell_sec"]) / 60.0
-        active_lanes  = max(1, int(snap.iloc[0]["active_lanes"]))
-        print(f"[Wait] queue={current_queue}, dwell={avg_dwell_min:.1f}min, lanes={active_lanes}")
+    if len(snap_latest) > 0 and (snap_age_min is None or snap_age_min < SNAPSHOT_MAX_AGE_MIN):
+        current_queue = int(snap_latest.iloc[0]["queue_count"])
+        raw_dwell_sec = (
+            float(snap_avg.iloc[0]["avg_dwell_sec"])
+            if len(snap_avg) > 0 and snap_avg.iloc[0]["avg_dwell_sec"] is not None
+            else float(snap_latest.iloc[0]["avg_dwell_sec"])
+        )
+        raw_dwell_min = raw_dwell_sec / 60.0
+        # Snapshot dwell reflects entrance-zone tracking time (~6s), not checkout service time.
+        # Only use it if it looks like a real service time; otherwise use the configured default.
+        checkout_service_min = float(os.getenv("CHECKOUT_SERVICE_MIN", DEFAULT_DWELL_MIN))
+        avg_dwell_min = raw_dwell_min if raw_dwell_min >= 1.0 else checkout_service_min
+        active_lanes  = max(1, int(snap_latest.iloc[0]["active_lanes"] or DEFAULT_LANES))
+        print(f"[Wait] queue={current_queue}, service={avg_dwell_min:.1f}min/customer, lanes={active_lanes}")
     else:
         current_queue = 0
         avg_dwell_min = DEFAULT_DWELL_MIN
         active_lanes  = DEFAULT_LANES
         print("[Wait] No snapshot — using defaults")
 
+    # ── Browsing-gap shift ────────────────────────────────────────────────────
+    # A customer who enters the store at time T reaches checkout at T + gap.
+    # So checkout arrivals at future step i = entrance arrivals from (i - lag) steps ago.
+    # For the initial `lag` steps, we pull actual recent entrance counts from DB.
+    BROWSING_GAP_MIN = int(os.getenv("BROWSING_GAP_MIN", 25))
+    browsing_lag_steps = max(1, round(BROWSING_GAP_MIN / BUCKET_MINUTES))
+    print(f"[Wait] Browsing gap = {BROWSING_GAP_MIN} min ({browsing_lag_steps} buckets) — shifting entrance → checkout...")
+
+    _conn_hist = psycopg2.connect(**DB_CONFIG)
+    try:
+        df_hist = pd.read_sql(f"""
+            SELECT
+                time_bucket('{BUCKET_MINUTES} minutes', timestamp) AS bucket,
+                COUNT(*) AS entry_count
+            FROM entrance_events
+            WHERE timestamp >= NOW() - INTERVAL '{BROWSING_GAP_MIN + BUCKET_MINUTES} minutes'
+            GROUP BY bucket
+            ORDER BY bucket ASC
+        """, _conn_hist)
+    finally:
+        _conn_hist.close()
+
+    df_hist["bucket"] = pd.to_datetime(df_hist["bucket"]).dt.tz_localize(None)
+    hist_by_time = dict(
+        zip(df_hist["bucket"].dt.floor(f"{BUCKET_MINUTES}min"),
+            df_hist["entry_count"].astype(float))
+    )
+
+    checkout_arrivals = np.zeros(FORECAST_STEPS)
+    now_floored = pd.Timestamp.now().floor(f"{BUCKET_MINUTES}min")
+    for i in range(FORECAST_STEPS):
+        entrance_idx = i - browsing_lag_steps
+        if entrance_idx < 0:
+            entrance_time = now_floored + pd.Timedelta(minutes=BUCKET_MINUTES * entrance_idx)
+            checkout_arrivals[i] = hist_by_time.get(entrance_time, 0.0)
+        else:
+            checkout_arrivals[i] = ensemble_vals[entrance_idx]
+
     wait_frame = prophet_preds[["ds"]].copy()
-    wait_frame["yhat"] = ensemble_vals
+    wait_frame["yhat"] = checkout_arrivals
     est_service_min = min(max(avg_dwell_min, 0.5), 10.0)
     wait_rows, wait_15m, wait_30m, service_per_bucket = compute_wait_estimates(
         wait_frame,
@@ -317,38 +384,42 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
     wait_estimates = [float(r["wait_min"]) for r in wait_rows]
 
     return {
-        "source":           source,
-        "prophet_preds":    prophet_preds,
-        "prophet_vals":     prophet_vals,
-        "lstm_vals":        lstm_vals,
-        "xgb_vals":         xgb_vals,
-        "ensemble_vals":    ensemble_vals,
-        "wait_estimates":   wait_estimates,
-        "wait_15m":         wait_15m,
-        "wait_30m":         wait_30m,
-        "current_queue":    current_queue,
-        "avg_dwell_min":    avg_dwell_min,
-        "active_lanes":     active_lanes,
+        "source":             source,
+        "prophet_preds":      prophet_preds,
+        "prophet_vals":       prophet_vals,
+        "lstm_vals":          lstm_vals,
+        "xgb_vals":           xgb_vals,
+        "ensemble_vals":      ensemble_vals,
+        "checkout_arrivals":  checkout_arrivals,
+        "wait_estimates":     wait_estimates,
+        "wait_15m":           wait_15m,
+        "wait_30m":           wait_30m,
+        "current_queue":      current_queue,
+        "avg_dwell_min":      avg_dwell_min,
+        "active_lanes":       active_lanes,
         "service_per_bucket": service_per_bucket,
-        "real_span_days":   real_span_days,
+        "real_span_days":     real_span_days,
+        "browsing_gap_min":   BROWSING_GAP_MIN,
     }
 
 
 def _print_results(result: dict) -> None:
-    prophet_preds    = result["prophet_preds"]
-    prophet_vals     = result["prophet_vals"]
-    lstm_vals        = result["lstm_vals"]
-    xgb_vals         = result["xgb_vals"]
-    ensemble_vals    = result["ensemble_vals"]
-    wait_estimates   = result["wait_estimates"]
+    prophet_preds      = result["prophet_preds"]
+    prophet_vals       = result["prophet_vals"]
+    lstm_vals          = result["lstm_vals"]
+    xgb_vals           = result["xgb_vals"]
+    ensemble_vals      = result["ensemble_vals"]
+    checkout_arrivals  = result["checkout_arrivals"]
+    wait_estimates     = result["wait_estimates"]
     service_per_bucket = result["service_per_bucket"]
-    active_lanes     = result["active_lanes"]
+    active_lanes       = result["active_lanes"]
+    browsing_gap_min   = result["browsing_gap_min"]
 
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 85)
     print("  ENSEMBLE PREDICTED CUSTOMER ENTRIES — NEXT 60 MINUTES")
-    print("=" * 75)
-    print(f"  {'Time':<10} {'Prophet':>10} {'LSTM':>10} {'XGBoost':>10} {'Ensemble':>10}")
-    print("-" * 75)
+    print("=" * 85)
+    print(f"  {'Time':<10} {'Prophet':>10} {'LSTM':>10} {'XGBoost':>10} {'Ensemble':>10} {'→Checkout':>12}")
+    print("-" * 85)
     for i, row in prophet_preds.iterrows():
         print(
             f"  {row['ds'].strftime('%H:%M'):<10}"
@@ -356,19 +427,21 @@ def _print_results(result: dict) -> None:
             f" {lstm_vals[i]:>10.1f}"
             f" {xgb_vals[i]:>10.1f}"
             f" {ensemble_vals[i]:>10.1f}"
+            f" {checkout_arrivals[i]:>12.1f}"
         )
-    print("=" * 75)
+    print("=" * 85)
+    print(f"  (→Checkout = entrance shifted {browsing_gap_min} min forward for browsing gap)")
 
     print("\n" + "=" * 75)
-    print("  QUEUE WAIT TIME ESTIMATES  (Ensemble + queue model)")
+    print("  QUEUE WAIT TIME ESTIMATES  (checkout arrivals + queue model)")
     print(f"  Service rate: {service_per_bucket:.1f} customers/{BUCKET_MINUTES}min  |  Lanes: {active_lanes}")
     print("=" * 75)
-    print(f"  {'Time':<10} {'Entries':>10} {'Est. Wait':>12}   Status")
+    print(f"  {'Time':<10} {'Checkout':>10} {'Est. Wait':>12}   Status")
     print("-" * 75)
     for i, row in prophet_preds.iterrows():
         wait   = wait_estimates[i]
         status = "OK" if wait < 5 else "BUSY" if wait < 10 else "ALERT"
-        print(f"  {row['ds'].strftime('%H:%M'):<10} {ensemble_vals[i]:>10} {wait:>8} min   {status}")
+        print(f"  {row['ds'].strftime('%H:%M'):<10} {checkout_arrivals[i]:>10.1f} {wait:>8} min   {status}")
     print("=" * 75)
     print(f"\n  Wait @ +15 min: {result['wait_15m']} min  |  Wait @ +30 min: {result['wait_30m']} min")
 
