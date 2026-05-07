@@ -13,6 +13,7 @@ CAMERA_ID      = os.getenv("CAM_ID",          "Bosch_Camera_Entrance")
 REFRESH_SEC    = int(os.getenv("REFRESH_SEC",  30))
 WAIT_BUSY_MIN  = float(os.getenv("WAIT_BUSY_MIN",  5.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 10.0))
+BUCKET_MIN     = int(os.getenv("BUCKET_MINUTES", 3))
 
 DB_CONFIG = dict(
     host     = os.getenv("DB_HOST",     "localhost"),
@@ -24,6 +25,9 @@ DB_CONFIG = dict(
 
 def _conn():
     return psycopg2.connect(**DB_CONFIG)
+
+
+# ── Live data ──────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=REFRESH_SEC)
 def load_snapshot():
@@ -72,18 +76,6 @@ def load_queue_history():
     return df
 
 @st.cache_data(ttl=REFRESH_SEC)
-def load_today_traffic():
-    with _conn() as conn:
-        df = pd.read_sql("""
-            SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS entries
-            FROM entrance_events
-            WHERE camera_id = %s
-              AND timestamp >= NOW() - INTERVAL '24 hours'
-            GROUP BY 1 ORDER BY 1
-        """, conn, params=(CAMERA_ID,))
-    return df
-
-@st.cache_data(ttl=REFRESH_SEC)
 def load_entries_delta():
     with _conn() as conn:
         with conn.cursor() as cur:
@@ -98,19 +90,67 @@ def load_entries_delta():
             """, (CAMERA_ID,))
             return cur.fetchone()
 
+
+# ── Daily tracker data ─────────────────────────────────────────────────────────
+
 @st.cache_data(ttl=REFRESH_SEC)
 def load_entries_today():
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT COUNT(*) FROM entrance_events
-                WHERE camera_id = %s
-                  AND timestamp >= NOW() - INTERVAL '24 hours'
+                WHERE camera_id = %s AND timestamp >= CURRENT_DATE
             """, (CAMERA_ID,))
             return cur.fetchone()[0]
 
+@st.cache_data(ttl=REFRESH_SEC)
+def load_yesterday_entries():
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) FROM entrance_events
+                WHERE camera_id = %s
+                  AND timestamp >= CURRENT_DATE - INTERVAL '1 day'
+                  AND timestamp < CURRENT_DATE
+            """, (CAMERA_ID,))
+            return cur.fetchone()[0]
 
-# -- Page config ---------------------------------------------------------------
+@st.cache_data(ttl=REFRESH_SEC)
+def load_today_traffic():
+    with _conn() as conn:
+        df = pd.read_sql("""
+            SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS entries
+            FROM entrance_events
+            WHERE camera_id = %s AND timestamp >= CURRENT_DATE
+            GROUP BY 1 ORDER BY 1
+        """, conn, params=(CAMERA_ID,))
+    return df
+
+@st.cache_data(ttl=REFRESH_SEC)
+def load_full_day_queue():
+    with _conn() as conn:
+        df = pd.read_sql("""
+            SELECT timestamp, queue_count
+            FROM queue_state_snapshots
+            WHERE timestamp >= CURRENT_DATE
+            ORDER BY timestamp ASC
+        """, conn)
+    return df
+
+@st.cache_data(ttl=REFRESH_SEC)
+def load_status_breakdown():
+    with _conn() as conn:
+        df = pd.read_sql("""
+            SELECT UPPER(status) AS status, COUNT(*) AS slots
+            FROM queue_predictions
+            WHERE prediction_for >= CURRENT_DATE
+              AND prediction_for < NOW()
+            GROUP BY status
+        """, conn)
+    return df
+
+
+# ── Page config ────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout="wide")
 
@@ -137,6 +177,7 @@ st.markdown("""
   .metric-card.orange { border-top-color: #e67e22; }
   .metric-card.red    { border-top-color: #e74c3c; }
   .metric-card.blue   { border-top-color: #3498db; }
+  .metric-card.purple { border-top-color: #9b59b6; }
   .metric-val  { font-size: 2.4rem; font-weight: 800; line-height: 1.1; color: #2c3e50; }
   .metric-lbl  { font-size: 0.72rem; color: #999; text-transform: uppercase; letter-spacing: 0.07em; margin-top: 4px; }
   .metric-delta { font-size: 0.78rem; font-weight: 600; margin-top: 6px; }
@@ -153,6 +194,13 @@ st.markdown("""
     text-transform: uppercase; letter-spacing: 0.1em; margin: 28px 0 10px 0;
     padding-bottom: 8px; border-bottom: 2px solid #ecf0f1;
   }
+  .tracker-heading {
+    font-size: 1.1rem; font-weight: 800; color: #2c3e50;
+    margin: 8px 0 16px 0; letter-spacing: -0.01em;
+  }
+  .tracker-sub {
+    font-size: 0.75rem; font-weight: 400; color: #aaa; margin-left: 10px;
+  }
   .forecast-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
   .forecast-table th {
     background: #f8f9fa; color: #7f8c8d; font-size: 0.72rem;
@@ -168,20 +216,27 @@ st.markdown("""
   .badge-ok    { background: #d5f5e3; color: #1e8449; }
   .badge-busy  { background: #fdebd0; color: #d35400; }
   .badge-alert { background: #fadbd8; color: #c0392b; }
+  .tracker-divider {
+    margin: 36px 0 24px 0;
+    border: none; border-top: 3px solid #ecf0f1;
+  }
 </style>
 """, unsafe_allow_html=True)
 
 
-# -- Load data -----------------------------------------------------------------
+# ── Load all data ──────────────────────────────────────────────────────────────
 
 try:
-    snap          = load_snapshot()
-    pred_df       = load_predictions()
-    queue_hist    = load_queue_history()
-    traffic_today = load_today_traffic()
-    entries_today = load_entries_today()
-    queue_1h_ago  = load_queue_delta()
-    entries_delta = load_entries_delta()
+    snap             = load_snapshot()
+    pred_df          = load_predictions()
+    queue_hist       = load_queue_history()
+    traffic_today    = load_today_traffic()
+    entries_today    = load_entries_today()
+    yesterday_entries = load_yesterday_entries()
+    queue_1h_ago     = load_queue_delta()
+    entries_delta    = load_entries_delta()
+    full_day_queue   = load_full_day_queue()
+    status_breakdown = load_status_breakdown()
 except Exception as e:
     st.error(f"Database error: {e}")
     st.stop()
@@ -198,6 +253,40 @@ entries_prev_hr = entries_delta[1] if entries_delta else 0
 entries_diff    = entries_last_hr - entries_prev_hr
 queue_diff      = (queue_count - queue_1h_ago) if queue_1h_ago is not None else None
 
+# Daily tracker KPIs
+_tz = datetime.now(timezone.utc).astimezone().tzinfo
+
+if not full_day_queue.empty:
+    peak_queue_today = int(full_day_queue["queue_count"].max())
+    avg_queue_today  = round(float(full_day_queue["queue_count"].mean()), 1)
+    peak_row = full_day_queue.loc[full_day_queue["queue_count"].idxmax()]
+    peak_ts  = pd.Timestamp(peak_row["timestamp"])
+    if peak_ts.tzinfo is not None:
+        peak_ts = peak_ts.tz_convert(_tz)
+    peak_time_str = peak_ts.strftime("%H:%M")
+else:
+    peak_queue_today = 0
+    avg_queue_today  = 0.0
+    peak_time_str    = "--"
+
+entries_vs_yesterday = int(entries_today) - int(yesterday_entries)
+
+if not traffic_today.empty:
+    busiest_idx = traffic_today["entries"].idxmax()
+    busiest_ts  = pd.Timestamp(traffic_today.loc[busiest_idx, "hour"])
+    if busiest_ts.tzinfo is not None:
+        busiest_ts = busiest_ts.tz_convert(_tz)
+    busiest_hour_str = busiest_ts.strftime("%H:%M")
+else:
+    busiest_hour_str = "--"
+
+alert_slots = 0
+if not status_breakdown.empty:
+    alert_row = status_breakdown[status_breakdown["status"].str.upper() == "ALERT"]
+    if not alert_row.empty:
+        alert_slots = int(alert_row.iloc[0]["slots"])
+alert_minutes_today = alert_slots * BUCKET_MIN
+
 if wait_15m is None:
     status_class, status_text = "status-ok",    "System OK - forecast not available"
 elif wait_15m >= WAIT_ALERT_MIN:
@@ -208,7 +297,7 @@ else:
     status_class, status_text = "status-ok",    f"All Clear - Estimated wait {wait_15m:.0f} min in 15 minutes"
 
 
-# -- Header --------------------------------------------------------------------
+# ── Header ─────────────────────────────────────────────────────────────────────
 
 now_str = datetime.now().strftime("%H:%M  -  %A, %d %B %Y")
 st.markdown(f"""
@@ -228,7 +317,7 @@ st.markdown(f"""
 st.markdown(f'<div class="status-banner {status_class}">{status_text}</div>', unsafe_allow_html=True)
 
 
-# -- Metric cards --------------------------------------------------------------
+# ── Live metric cards ──────────────────────────────────────────────────────────
 
 def delta_html(diff, unit="", invert=False):
     if diff is None:
@@ -288,13 +377,13 @@ with c5:
 if snap_ts is not None:
     ts_obj = pd.Timestamp(snap_ts)
     if ts_obj.tzinfo is not None:
-        ts_local = ts_obj.tz_convert(datetime.now(timezone.utc).astimezone().tzinfo)
+        ts_local = ts_obj.tz_convert(_tz)
     else:
         ts_local = ts_obj
     st.caption(f"Queue snapshot: {ts_local.strftime('%H:%M:%S  %d/%m/%Y')}")
 
 
-# -- Predicted wait chart (Plotly) ---------------------------------------------
+# ── Predicted wait chart ───────────────────────────────────────────────────────
 
 st.markdown('<div class="section-title">Predicted Wait Time - Next 60 Min</div>', unsafe_allow_html=True)
 
@@ -302,7 +391,7 @@ if not pred_df.empty:
     pf = pred_df.copy()
     pf["ds"] = pd.to_datetime(pf["ds"])
     if pf["ds"].dt.tz is not None:
-        pf["ds"] = pf["ds"].dt.tz_convert(datetime.now(timezone.utc).astimezone().tzinfo)
+        pf["ds"] = pf["ds"].dt.tz_convert(_tz)
     pf["time_str"] = pf["ds"].dt.strftime("%H:%M")
 
     fig_wait = go.Figure()
@@ -331,7 +420,6 @@ if not pred_df.empty:
     )
     st.plotly_chart(fig_wait, use_container_width=True)
 
-    # Forecast detail table with colored badges
     st.markdown('<div class="section-title">Forecast Detail</div>', unsafe_allow_html=True)
 
     rows_html = ""
@@ -366,7 +454,7 @@ else:
     st.info("No predictions found. Run ensemble_predict.py to generate a forecast.")
 
 
-# -- Live queue depth (Plotly) -------------------------------------------------
+# ── Live queue depth (last 2h) ─────────────────────────────────────────────────
 
 st.markdown('<div class="section-title">Live Queue Depth - Last 2 Hours</div>', unsafe_allow_html=True)
 
@@ -374,7 +462,7 @@ if not queue_hist.empty:
     qh = queue_hist.copy()
     qh["timestamp"] = pd.to_datetime(qh["timestamp"])
     if qh["timestamp"].dt.tz is not None:
-        qh["timestamp"] = qh["timestamp"].dt.tz_convert(datetime.now(timezone.utc).astimezone().tzinfo)
+        qh["timestamp"] = qh["timestamp"].dt.tz_convert(_tz)
     qh = qh.set_index("timestamp").resample("1min").mean().dropna().reset_index()
     qh["time_str"] = qh["timestamp"].dt.strftime("%H:%M")
 
@@ -397,39 +485,159 @@ else:
     st.info("No queue history available.")
 
 
-# -- Today traffic by hour (Plotly) --------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════════
+#  TODAY'S OVERVIEW — daily tracker
+# ══════════════════════════════════════════════════════════════════════════════
 
-st.markdown("<div class='section-title'>Today's Entries by Hour</div>", unsafe_allow_html=True)
+st.markdown('<hr class="tracker-divider">', unsafe_allow_html=True)
+st.markdown("""
+<div class="tracker-heading">
+  Today's Overview
+  <span class="tracker-sub">since store open · updates every 30s</span>
+</div>
+""", unsafe_allow_html=True)
 
-if not traffic_today.empty:
-    tt = traffic_today.copy()
-    tt["hour"] = pd.to_datetime(tt["hour"])
-    if tt["hour"].dt.tz is not None:
-        tt["hour"] = tt["hour"].dt.tz_convert(datetime.now(timezone.utc).astimezone().tzinfo)
-    tt["hour_label"] = tt["hour"].dt.strftime("%H:%M")
-    max_val = tt["entries"].max()
-    colors  = ["#e74c3c" if v == max_val else "#3498db" for v in tt["entries"]]
+# Daily KPI cards
+d1, d2, d3, d4, d5 = st.columns(5)
 
-    fig_t = go.Figure()
-    fig_t.add_trace(go.Bar(
-        x=tt["hour_label"], y=tt["entries"],
-        marker_color=colors, name="Entries",
-        text=tt["entries"], textposition="outside",
-        textfont=dict(size=10),
+with d1:
+    st.markdown(f"""
+    <div class="metric-card red">
+      <div class="metric-val">{peak_queue_today}</div>
+      <div class="metric-lbl">Peak Queue Today</div>
+      <div class="metric-delta" style="color:#999">at {peak_time_str}</div>
+    </div>""", unsafe_allow_html=True)
+
+with d2:
+    st.markdown(f"""
+    <div class="metric-card blue">
+      <div class="metric-val">{avg_queue_today}</div>
+      <div class="metric-lbl">Avg Queue Today</div>
+    </div>""", unsafe_allow_html=True)
+
+with d3:
+    yest_color = "#27ae60" if entries_vs_yesterday >= 0 else "#e74c3c"
+    yest_arrow = "+" if entries_vs_yesterday >= 0 else ""
+    yest_html  = f'<div class="metric-delta" style="color:{yest_color}">{yest_arrow}{entries_vs_yesterday} vs yesterday</div>'
+    st.markdown(f"""
+    <div class="metric-card green">
+      <div class="metric-val">{entries_today}</div>
+      <div class="metric-lbl">Entries Today</div>
+      {yest_html}
+    </div>""", unsafe_allow_html=True)
+
+with d4:
+    st.markdown(f"""
+    <div class="metric-card orange">
+      <div class="metric-val">{busiest_hour_str}</div>
+      <div class="metric-lbl">Busiest Hour</div>
+    </div>""", unsafe_allow_html=True)
+
+with d5:
+    alert_color = "red" if alert_minutes_today >= 30 else "orange" if alert_minutes_today >= 15 else "green"
+    st.markdown(f"""
+    <div class="metric-card {alert_color}">
+      <div class="metric-val">{alert_minutes_today}<span style="font-size:1.1rem; font-weight:400"> min</span></div>
+      <div class="metric-lbl">In Alert Today</div>
+    </div>""", unsafe_allow_html=True)
+
+
+# ── Full-day queue chart ───────────────────────────────────────────────────────
+
+st.markdown('<div class="section-title">Queue Depth - Full Day</div>', unsafe_allow_html=True)
+
+if not full_day_queue.empty:
+    fdq = full_day_queue.copy()
+    fdq["timestamp"] = pd.to_datetime(fdq["timestamp"])
+    if fdq["timestamp"].dt.tz is not None:
+        fdq["timestamp"] = fdq["timestamp"].dt.tz_convert(_tz)
+    fdq = fdq.set_index("timestamp").resample("5min").mean().dropna().reset_index()
+    fdq["time_str"] = fdq["timestamp"].dt.strftime("%H:%M")
+
+    fig_fd = go.Figure()
+    fig_fd.add_trace(go.Scatter(
+        x=fdq["time_str"], y=fdq["queue_count"],
+        mode="lines", name="Queue depth",
+        line=dict(color="#9b59b6", width=2.5),
+        fill="tozeroy", fillcolor="rgba(155,89,182,0.12)",
     ))
-    fig_t.update_layout(
-        height=220, margin=dict(l=0, r=20, t=20, b=0),
+    fig_fd.update_layout(
+        height=220, margin=dict(l=0, r=20, t=10, b=0),
         plot_bgcolor="white", paper_bgcolor="white",
         xaxis=dict(showgrid=False, tickfont=dict(size=11), title=""),
         yaxis=dict(gridcolor="#f0f2f6", title="", zeroline=False),
-        showlegend=False,
+        showlegend=False, hovermode="x unified",
     )
-    st.plotly_chart(fig_t, use_container_width=True)
+    st.plotly_chart(fig_fd, use_container_width=True)
 else:
-    st.info("No entry data for today.")
+    st.info("No queue data recorded today yet.")
 
 
-# -- Footer --------------------------------------------------------------------
+# ── Entries by hour + Status breakdown (two columns) ──────────────────────────
+
+col_left, col_right = st.columns([3, 2])
+
+with col_left:
+    st.markdown("<div class='section-title'>Entries by Hour</div>", unsafe_allow_html=True)
+    if not traffic_today.empty:
+        tt = traffic_today.copy()
+        tt["hour"] = pd.to_datetime(tt["hour"])
+        if tt["hour"].dt.tz is not None:
+            tt["hour"] = tt["hour"].dt.tz_convert(_tz)
+        tt["hour_label"] = tt["hour"].dt.strftime("%H:%M")
+        max_val = tt["entries"].max()
+        colors  = ["#e74c3c" if v == max_val else "#3498db" for v in tt["entries"]]
+
+        fig_t = go.Figure()
+        fig_t.add_trace(go.Bar(
+            x=tt["hour_label"], y=tt["entries"],
+            marker_color=colors, name="Entries",
+            text=tt["entries"], textposition="outside",
+            textfont=dict(size=10),
+        ))
+        fig_t.update_layout(
+            height=260, margin=dict(l=0, r=20, t=20, b=0),
+            plot_bgcolor="white", paper_bgcolor="white",
+            xaxis=dict(showgrid=False, tickfont=dict(size=11), title=""),
+            yaxis=dict(gridcolor="#f0f2f6", title="", zeroline=False),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_t, use_container_width=True)
+    else:
+        st.info("No entry data for today yet.")
+
+with col_right:
+    st.markdown("<div class='section-title'>Status Breakdown Today</div>", unsafe_allow_html=True)
+    if not status_breakdown.empty:
+        STATUS_COLORS = {"OK": "#2ecc71", "BUSY": "#e67e22", "ALERT": "#e74c3c"}
+        sb = status_breakdown.copy()
+        sb["status"]  = sb["status"].str.upper()
+        sb["minutes"] = sb["slots"] * BUCKET_MIN
+
+        fig_donut = go.Figure(go.Pie(
+            labels=sb["status"],
+            values=sb["minutes"],
+            hole=0.55,
+            marker_colors=[STATUS_COLORS.get(s, "#95a5a6") for s in sb["status"]],
+            textinfo="label+percent",
+            textfont=dict(size=13),
+            hovertemplate="%{label}: %{value} min<extra></extra>",
+        ))
+        fig_donut.update_layout(
+            height=260, margin=dict(l=0, r=0, t=10, b=0),
+            showlegend=False, paper_bgcolor="white",
+            annotations=[dict(
+                text=f"<b>{sb['minutes'].sum()}<br>min</b>",
+                x=0.5, y=0.5, showarrow=False,
+                font=dict(size=16, color="#2c3e50"),
+            )],
+        )
+        st.plotly_chart(fig_donut, use_container_width=True)
+    else:
+        st.info("No prediction history for today yet.")
+
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
 
 st.divider()
 col_r, col_b = st.columns([6, 1])
