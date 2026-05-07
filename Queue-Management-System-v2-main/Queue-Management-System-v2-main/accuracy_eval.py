@@ -42,83 +42,66 @@ def _conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
-# ── 1. Load predictions (latest per slot) ─────────────────────────────────────
+# ── 1-3. Load and join in SQL (avoids timezone alignment issues) ──────────────
+#
+# prediction_for is stored as "now + N min" (e.g. 17:13:35), not floored.
+# time_bucket floors entrance events to boundaries (17:12:00).
+# Joining in SQL with time_bucket on both sides guarantees alignment.
 
-print(f"[1/4] Loading past predictions (last {EVAL_DAYS} days)...")
+print(f"[1/4] Loading and joining predictions with actuals (last {EVAL_DAYS} days)...")
 with _conn() as conn:
-    pred_df = pd.read_sql("""
-        SELECT DISTINCT ON (prediction_for)
-            predicted_at,
-            prediction_for,
-            ensemble_yhat  AS predicted_arrivals,
-            est_wait_minutes AS predicted_wait_min,
-            status
-        FROM queue_predictions
-        WHERE prediction_for >= NOW() - INTERVAL '14 days'
-          AND prediction_for <  NOW()
-        ORDER BY prediction_for, predicted_at DESC
-    """, conn)
-
-print(f"    {len(pred_df)} prediction slots loaded")
-
-if pred_df.empty:
-    print("ERROR: No past predictions found. Run ensemble_predict.py first.")
-    sys.exit(1)
-
-pred_df["prediction_for"] = pd.to_datetime(pred_df["prediction_for"], utc=True)
-pred_df["predicted_at"]   = pd.to_datetime(pred_df["predicted_at"],   utc=True)
-pred_df["lead_minutes"]   = (
-    (pred_df["prediction_for"] - pred_df["predicted_at"])
-    .dt.total_seconds() / 60
-).round(1)
-
-
-# ── 2. Load actual entrance events, bucketed to 3-min intervals ───────────────
-
-print(f"[2/4] Loading actual entrance events...")
-with _conn() as conn:
-    actual_df = pd.read_sql(f"""
+    merged = pd.read_sql(f"""
         SELECT
-            time_bucket('{BUCKET_MIN} minutes', timestamp) AS bucket,
-            COUNT(*) AS actual_arrivals
-        FROM entrance_events
-        WHERE (
-            (timestamp >= '2026-04-13' AND timestamp < '2026-04-16')
-            OR timestamp >= '2026-04-21'
-        )
-          AND dwell_seconds >= 10
-          AND timestamp >= NOW() - INTERVAL '{EVAL_DAYS} days'
-          AND timestamp <  NOW()
-        GROUP BY bucket
-        ORDER BY bucket
+            p.predicted_at,
+            p.prediction_for,
+            time_bucket('{BUCKET_MIN} minutes', p.prediction_for) AS pred_bucket,
+            (p.prediction_for - p.predicted_at) AS lead_interval,
+            p.predicted_arrivals,
+            p.predicted_wait_min,
+            p.status,
+            a.actual_arrivals
+        FROM (
+            SELECT DISTINCT ON (time_bucket('{BUCKET_MIN} minutes', prediction_for))
+                predicted_at,
+                prediction_for,
+                ensemble_yhat    AS predicted_arrivals,
+                est_wait_minutes AS predicted_wait_min,
+                status
+            FROM queue_predictions
+            WHERE prediction_for >= NOW() - INTERVAL '{EVAL_DAYS} days'
+              AND prediction_for <  NOW()
+            ORDER BY time_bucket('{BUCKET_MIN} minutes', prediction_for), predicted_at DESC
+        ) p
+        JOIN (
+            SELECT
+                time_bucket('{BUCKET_MIN} minutes', timestamp) AS bucket,
+                COUNT(*) AS actual_arrivals
+            FROM entrance_events
+            WHERE (
+                (timestamp >= '2026-04-13' AND timestamp < '2026-04-16')
+                OR timestamp >= '2026-04-21'
+            )
+              AND dwell_seconds >= 10
+              AND timestamp >= NOW() - INTERVAL '{EVAL_DAYS} days'
+              AND timestamp <  NOW()
+            GROUP BY bucket
+        ) a ON time_bucket('{BUCKET_MIN} minutes', p.prediction_for) = a.bucket
+        ORDER BY p.prediction_for
     """, conn)
 
-print(f"    {len(actual_df)} actual 3-min buckets loaded")
-
-if actual_df.empty:
-    print("ERROR: No entrance event data found in the evaluation period.")
-    sys.exit(1)
-
-actual_df["bucket"] = pd.to_datetime(actual_df["bucket"], utc=True)
-
-
-# ── 3. Merge predictions with actuals ─────────────────────────────────────────
-
-print("[3/4] Joining predictions with actuals...")
-
-merged = pd.merge(
-    pred_df,
-    actual_df,
-    left_on="prediction_for",
-    right_on="bucket",
-    how="inner",
-)
-
-print(f"    {len(merged)} matched slots ({len(pred_df) - len(merged)} predictions had no matching actual data)")
+print(f"    {len(merged)} matched slots loaded")
 
 if merged.empty:
-    print("ERROR: No matching slots. Check that timestamp timezones align.")
+    print("ERROR: No matching slots found. Check that both tables have data in the eval period.")
     sys.exit(1)
+
+merged["prediction_for"] = pd.to_datetime(merged["prediction_for"], utc=True)
+merged["predicted_at"]   = pd.to_datetime(merged["predicted_at"],   utc=True)
+merged["lead_minutes"]   = merged["lead_interval"].apply(
+    lambda x: round(x.total_seconds() / 60, 1) if pd.notna(x) else None
+)
+
+print("[4/4] Computing metrics...")
 
 # Error columns
 merged["error"]     = merged["predicted_arrivals"] - merged["actual_arrivals"]
@@ -133,7 +116,7 @@ merged["date"]       = merged["prediction_for"].dt.date
 
 # ── 4. Compute metrics ────────────────────────────────────────────────────────
 
-print("[4/4] Computing metrics...\n")
+print("      Done.\n")
 
 mae  = merged["abs_error"].mean()
 rmse = np.sqrt(merged["sq_error"].mean())
