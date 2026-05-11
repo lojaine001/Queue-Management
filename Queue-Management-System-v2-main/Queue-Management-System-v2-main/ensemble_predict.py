@@ -51,15 +51,16 @@ W_PROPHET           = float(os.getenv("W_PROPHET",          0.40))
 W_LSTM              = float(os.getenv("W_LSTM",             0.30))
 W_XGB               = float(os.getenv("W_XGB",             0.30))
 MODEL_MAX_AGE_HOURS = int(os.getenv("MODEL_MAX_AGE_HOURS",  24))
-MODELS_DIR  = 'models'
-LSTM_PATH   = os.path.join(MODELS_DIR, f'lstm_queue_{BUCKET_MINUTES}m.keras')
-SCALER_PATH = os.path.join(MODELS_DIR, f'lstm_scaler_{BUCKET_MINUTES}m.pkl')
-XGB_PATH    = os.path.join(MODELS_DIR, f'xgb_queue_{BUCKET_MINUTES}m.json')
+MODELS_DIR     = 'models'
+LSTM_PATH      = os.path.join(MODELS_DIR, f'lstm_queue_{BUCKET_MINUTES}m.keras')
+SCALER_PATH    = os.path.join(MODELS_DIR, f'lstm_scaler_{BUCKET_MINUTES}m.pkl')
+XGB_PATH       = os.path.join(MODELS_DIR, f'xgb_queue_{BUCKET_MINUTES}m.json')
+PROPHET_PATH   = os.path.join(MODELS_DIR, f'prophet_queue_{BUCKET_MINUTES}m.pkl')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 
 def _models_are_fresh() -> bool:
-    paths = [LSTM_PATH, SCALER_PATH, XGB_PATH]
+    paths = [LSTM_PATH, SCALER_PATH, XGB_PATH, PROPHET_PATH]
     if not all(os.path.exists(p) for p in paths):
         return False
     oldest = min(os.path.getmtime(p) for p in paths)
@@ -151,20 +152,28 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
     future_df = pd.DataFrame({"ds": future_timestamps})
 
     # ── MODEL 1 — PROPHET ────────────────────────────────────────────────────
-    print("\n[Prophet] Training...")
-    prophet_model = Prophet(
-        daily_seasonality=True,
-        weekly_seasonality=True,
-        yearly_seasonality=False,
-        changepoint_prior_scale=0.05,
-        seasonality_prior_scale=10.0,
-        interval_width=0.80,
-    )
-    prophet_model.fit(df)
+    if _models_are_fresh():
+        print("\n[Prophet] Loading saved model...")
+        with open(PROPHET_PATH, "rb") as _f:
+            prophet_model = pickle.load(_f)
+        print("[Prophet] Loaded ✓")
+    else:
+        print("\n[Prophet] Training...")
+        prophet_model = Prophet(
+            daily_seasonality=True,
+            weekly_seasonality=True,
+            yearly_seasonality=False,
+            changepoint_prior_scale=0.05,
+            seasonality_prior_scale=10.0,
+            interval_width=0.80,
+        )
+        prophet_model.fit(df)
+        with open(PROPHET_PATH, "wb") as _f:
+            pickle.dump(prophet_model, _f)
+        print("[Prophet] Trained and saved ✓")
     forecast       = prophet_model.predict(future_df)
     prophet_preds  = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].reset_index(drop=True)
     prophet_vals   = prophet_preds["yhat"].clip(lower=0).values
-    print("[Prophet] Done ✓")
 
     # ── MODEL 2 — LSTM ───────────────────────────────────────────────────────
     print("\n[LSTM] Preparing sequences...")
