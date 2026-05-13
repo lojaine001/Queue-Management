@@ -53,7 +53,7 @@ def _sidebar_toggle(label: str, value: bool = False, key: str | None = None):
 # ── Page config MUST be first Streamlit call ──────────────────────────────────
 st.set_page_config(layout="wide", page_title="Queue Simulator 2D")
 
-tab_sim, tab_pred = st.tabs(["🛒 Simulator", "📈 Prediction Training"])
+tab_sim, tab_pred, tab_tracker, tab_live = st.tabs(["🛒 Simulator", "📈 Prediction Training", "📊 Daily Tracker", "🖥 Live Dashboard"])
 
 
 # ── CLI args (--calibrate --days N passed after `--`) ─────────────────────────
@@ -615,6 +615,7 @@ with tab_pred:
             st.error(f"Training failed: {exc}")
 
     # ── Camera diagnostics ────────────────────────────────────────────────────
+
     with st.expander("🔍 Camera ID diagnostics — what's actually in the DB", expanded=False):
         try:
             import psycopg2 as _pg
@@ -809,3 +810,292 @@ with tab_pred:
                 _conn.close()
         except Exception as _e:
             st.error(f"Diagnostic query failed: {_e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 3 — Daily Tracker
+# ─────────────────────────────────────────────────────────────────────────────
+
+import psycopg2 as _psycopg2
+import plotly.graph_objects as go
+from datetime import timezone as _timezone
+
+_TRACKER_CAM   = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
+_BUCKET_MIN    = int(os.getenv("BUCKET_MINUTES", 3))
+_WAIT_BUSY     = float(os.getenv("WAIT_BUSY_MIN", 5.0))
+_WAIT_ALERT    = float(os.getenv("WAIT_ALERT_MIN", 10.0))
+_DB_CFG        = pred_pipeline.DB_CONFIG
+
+@st.cache_data(ttl=30)
+def _tracker_load():
+    with _psycopg2.connect(**_DB_CFG) as conn:
+        full_day_queue = pd.read_sql("""
+            SELECT timestamp, queue_count FROM queue_state_snapshots
+            WHERE timestamp >= CURRENT_DATE ORDER BY timestamp ASC
+        """, conn)
+        traffic_today = pd.read_sql("""
+            SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS entries
+            FROM entrance_events
+            WHERE camera_id = %s AND timestamp >= CURRENT_DATE
+            GROUP BY 1 ORDER BY 1
+        """, conn, params=(_TRACKER_CAM,))
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM entrance_events WHERE camera_id = %s AND timestamp >= CURRENT_DATE", (_TRACKER_CAM,))
+            entries_today = cur.fetchone()[0]
+            cur.execute("""SELECT COUNT(*) FROM entrance_events WHERE camera_id = %s
+                AND timestamp >= CURRENT_DATE - INTERVAL '1 day' AND timestamp < CURRENT_DATE""", (_TRACKER_CAM,))
+            yesterday_entries = cur.fetchone()[0]
+            cur.execute("""SELECT UPPER(status) AS status, COUNT(*) AS slots FROM queue_predictions
+                WHERE prediction_for >= CURRENT_DATE AND prediction_for < NOW()
+                GROUP BY status""")
+            status_rows = cur.fetchall()
+    return full_day_queue, traffic_today, int(entries_today), int(yesterday_entries), status_rows
+
+
+with tab_tracker:
+    st.header("📊 Today's Overview")
+    if st.button("🔄 Refresh", key="tracker_refresh"):
+        st.cache_data.clear()
+
+    try:
+        full_day_queue, traffic_today, entries_today, yesterday_entries, status_rows = _tracker_load()
+    except Exception as _e:
+        st.error(f"Database error: {_e}")
+        st.stop()
+
+    _tz_local = datetime.now(_timezone.utc).astimezone().tzinfo
+
+    if not full_day_queue.empty:
+        fdq = full_day_queue.copy()
+        fdq["timestamp"] = pd.to_datetime(fdq["timestamp"])
+        if fdq["timestamp"].dt.tz is not None:
+            fdq["timestamp"] = fdq["timestamp"].dt.tz_convert(_tz_local)
+        peak_queue   = int(fdq["queue_count"].max())
+        avg_queue    = round(float(fdq["queue_count"].mean()), 1)
+        peak_row     = fdq.loc[fdq["queue_count"].idxmax()]
+        peak_time    = pd.Timestamp(peak_row["timestamp"]).strftime("%H:%M")
+    else:
+        peak_queue, avg_queue, peak_time = 0, 0.0, "--"
+
+    if not traffic_today.empty:
+        tt = traffic_today.copy()
+        tt["hour"] = pd.to_datetime(tt["hour"])
+        if tt["hour"].dt.tz is not None:
+            tt["hour"] = tt["hour"].dt.tz_convert(_tz_local)
+        busiest_hour = tt.loc[tt["entries"].idxmax(), "hour"].strftime("%H:%M")
+    else:
+        busiest_hour = "--"
+
+    status_map = {r[0]: r[1] for r in status_rows}
+    alert_min  = status_map.get("ALERT", 0) * _BUCKET_MIN
+    entries_diff = entries_today - yesterday_entries
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("Peak Queue Today",  peak_queue,    f"at {peak_time}")
+    d2.metric("Avg Queue Today",   avg_queue)
+    d3.metric("Entries Today",     entries_today, f"{'+' if entries_diff >= 0 else ''}{entries_diff} vs yesterday")
+    d4.metric("Busiest Hour",      busiest_hour)
+    d5.metric("In Alert Today",    f"{alert_min} min")
+
+    st.markdown("#### Queue Depth — Full Day")
+    if not full_day_queue.empty:
+        fdq2 = full_day_queue.copy()
+        fdq2["timestamp"] = pd.to_datetime(fdq2["timestamp"])
+        if fdq2["timestamp"].dt.tz is not None:
+            fdq2["timestamp"] = fdq2["timestamp"].dt.tz_convert(_tz_local)
+        fdq2 = fdq2.set_index("timestamp").resample("5min").mean().dropna().reset_index()
+        fig_fd = go.Figure(go.Scatter(
+            x=fdq2["timestamp"].dt.strftime("%H:%M"), y=fdq2["queue_count"],
+            mode="lines", line=dict(color="#9b59b6", width=2.5),
+            fill="tozeroy", fillcolor="rgba(155,89,182,0.12)",
+        ))
+        fig_fd.update_layout(height=220, margin=dict(l=0,r=20,t=10,b=0),
+            plot_bgcolor="white", paper_bgcolor="white",
+            xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6"), showlegend=False)
+        st.plotly_chart(fig_fd, use_container_width=True)
+    else:
+        st.info("No queue data recorded today yet.")
+
+    col_l, col_r = st.columns([3, 2])
+    with col_l:
+        st.markdown("#### Entries by Hour")
+        if not traffic_today.empty:
+            tt2 = traffic_today.copy()
+            tt2["hour"] = pd.to_datetime(tt2["hour"])
+            if tt2["hour"].dt.tz is not None:
+                tt2["hour"] = tt2["hour"].dt.tz_convert(_tz_local)
+            tt2["label"] = tt2["hour"].dt.strftime("%H:%M")
+            max_v  = tt2["entries"].max()
+            colors = ["#e74c3c" if v == max_v else "#3498db" for v in tt2["entries"]]
+            fig_bar = go.Figure(go.Bar(x=tt2["label"], y=tt2["entries"],
+                marker_color=colors, text=tt2["entries"], textposition="outside"))
+            fig_bar.update_layout(height=260, margin=dict(l=0,r=20,t=20,b=0),
+                plot_bgcolor="white", paper_bgcolor="white",
+                xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6"), showlegend=False)
+            st.plotly_chart(fig_bar, use_container_width=True)
+        else:
+            st.info("No entry data for today yet.")
+
+    with col_r:
+        st.markdown("#### Status Breakdown Today")
+        if status_rows:
+            labels  = [r[0] for r in status_rows]
+            minutes = [r[1] * _BUCKET_MIN for r in status_rows]
+            colors  = {"OK": "#2ecc71", "BUSY": "#e67e22", "ALERT": "#e74c3c"}
+            fig_pie = go.Figure(go.Pie(
+                labels=labels, values=minutes, hole=0.55,
+                marker_colors=[colors.get(l, "#95a5a6") for l in labels],
+                textinfo="label+percent", hovertemplate="%{label}: %{value} min<extra></extra>",
+            ))
+            fig_pie.update_layout(height=260, margin=dict(l=0,r=0,t=10,b=0),
+                showlegend=False, paper_bgcolor="white",
+                annotations=[dict(text=f"<b>{sum(minutes)}<br>min</b>",
+                    x=0.5, y=0.5, showarrow=False, font=dict(size=16, color="#2c3e50"))])
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("No prediction history for today yet.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 4 — Live Dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=30)
+def _live_load():
+    with _psycopg2.connect(**_DB_CFG) as conn:
+        snap = pd.read_sql("""
+            SELECT queue_count, avg_dwell_sec, active_lanes, timestamp
+            FROM queue_state_snapshots ORDER BY timestamp DESC LIMIT 1
+        """, conn)
+        pred_df = pd.read_sql("""
+            SELECT DISTINCT ON (prediction_for)
+                   prediction_for AS ds, ensemble_yhat AS arrivals,
+                   est_wait_minutes AS wait_min, wait_15m, wait_30m, status
+            FROM queue_predictions
+            WHERE prediction_for >= NOW()
+              AND prediction_for <= NOW() + INTERVAL '30 minutes'
+            ORDER BY prediction_for, predicted_at DESC
+        """, conn)
+        queue_hist = pd.read_sql("""
+            SELECT timestamp, queue_count FROM queue_state_snapshots
+            WHERE timestamp >= NOW() - INTERVAL '2 hours'
+            ORDER BY timestamp ASC
+        """, conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 hour'),
+                    COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '2 hours'
+                                      AND timestamp <  NOW() - INTERVAL '1 hour')
+                FROM entrance_events WHERE camera_id = %s
+                  AND timestamp >= NOW() - INTERVAL '2 hours'
+            """, (_TRACKER_CAM,))
+            entries_delta = cur.fetchone()
+            cur.execute("""
+                SELECT queue_count FROM queue_state_snapshots
+                WHERE timestamp <= NOW() - INTERVAL '1 hour'
+                ORDER BY timestamp DESC LIMIT 1
+            """)
+            q1h = cur.fetchone()
+    return (snap.iloc[0] if not snap.empty else None), pred_df, queue_hist, entries_delta, (q1h[0] if q1h else None)
+
+
+with tab_live:
+    st.header("🖥 Live Dashboard")
+    if st.button("🔄 Refresh", key="live_refresh"):
+        _live_load.clear()
+
+    try:
+        snap, pred_df, queue_hist, entries_delta, q1h_ago = _live_load()
+    except Exception as _e:
+        st.error(f"Database error: {_e}")
+        st.stop()
+
+    _tz_live = datetime.now(_timezone.utc).astimezone().tzinfo
+
+    queue_count  = int(snap["queue_count"])       if snap is not None else 0
+    active_lanes = int(snap["active_lanes"] or 2) if snap is not None else 2
+    wait_15m = float(pred_df.iloc[0]["wait_15m"]) if not pred_df.empty and pred_df.iloc[0]["wait_15m"] is not None else None
+    wait_30m = float(pred_df.iloc[0]["wait_30m"]) if not pred_df.empty and pred_df.iloc[0]["wait_30m"] is not None else None
+    entries_last = entries_delta[0] if entries_delta else 0
+    entries_prev = entries_delta[1] if entries_delta else 0
+    entries_diff = entries_last - entries_prev
+    queue_diff   = (queue_count - q1h_ago) if q1h_ago is not None else None
+
+    # Status banner
+    if wait_15m is None:
+        banner_color, banner_text = "#16a34a", "System OK — forecast not available"
+    elif wait_15m >= _WAIT_ALERT:
+        banner_color, banner_text = "#dc2626", f"ALERT — Estimated wait {wait_15m:.0f} min in 15 minutes"
+    elif wait_15m >= _WAIT_BUSY:
+        banner_color, banner_text = "#d97706", f"BUSY — Estimated wait {wait_15m:.0f} min in 15 minutes"
+    else:
+        banner_color, banner_text = "#16a34a", f"All Clear — Estimated wait {wait_15m:.0f} min in 15 minutes"
+
+    st.markdown(
+        f'<div style="background:{banner_color};padding:12px 24px;border-radius:10px;'
+        f'font-size:1.2rem;font-weight:700;color:white;margin-bottom:16px">{banner_text}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # KPI cards
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("In Queue Now",       queue_count,   f"{'+' if (queue_diff or 0) >= 0 else ''}{queue_diff or 0} vs 1h ago")
+    c2.metric("Est. Wait in 15 min", f"{wait_15m:.1f} min" if wait_15m is not None else "—")
+    c3.metric("Est. Wait in 30 min", f"{wait_30m:.1f} min" if wait_30m is not None else "—")
+    c4.metric("Active Lanes",        active_lanes)
+    c5.metric("Entries (last hr)",   entries_last,  f"{'+' if entries_diff >= 0 else ''}{entries_diff} vs prev hr")
+
+    # Predicted wait chart
+    st.markdown("#### Predicted Wait — Next 30 Min")
+    if not pred_df.empty:
+        pf = pred_df.copy()
+        pf["ds"] = pd.to_datetime(pf["ds"])
+        if pf["ds"].dt.tz is not None:
+            pf["ds"] = pf["ds"].dt.tz_convert(_tz_live)
+        pf["time_str"] = pf["ds"].dt.strftime("%H:%M")
+
+        fig_w = go.Figure()
+        fig_w.add_trace(go.Scatter(x=pf["time_str"], y=pf["wait_min"],
+            mode="lines", line=dict(color="#3498db", width=2.5),
+            fill="tozeroy", fillcolor="rgba(52,152,219,0.12)"))
+        fig_w.add_hline(y=_WAIT_BUSY,  line=dict(color="#e67e22", width=1.5, dash="dot"),
+            annotation_text="Busy",  annotation_position="top right")
+        fig_w.add_hline(y=_WAIT_ALERT, line=dict(color="#e74c3c", width=1.5, dash="dot"),
+            annotation_text="Alert", annotation_position="top right")
+        fig_w.update_layout(height=220, margin=dict(l=0,r=60,t=10,b=0),
+            plot_bgcolor="white", paper_bgcolor="white",
+            xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6", ticksuffix=" min"),
+            showlegend=False, hovermode="x unified")
+        st.plotly_chart(fig_w, use_container_width=True)
+
+        with st.expander("Forecast detail table"):
+            rows = []
+            for _, row in pf.iterrows():
+                w = float(row["wait_min"])
+                badge = "🔴 ALERT" if w >= _WAIT_ALERT else "🟡 BUSY" if w >= _WAIT_BUSY else "🟢 OK"
+                rows.append({"Time": row["time_str"], "Arrivals": f"{float(row['arrivals']):.1f}",
+                             "Est. Wait": f"{w:.1f} min", "Status": badge})
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No predictions found. Run ensemble_predict.py to generate a forecast.")
+
+    # Live queue depth
+    st.markdown("#### Live Queue Depth — Last 2 Hours")
+    if not queue_hist.empty:
+        qh = queue_hist.copy()
+        qh["timestamp"] = pd.to_datetime(qh["timestamp"])
+        if qh["timestamp"].dt.tz is not None:
+            qh["timestamp"] = qh["timestamp"].dt.tz_convert(_tz_live)
+        qh = qh.set_index("timestamp").resample("1min").mean().dropna().reset_index()
+        fig_q = go.Figure(go.Scatter(
+            x=qh["timestamp"].dt.strftime("%H:%M"), y=qh["queue_count"],
+            mode="lines", line=dict(color="#2ecc71", width=2.5),
+            fill="tozeroy", fillcolor="rgba(46,204,113,0.12)"))
+        fig_q.update_layout(height=200, margin=dict(l=0,r=20,t=10,b=0),
+            plot_bgcolor="white", paper_bgcolor="white",
+            xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6"),
+            showlegend=False, hovermode="x unified")
+        st.plotly_chart(fig_q, use_container_width=True)
+    else:
+        st.info("No queue history available.")

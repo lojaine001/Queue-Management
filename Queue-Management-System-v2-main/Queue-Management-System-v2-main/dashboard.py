@@ -2,7 +2,6 @@ import os
 import psycopg2
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timezone
 from dotenv import find_dotenv, load_dotenv
@@ -53,14 +52,15 @@ def load_queue_delta():
 def load_predictions():
     with _conn() as conn:
         df = pd.read_sql("""
-            SELECT prediction_for  AS ds,
+            SELECT DISTINCT ON (prediction_for)
+                   prediction_for  AS ds,
                    ensemble_yhat   AS arrivals,
                    est_wait_minutes AS wait_min,
                    wait_15m, wait_30m, status
             FROM queue_predictions
             WHERE prediction_for >= NOW()
-              AND prediction_for <= NOW() + INTERVAL '90 minutes'
-            ORDER BY prediction_for ASC
+              AND prediction_for <= NOW() + INTERVAL '30 minutes'
+            ORDER BY prediction_for, predicted_at DESC
         """, conn)
     return df
 
@@ -385,7 +385,7 @@ if snap_ts is not None:
 
 # ── Predicted wait chart ───────────────────────────────────────────────────────
 
-st.markdown('<div class="section-title">Predicted Wait Time - Next 60 Min</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Predicted Wait Time - Next 30 Min</div>', unsafe_allow_html=True)
 
 if not pred_df.empty:
     pf = pred_df.copy()

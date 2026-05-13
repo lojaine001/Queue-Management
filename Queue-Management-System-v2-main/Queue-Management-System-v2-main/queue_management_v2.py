@@ -540,6 +540,7 @@ def main():
                 _raw = obj.estimate
                 _cx = int((_raw[0][0] + _raw[1][0]) / 2)
                 _cy = int((_raw[0][1] + _raw[1][1]) / 2)
+                _cy_bottom = int(_raw[1][1])  # feet position — more accurate for line crossing
 
                 if obj.hit_counter >= max_age:
                     _x1, _y1 = int(_raw[0][0]), int(_raw[0][1])
@@ -559,16 +560,27 @@ def main():
                         "best_conf": 0.0,
                         "has_bag": False,
                         "entry_dt": datetime.now(),
+                        "crossing_history": [],  # (cx, cy_bottom) — last 5 positions for smoothing
                     }
 
                 # ── Line crossing check ───────────────────────────────────────
                 if counting_mode == 'line_crossing' and line_p1 and line_p2:
-                    signed_dist = _line_signed_dist(_cx, _cy, line_p1, line_p2)
+                    # Append feet position to history, keep last 5 frames
+                    _hist = track_data[track_id]["crossing_history"]
+                    _hist.append((_cx, _cy_bottom))
+                    if len(_hist) > 5:
+                        _hist.pop(0)
+
+                    # Smooth position over recent frames to suppress jitter
+                    _sx = int(sum(h[0] for h in _hist) / len(_hist))
+                    _sy = int(sum(h[1] for h in _hist) / len(_hist))
+
+                    signed_dist = _line_signed_dist(_sx, _sy, line_p1, line_p2)
                     half_band   = entry_line_width / 2
                     in_band     = (half_band > 0 and abs(signed_dist) <= half_band)
                     curr_side   = 1 if signed_dist >= 0 else -1
                     systems_logger.debug(
-                        f"[LINE] id={track_id} pos=({_cx},{_cy}) "
+                        f"[LINE] id={track_id} pos=({_sx},{_sy}) feet=({_cx},{_cy_bottom}) "
                         f"side={curr_side} dist={signed_dist:.1f}"
                         + (" [IN BAND]" if in_band else "")
                     )
@@ -581,12 +593,12 @@ def main():
                                 and track_id not in track_crossed
                                 and entry_line_direction in ('forward', 'any')):
                             line_y = (line_p1[1] + line_p2[1]) / 2
-                            if abs(_cy - line_y) <= 60:
+                            if abs(_sy - line_y) <= 60:
                                 counted_entry_times.append(current_time)
                                 track_crossed.add(track_id)
                                 systems_logger.info(
                                     f"[COUNTER] Near-line birth id={track_id} "
-                                    f"at ({_cx},{_cy}) line_y={line_y:.0f} — counted as entry"
+                                    f"at ({_sx},{_sy}) line_y={line_y:.0f} — counted as entry"
                                 )
                     elif track_id not in track_crossed:
                         prev_side = track_prev_side[track_id]
