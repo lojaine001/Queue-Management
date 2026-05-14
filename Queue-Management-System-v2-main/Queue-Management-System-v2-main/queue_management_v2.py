@@ -531,6 +531,46 @@ def main():
 
             current_time = time.time()
             current_track_ids = set()
+            _half_band = entry_line_width / 2
+
+            def _group_count(triggering_id):
+                """At crossing moment: count raw detection boxes in band, mark all band
+                tracks as crossed, insert NULL DB rows for people with no individual track."""
+                if _half_band <= 0 or not line_p1 or not line_p2:
+                    track_crossed.add(triggering_id)
+                    counted_entry_times.append(current_time)
+                    return
+
+                det_count = 0
+                for _box, _, __ in persons:
+                    _fx = (_box[0] + _box[2]) / 2
+                    _fy = _box[3]
+                    if abs(_line_signed_dist(_fx, _fy, line_p1, line_p2)) <= _half_band:
+                        det_count += 1
+                det_count = max(det_count, 1)
+
+                tracked_in_band = 0
+                for _obj in tracked_objects:
+                    _raw = _obj.estimate
+                    _fx = (_raw[0][0] + _raw[1][0]) / 2
+                    _fy = _raw[1][1]
+                    if abs(_line_signed_dist(_fx, _fy, line_p1, line_p2)) <= _half_band:
+                        if _obj.global_id not in track_crossed:
+                            track_crossed.add(_obj.global_id)
+                            tracked_in_band += 1
+
+                for _ in range(det_count):
+                    counted_entry_times.append(current_time)
+
+                untracked_extras = max(0, det_count - tracked_in_band)
+                for _ in range(untracked_extras):
+                    db.insert_entrance(None, None, None, 0.0, camID,
+                                       dwell_seconds=0.0, entry_time=None, has_bag=False)
+
+                systems_logger.info(
+                    f"[COUNTER] Group crossing id={triggering_id}: "
+                    f"{det_count} people ({tracked_in_band} tracked + {untracked_extras} untracked)"
+                )
 
             for obj in tracked_objects:
                 track_id = obj.global_id
@@ -612,32 +652,29 @@ def main():
                                     displacement = signed_dist - band_entry_dist[track_id]
                                     if displacement >= entry_line_min_disp:
                                         if entry_line_direction in ('forward', 'any'):
-                                            counted_entry_times.append(current_time)
-                                            track_crossed.add(track_id)
                                             band_entry_dist.pop(track_id, None)
                                             systems_logger.info(
                                                 f"[COUNTER] Band displacement id={track_id} "
                                                 f"disp={displacement:.1f}px"
                                             )
+                                            _group_count(track_id)
                             else:
                                 if track_id in band_entry_dist:
                                     # Was tracking inside band — now exited
                                     if curr_side == 1 and entry_line_direction in ('forward', 'any'):
                                         # Exited to inside without reaching min_disp — still count
-                                        counted_entry_times.append(current_time)
-                                        track_crossed.add(track_id)
                                         systems_logger.info(
                                             f"[COUNTER] Band full-cross id={track_id}"
                                         )
+                                        _group_count(track_id)
                                     band_entry_dist.pop(track_id, None)
                                 elif prev_side == -1 and curr_side == 1:
                                     # Fast mover: skipped band entirely in one frame
                                     if entry_line_direction in ('forward', 'any'):
-                                        counted_entry_times.append(current_time)
-                                        track_crossed.add(track_id)
                                         systems_logger.info(
                                             f"[COUNTER] Fast cross id={track_id} — skipped band"
                                         )
+                                        _group_count(track_id)
                         else:
                             # ── Thin-line mode: 2-frame debounce ─────────────
                             if prev_side != curr_side:
