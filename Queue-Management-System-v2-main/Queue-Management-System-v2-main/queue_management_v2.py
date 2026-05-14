@@ -14,6 +14,7 @@ import json
 import norfair
 from shapely.geometry import Polygon, Point
 from norfair import Detection, Tracker
+from norfair.distances import frobenius
 from uniface.analyzer import FaceAnalyzer
 from uniface.detection import RetinaFace, YOLOv8Face
 from uniface.attribute import AgeGender
@@ -276,7 +277,7 @@ def main():
 
     debug_mode = config2.get('debug_mode', True)
     save_snapshots = config2.get('save_snapshots', True)
-    max_distance_between_points = config2.get('max_distance_between_points', 2)
+    max_distance_between_points = config2.get('max_distance_between_points', 80)
     max_age = config2.get('max_age', 10)
     expect_fps = config2.get('expect_fps', 3)
     min_elapsed_time = config2.get('min_elapsed_time', 1)
@@ -331,7 +332,7 @@ def main():
     face_worker = FaceWorker(face_analyzer)
 
     tracker = Tracker(
-        distance_function=iou,
+        distance_function=frobenius,
         distance_threshold=max_distance_between_points,
         hit_counter_max=max_age,
         past_detections_length=max_age,
