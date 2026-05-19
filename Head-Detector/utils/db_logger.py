@@ -1,17 +1,28 @@
-import psycopg2
+import os
+
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
 from datetime import datetime
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv(usecwd=True))
 
 
 class DBLogger:
     def __init__(self):
         self.enabled = False
+        if psycopg2 is None:
+            print("[DB] WARNING: psycopg2 is not installed — running without DB.")
+            return
         try:
             self.conn = psycopg2.connect(
-                host="localhost",
-                port=5432,
-                dbname="iqms",
-                user="postgres",
-                password="0000"
+                host=os.getenv("DB_HOST",     "localhost"),
+                port=int(os.getenv("DB_PORT", 5432)),
+                dbname=os.getenv("DB_NAME",   "iqms"),
+                user=os.getenv("DB_USER",     "postgres"),
+                password=os.getenv("DB_PASSWORD", "0000"),
             )
             self.conn.autocommit = True
             self.cursor = self.conn.cursor()
@@ -22,26 +33,183 @@ class DBLogger:
             print(f"[DB] WARNING: Could not connect to PostgreSQL — running without DB. Error: {e}")
 
     def _create_table(self):
+        # Enable TimescaleDB (no-op if already enabled)
+        self.cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
+
+        # ── entrance_events ──────────────────────────────────────────────────
         self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS queue_events (
-                id            SERIAL PRIMARY KEY,
-                timestamp     TIMESTAMP DEFAULT NOW(),
+            CREATE TABLE IF NOT EXISTS entrance_events (
+                id            BIGSERIAL,
+                timestamp     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 track_id      INT,
-                camera_id     VARCHAR(100),
+                gender        VARCHAR(20),
+                age_estimate  FLOAT,
                 confidence    FLOAT,
-                dwell_seconds FLOAT DEFAULT 0
+                camera_id     VARCHAR(100),
+                dwell_seconds FLOAT DEFAULT 0,
+                has_bag       BOOLEAN DEFAULT FALSE,
+                active_head_tracks_in_lane INT DEFAULT 0
             )
         """)
 
-    def insert_queue_event(self, track_id, confidence, camera_id):
+        # Migrate existing column from TIMESTAMP to TIMESTAMPTZ if needed
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'entrance_events'
+                    AND column_name = 'timestamp'
+                    AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE entrance_events
+                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
+                    USING timestamp AT TIME ZONE 'UTC';
+                END IF;
+            END $$;
+        """)
+
+        # Add has_bag column if missing (existing deployments)
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'entrance_events'
+                    AND column_name = 'has_bag'
+                ) THEN
+                    ALTER TABLE entrance_events ADD COLUMN has_bag BOOLEAN DEFAULT FALSE;
+                END IF;
+            END $$;
+        """)
+
+        # Add active_head_tracks_in_lane column if missing (existing deployments)
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'entrance_events'
+                    AND column_name = 'active_head_tracks_in_lane'
+                ) THEN
+                    ALTER TABLE entrance_events
+                    ADD COLUMN active_head_tracks_in_lane INT DEFAULT 0;
+                END IF;
+            END $$;
+        """)
+
+        # Add equipment_type column if missing (existing deployments)
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'entrance_events'
+                    AND column_name = 'equipment_type'
+                ) THEN
+                    ALTER TABLE entrance_events
+                    ADD COLUMN equipment_type VARCHAR(30) DEFAULT 'none';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            SELECT create_hypertable('entrance_events', 'timestamp',
+                if_not_exists => TRUE,
+                migrate_data  => TRUE);
+        """)
+
+        # ── queue_state_snapshots ────────────────────────────────────────────
+        # Periodic snapshot of live queue state (every ~10 s from the pipeline)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS queue_state_snapshots (
+                id             BIGSERIAL,
+                timestamp      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                camera_id      VARCHAR(100),
+                queue_count    INT          NOT NULL DEFAULT 0,
+                avg_dwell_sec  FLOAT        DEFAULT 0,
+                max_dwell_sec  FLOAT        DEFAULT 0,
+                active_lanes   INT          DEFAULT 2
+            )
+        """)
+
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'queue_state_snapshots'
+                    AND column_name = 'timestamp'
+                    AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE queue_state_snapshots
+                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
+                    USING timestamp AT TIME ZONE 'UTC';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            SELECT create_hypertable('queue_state_snapshots', 'timestamp',
+                if_not_exists => TRUE,
+                migrate_data  => TRUE);
+        """)
+
+        # ── service_events ───────────────────────────────────────────────────
+        # Reserved for exit-ROI events (track lost / customer served)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS service_events (
+                id             BIGSERIAL,
+                timestamp      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                camera_id      VARCHAR(100),
+                track_id       INT,
+                total_dwell_sec FLOAT       DEFAULT 0
+            )
+        """)
+
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'service_events'
+                    AND column_name = 'timestamp'
+                    AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE service_events
+                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
+                    USING timestamp AT TIME ZONE 'UTC';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            SELECT create_hypertable('service_events', 'timestamp',
+                if_not_exists => TRUE,
+                migrate_data  => TRUE);
+        """)
+
+    def insert_entrance(self, track_id, gender, age, confidence, camera_id,
+                        dwell_seconds=None, entry_time=None, has_bag=False,
+                        active_head_tracks_in_lane=0, equipment_type="none"):
         if not self.enabled:
             return
+        has_bag = equipment_type != "none"
         try:
-            self.cursor.execute("""
-                INSERT INTO queue_events
-                    (track_id, camera_id, confidence)
-                VALUES (%s, %s, %s)
-            """, (track_id, camera_id, confidence))
+            if entry_time is not None:
+                self.cursor.execute("""
+                    INSERT INTO entrance_events
+                        (timestamp, track_id, gender, age_estimate, confidence,
+                         camera_id, dwell_seconds, has_bag, active_head_tracks_in_lane,
+                         equipment_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (entry_time, track_id, gender, age, confidence,
+                      camera_id, dwell_seconds, has_bag, active_head_tracks_in_lane,
+                      equipment_type))
+            else:
+                self.cursor.execute("""
+                    INSERT INTO entrance_events
+                        (track_id, gender, age_estimate, confidence,
+                         camera_id, dwell_seconds, has_bag, active_head_tracks_in_lane,
+                         equipment_type)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (track_id, gender, age, confidence,
+                      camera_id, dwell_seconds, has_bag, active_head_tracks_in_lane,
+                      equipment_type))
         except Exception as e:
             print(f"[DB] Insert error: {e}")
 
@@ -50,17 +218,62 @@ class DBLogger:
             return
         try:
             self.cursor.execute("""
-                UPDATE queue_events
+                UPDATE entrance_events
                 SET dwell_seconds = %s
                 WHERE track_id = %s
                 AND id = (
-                    SELECT id FROM queue_events
+                    SELECT id FROM entrance_events
                     WHERE track_id = %s
                     ORDER BY timestamp DESC LIMIT 1
                 )
             """, (dwell_seconds, track_id, track_id))
         except Exception as e:
             print(f"[DB] Update error: {e}")
+
+    def log_queue_snapshot(self, camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes=2):
+        """Insert a periodic queue-state snapshot used by ensemble_predict for dynamic wait estimation."""
+        if not self.enabled:
+            return
+        try:
+            self.cursor.execute("""
+                INSERT INTO queue_state_snapshots
+                    (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes))
+        except Exception as e:
+            print(f"[DB] Snapshot error: {e}")
+
+    def log_service_event(self, camera_id, track_id, total_dwell_sec):
+        """Record a service completion (customer leaves). Used for future exit-ROI integration."""
+        if not self.enabled:
+            return
+        try:
+            self.cursor.execute("""
+                INSERT INTO service_events
+                    (camera_id, track_id, total_dwell_sec)
+                VALUES (%s, %s, %s)
+            """, (camera_id, track_id, total_dwell_sec))
+        except Exception as e:
+            print(f"[DB] Service event error: {e}")
+
+    def get_period_summary(self, camera_id, interval_minutes=15):
+        """Return (track_count, avg_dwell_sec) for tracks inserted in the last interval_minutes."""
+        if not self.enabled:
+            return None, None
+        try:
+            self.cursor.execute("""
+                SELECT COUNT(*), AVG(dwell_seconds)
+                FROM entrance_events
+                WHERE camera_id = %s
+                  AND timestamp >= NOW() - INTERVAL '%s minutes'
+            """, (camera_id, interval_minutes))
+            row = self.cursor.fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+            avg_dwell = float(row[1]) if row and row[1] is not None else 0.0
+            return count, avg_dwell
+        except Exception as e:
+            print(f"[DB] Summary query error: {e}")
+            return None, None
 
     def close(self):
         if not self.enabled:

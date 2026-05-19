@@ -1,5 +1,10 @@
+import os
+
 import psycopg2
 from datetime import datetime
+from dotenv import find_dotenv, load_dotenv
+
+load_dotenv(find_dotenv(usecwd=True))
 
 
 class DBLogger:
@@ -7,11 +12,11 @@ class DBLogger:
         self.enabled = False
         try:
             self.conn = psycopg2.connect(
-                host="localhost",
-                port=5432,
-                dbname="iqms",
-                user="postgres",
-                password="0000"
+                host=os.getenv("DB_HOST",     "localhost"),
+                port=int(os.getenv("DB_PORT", 5432)),
+                dbname=os.getenv("DB_NAME",   "iqms"),
+                user=os.getenv("DB_USER",     "postgres"),
+                password=os.getenv("DB_PASSWORD", "0000"),
             )
             self.conn.autocommit = True
             self.cursor = self.conn.cursor()
@@ -22,10 +27,12 @@ class DBLogger:
             print(f"[DB] WARNING: Could not connect to PostgreSQL — running without DB. Error: {e}")
 
     def _create_table(self):
+        self.cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
+
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS entrance_events (
-                id            SERIAL PRIMARY KEY,
-                timestamp     TIMESTAMP DEFAULT NOW(),
+                id            BIGSERIAL,
+                timestamp     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 track_id      INT,
                 gender        VARCHAR(20),
                 age_estimate  FLOAT,
@@ -35,15 +42,124 @@ class DBLogger:
             )
         """)
 
-    def insert_entrance(self, track_id, gender, age, confidence, camera_id):
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'entrance_events'
+                    AND column_name = 'timestamp'
+                    AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE entrance_events
+                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
+                    USING timestamp AT TIME ZONE 'UTC';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'entrance_events'
+                    AND column_name = 'has_bag'
+                ) THEN
+                    ALTER TABLE entrance_events ADD COLUMN has_bag BOOLEAN DEFAULT FALSE;
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            SELECT create_hypertable('entrance_events', 'timestamp',
+                if_not_exists => TRUE,
+                migrate_data  => TRUE);
+        """)
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS queue_state_snapshots (
+                id             BIGSERIAL,
+                timestamp      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                camera_id      VARCHAR(100),
+                queue_count    INT          NOT NULL DEFAULT 0,
+                avg_dwell_sec  FLOAT        DEFAULT 0,
+                max_dwell_sec  FLOAT        DEFAULT 0,
+                active_lanes   INT          DEFAULT 2
+            )
+        """)
+
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'queue_state_snapshots'
+                    AND column_name = 'timestamp'
+                    AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE queue_state_snapshots
+                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
+                    USING timestamp AT TIME ZONE 'UTC';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            SELECT create_hypertable('queue_state_snapshots', 'timestamp',
+                if_not_exists => TRUE,
+                migrate_data  => TRUE);
+        """)
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS service_events (
+                id             BIGSERIAL,
+                timestamp      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                camera_id      VARCHAR(100),
+                track_id       INT,
+                total_dwell_sec FLOAT       DEFAULT 0
+            )
+        """)
+
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'service_events'
+                    AND column_name = 'timestamp'
+                    AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE service_events
+                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
+                    USING timestamp AT TIME ZONE 'UTC';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            SELECT create_hypertable('service_events', 'timestamp',
+                if_not_exists => TRUE,
+                migrate_data  => TRUE);
+        """)
+
+    def insert_entrance(self, track_id, gender, age, confidence, camera_id,
+                        dwell_seconds=None, entry_time=None, has_bag=False):
         if not self.enabled:
             return
         try:
-            self.cursor.execute("""
-                INSERT INTO entrance_events
-                    (track_id, gender, age_estimate, confidence, camera_id)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (track_id, gender, age, confidence, camera_id))
+            if entry_time is not None:
+                self.cursor.execute("""
+                    INSERT INTO entrance_events
+                        (timestamp, track_id, gender, age_estimate, confidence,
+                         camera_id, dwell_seconds, has_bag)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (entry_time, track_id, gender, age, confidence,
+                      camera_id, dwell_seconds, has_bag))
+            else:
+                self.cursor.execute("""
+                    INSERT INTO entrance_events
+                        (track_id, gender, age_estimate, confidence,
+                         camera_id, dwell_seconds, has_bag)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (track_id, gender, age, confidence,
+                      camera_id, dwell_seconds, has_bag))
         except Exception as e:
             print(f"[DB] Insert error: {e}")
 
@@ -63,6 +179,100 @@ class DBLogger:
             """, (dwell_seconds, track_id, track_id))
         except Exception as e:
             print(f"[DB] Update error: {e}")
+
+    def finalize_entrance(self, track_id, gender, age, confidence,
+                          dwell_seconds=None, has_bag=False):
+        if not self.enabled:
+            return
+        try:
+            self.cursor.execute("""
+                UPDATE entrance_events
+                SET gender = %s,
+                    age_estimate = %s,
+                    confidence = %s,
+                    dwell_seconds = %s,
+                    has_bag = %s
+                WHERE track_id = %s
+                AND id = (
+                    SELECT id FROM entrance_events
+                    WHERE track_id = %s
+                    ORDER BY timestamp DESC LIMIT 1
+                )
+            """, (gender, age, confidence, dwell_seconds, has_bag, track_id, track_id))
+        except Exception as e:
+            print(f"[DB] Finalize error: {e}")
+
+    def log_queue_snapshot(self, camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes=2):
+        if not self.enabled:
+            return
+        try:
+            self.cursor.execute("""
+                INSERT INTO queue_state_snapshots
+                    (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes))
+        except Exception as e:
+            print(f"[DB] Snapshot error: {e}")
+
+    def get_today_entry_timestamps(self):
+        """Return today's entrance event timestamps as Unix epoch floats for counted_entry_times."""
+        if not self.enabled:
+            return []
+        try:
+            self.cursor.execute("""
+                SELECT EXTRACT(EPOCH FROM timestamp)
+                FROM entrance_events
+                WHERE timestamp >= CURRENT_DATE::TIMESTAMPTZ
+                ORDER BY timestamp ASC
+            """)
+            return [float(row[0]) for row in self.cursor.fetchall()]
+        except Exception as e:
+            print(f"[DB] get_today_entry_timestamps error: {e}")
+            return []
+
+    def _ensure_lane_events(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS lane_events (
+                id           BIGSERIAL,
+                timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                camera_id    VARCHAR(100),
+                active_lanes INT         NOT NULL,
+                note         TEXT
+            )
+        """)
+        try:
+            self.cursor.execute("""
+                SELECT create_hypertable('lane_events', 'timestamp',
+                    if_not_exists => TRUE, migrate_data => TRUE)
+            """)
+        except Exception:
+            pass
+
+    def get_current_lanes(self, camera_id, default=2):
+        if not self.enabled:
+            return default
+        try:
+            self.cursor.execute("""
+                SELECT active_lanes FROM lane_events
+                WHERE camera_id = %s
+                ORDER BY timestamp DESC LIMIT 1
+            """, (camera_id,))
+            row = self.cursor.fetchone()
+            return row[0] if row else default
+        except Exception:
+            return default
+
+    def log_service_event(self, camera_id, track_id, total_dwell_sec):
+        if not self.enabled:
+            return
+        try:
+            self.cursor.execute("""
+                INSERT INTO service_events
+                    (camera_id, track_id, total_dwell_sec)
+                VALUES (%s, %s, %s)
+            """, (camera_id, track_id, total_dwell_sec))
+        except Exception as e:
+            print(f"[DB] Service event error: {e}")
 
     def close(self):
         if not self.enabled:

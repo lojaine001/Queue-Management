@@ -1,71 +1,52 @@
-auth_type: basic
-camID: Bourgogne_Sortie_Gauche
-custom_model: models/yolov9_s_discrete_headpose_post_0100_1x3x480x640.onnx
-digitalio_close_path: /rcp.xml?command=0x01c1&type=F_FLAG&direction=WRITE&num=1&payload=0
-digitalio_mode: pulse
-digitalio_open_path: /api/relay/output1/trigger
-endpoint: ''
-iou_score: 0.3
-ip_address: '192.168.1.48:554/?inst=3'
+camID: Bosch_Camera_exit
+ip_address: '192.168.1.48:554/?inst=2'
 username: service
 password: 'Cam10003!'
-min_delay: 0.45
-min_score: 0.3
-mode: digitalIO
-model: standard.pt
+
+custom_model: models/yolov9_s_discrete_headpose_post_0100_1x3x480x640.onnx
 disable_headpose_identification_mode: True
-pattern_classes:
-- TaxiSign
-points:
-- - 234
-  - 18
-- - 309
-  - 20
-- - 309
-  - 109
-- - 305
-  - 144
-- - 307
-  - 183
-- - 315
-  - 222
-- - 347
-  - 220
-- - 373
-  - 249
-- - 412
-  - 246
-- - 427
-  - 244
-- - 436
-  - 231
-- - 441
-  - 214
-- - 443
-  - 179
-- - 437
-  - 150
-- - 431
-  - 128
-- - 420
-  - 95
-- - 389
-  - 28
-- - 508
-  - 19
-- - 573
-  - 113
-- - 545
-  - 231
-- - 508
-  - 358
-- - 550
-  - 417
-- - 561
-  - 443
-- - 542
-  - 477
-- - 64
-  - 478
-score: 0.3
-webhook_port: 5015
+
+score: 0.15
+min_delay: 0.45
+
+rois:
+  - name: lane1
+    points:
+      - - 2
+        - 2
+      - - 187
+        - 5
+      - - 86
+        - 261
+      - - 1
+        - 188  
+  - name: lane2
+    points:
+    - - 193
+      - 406
+    - - 244
+      - 17
+    - - 309
+      - 17
+    - - 356
+      - 407
+  - name: lane3
+    points:
+    - - 345
+      - 4
+    - - 480
+      - 446
+    - - 567
+      - 101
+    - - 458
+      - 7
+  - name: lane4
+    points:
+    - - 570
+      - 117
+    - - 461
+      - 1
+    - - 526
+      - 2
+    - - 582
+      - 66  

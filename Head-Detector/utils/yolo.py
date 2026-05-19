@@ -126,19 +126,38 @@ class AbstractModel(ABC):
         self._attr_class_score_th = attr_class_score_th
         self._providers = providers
 
-        # Model loading
-        onnxruntime.set_default_logger_severity(3) # ERROR
+        # Model loading — redirect OS-level stderr during session creation so
+        # C++ provider-load errors (e.g. missing OpenVINO DLL) don't pollute output.
+        onnxruntime.set_default_logger_severity(3)
         session_option = onnxruntime.SessionOptions()
         session_option.log_severity_level = 3
-        self._interpreter = \
-            onnxruntime.InferenceSession(
-                model_path,
+
+        _devnull_fd  = os.open(os.devnull, os.O_WRONLY)
+        _old_stderr  = os.dup(2)
+        os.dup2(_devnull_fd, 2)
+        try:
+            self._interpreter = self._create_inference_session(
+                model_path=model_path,
                 sess_options=session_option,
                 providers=providers,
             )
+        finally:
+            os.dup2(_old_stderr, 2)
+            os.close(_old_stderr)
+            os.close(_devnull_fd)
+
+        requested_provider_names = [
+            self._provider_name(provider) for provider in (providers or [])
+        ]
         self._providers = self._interpreter.get_providers()
-        print(f'{Color.GREEN("Enabled ONNX ExecutionProviders:")}')
-        pprint(f'{self._providers}')
+        print(f'YOLOv9 requested providers: {requested_provider_names}')
+        print(f'YOLOv9 enabled providers: {self._providers}')
+
+        if 'OpenVINOExecutionProvider' in requested_provider_names:
+            if 'OpenVINOExecutionProvider' in self._providers:
+                print('OpenVINO is active for this session.')
+            else:
+                print('OpenVINO was requested but is not active; ONNX Runtime fell back to CPU.')
 
         onnx_graph: onnx.ModelProto = onnx.load(model_path)
         if onnx_graph.graph.node[0].op_type == "Resize":
@@ -171,6 +190,63 @@ class AbstractModel(ABC):
         self._swap = (2, 0, 1)
         self._h_index = 2
         self._w_index = 3
+
+    @staticmethod
+    def _provider_name(provider) -> str:
+        if isinstance(provider, tuple):
+            return provider[0]
+        return provider
+
+    def _create_inference_session(
+        self,
+        *,
+        model_path: str,
+        sess_options: onnxruntime.SessionOptions,
+        providers: Optional[List],
+    ):
+        if not providers:
+            return onnxruntime.InferenceSession(
+                model_path,
+                sess_options=sess_options,
+                providers=providers,
+                enable_fallback=False,
+            )
+
+        provider_names = [self._provider_name(provider) for provider in providers]
+        has_openvino = 'OpenVINOExecutionProvider' in provider_names
+        has_cpu_fallback = 'CPUExecutionProvider' in provider_names
+
+        if not has_openvino or not has_cpu_fallback:
+            return onnxruntime.InferenceSession(
+                model_path,
+                sess_options=sess_options,
+                providers=providers,
+                enable_fallback=False,
+            )
+
+        try:
+            session = onnxruntime.InferenceSession(
+                model_path,
+                sess_options=sess_options,
+                providers=providers,
+                enable_fallback=False,
+            )
+            enabled = session.get_providers()
+            if 'OpenVINOExecutionProvider' not in enabled:
+                raise RuntimeError(
+                    f'OpenVINOExecutionProvider was requested but the session enabled {enabled}.'
+                )
+            return session
+        except Exception as exc:
+            print(Color.YELLOW(
+                f'[ORT] WARNING: OpenVINO session initialization failed, falling back to CPU. Reason: {exc}'
+            ))
+            return onnxruntime.InferenceSession(
+                model_path,
+                sess_options=sess_options,
+                providers=['CPUExecutionProvider'],
+                enable_fallback=False,
+            )
 
 
     @abstractmethod

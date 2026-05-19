@@ -17,9 +17,13 @@ scikit-image
 shapely
 ipyfilechooser
 onnx
-onnxruntime
-norfair
+# OpenVINO-enabled ONNX Runtime used by queue_management_v2.py
+onnxruntime-openvino==1.23.0
+openvino==2025.3.0
 requests
 pandas
 tqdm
 uniface
+pygame
+streamlit
+plotly

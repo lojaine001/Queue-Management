@@ -1,4 +1,6 @@
 import pyrootutils
+import os
+import sys
 
 ROOT = pyrootutils.setup_root(
     search_from=__file__,
@@ -13,6 +15,47 @@ import yaml
 import onnxruntime
 import numpy as np
 from typing import Tuple, List
+
+
+def _register_windows_runtime_dirs() -> None:
+    if os.name != 'nt':
+        return
+
+    candidate_dirs = []
+    pyhome = os.path.dirname(os.path.dirname(sys.executable))
+    if pyhome:
+        candidate_dirs.extend([
+            os.path.join(pyhome, 'Lib', 'site-packages', 'openvino', 'libs'),
+            os.path.join(pyhome, 'Lib', 'site-packages', 'onnxruntime', 'capi'),
+        ])
+
+    current_path = os.environ.get('PATH', '')
+    path_parts = current_path.split(os.pathsep) if current_path else []
+    new_parts = []
+
+    for path in candidate_dirs:
+        if not os.path.isdir(path):
+            continue
+        if hasattr(os, 'add_dll_directory'):
+            try:
+                os.add_dll_directory(path)
+            except OSError:
+                pass
+        if path not in path_parts and path not in new_parts:
+            new_parts.append(path)
+
+    if new_parts:
+        os.environ['PATH'] = os.pathsep.join(new_parts + path_parts)
+
+
+def _get_providers(device: str):
+    device_name = str(device or 'cpu').strip().lower()
+    if device_name == 'openvino':
+        _register_windows_runtime_dirs()
+        return ['OpenVINOExecutionProvider', 'CPUExecutionProvider']
+    if device_name == 'cuda':
+        return ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    return ['CPUExecutionProvider']
 
 class YOLOv9:
     def __init__(self,
@@ -36,10 +79,12 @@ class YOLOv9:
     def create_session(self) -> None:
         opt_session = onnxruntime.SessionOptions()
         opt_session.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
-        providers = ['CPUExecutionProvider']
-        if self.device.casefold() != "cpu":
-            providers.append("CUDAExecutionProvider")
-        session = onnxruntime.InferenceSession(self.model_path, providers=providers)
+        providers = _get_providers(self.device)
+        session = onnxruntime.InferenceSession(
+            self.model_path,
+            sess_options=opt_session,
+            providers=providers,
+        )
         self.session = session
         self.model_inputs = self.session.get_inputs()
         self.input_names = [self.model_inputs[i].name for i in range(len(self.model_inputs))]
@@ -47,6 +92,15 @@ class YOLOv9:
         self.model_output = self.session.get_outputs()
         self.output_names = [self.model_output[i].name for i in range(len(self.model_output))]
         self.input_height, self.input_width = self.input_shape[2:]
+
+        enabled_providers = self.session.get_providers()
+        print(f"YOLOv9 requested providers: {providers}")
+        print(f"YOLOv9 enabled providers: {enabled_providers}")
+        if 'OpenVINOExecutionProvider' in providers:
+            if 'OpenVINOExecutionProvider' in enabled_providers:
+                print('OpenVINO is active for this session.')
+            else:
+                print('OpenVINO was requested but is not active; ONNX Runtime fell back to CPU.')
 
         if self.class_mapping_path is not None:
             with open(self.class_mapping_path, 'r') as file:

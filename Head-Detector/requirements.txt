@@ -2,18 +2,24 @@
 PyYAML
 python-dotenv
 pyrootutils
-opencv-python
-numpy
+opencv-python<4.11
+numpy>=2.0
 colorlog
 Pillow
-scipy
+scipy>=1.10,<1.16
 scikit-image
 shapely
 ipyfilechooser
-onnx
-onnxruntime
-norfair
+onnx==1.12.0
+protobuf<=3.20.1
+# OpenVINO-enabled ONNX Runtime used by this app on Windows.
+onnxruntime-openvino==1.23.0
+openvino==2025.3.0
+# Default tracker dependency. The code can now skip Norfair at runtime when a
+# different tracker path is selected, but the standard Head-Detector install
+# still keeps it available.
+norfair==2.3.0
 requests
 pandas
 tqdm
-uniface
+psycopg2-binary

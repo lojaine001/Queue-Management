@@ -8,8 +8,6 @@ import datetime
 import requests
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from threading import Thread, Lock
-
-from norfair import Detection, Tracker
 from shapely.geometry import Polygon,Point
 
 import numpy as np
@@ -67,14 +65,14 @@ class PersonDetectionLogger:
             self.tracking_section_started = True
         
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.log_item(f"[{ts}] NEW    | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Age: {age:>5.2f}s | Conf: {conf:.2f}")
+        self.log_item(f"[{ts}] NEW    | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Track_Age: {age:>5.2f}s | Conf: {conf:.2f}")
     
     def log_tracking_update(self, track_id, track_dur, age, conf, iou=None, is_peak=False):
         """Log tracking update"""
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         iou_str = f" | IoU: {iou:.3f}" if iou is not None else ""
         peak_str = " ⭐" if is_peak else ""
-        self.log_item(f"[{ts}] UPDATE | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Age: {age:>5.2f}s | Conf: {conf:.2f}{iou_str}{peak_str}")
+        self.log_item(f"[{ts}] UPDATE | ID: {track_id:<4} | Track_Time: {track_dur:>5.2f}s | Track_Age: {age:>5.2f}s | Conf: {conf:.2f}{iou_str}{peak_str}")
     
     def end_block(self):
         """Print detection block footer"""
@@ -124,15 +122,6 @@ def send_rest_notification(url, username, password, cam_id, auth_type='basic'):
             logging.error(f"REST Notification Failed: {response.status_code} - {response.text}")
     except Exception as e:
         logging.error(f"REST Notification Error: {str(e)}")
-
-def get_norfair_detections(detections):
-    face_norfair_detections = []
-
-    for bbox in detections:
-        bbox = np.array(bbox).reshape(2, 2)
-        face_norfair_detections.append(Detection(points=bbox))
-
-    return face_norfair_detections
 
 def euclidean_distance(detection, tracked_object):
     return np.linalg.norm(detection.points - tracked_object.estimate)

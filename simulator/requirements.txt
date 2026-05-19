@@ -1,0 +1,17 @@
+# Core simulator DB + data dependencies
+psycopg2-binary
+python-dotenv
+pandas
+numpy
+
+# Streamlit dashboard
+streamlit
+plotly
+
+# Smooth local viewer
+pygame
+
+# Web viewer backend
+websockets>=11.0
+
+profet

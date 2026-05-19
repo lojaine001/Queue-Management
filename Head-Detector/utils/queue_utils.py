@@ -9,7 +9,11 @@ import requests
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from threading import Thread, Lock
 
-from norfair import Detection, Tracker
+try:
+    from norfair import Detection, Tracker
+except Exception:
+    Detection = None  # type: ignore[assignment]
+    Tracker = None    # type: ignore[assignment]
 from shapely.geometry import Polygon,Point
 
 import numpy as np
@@ -126,6 +130,10 @@ def send_rest_notification(url, username, password, cam_id, auth_type='basic'):
         logging.error(f"REST Notification Error: {str(e)}")
 
 def get_norfair_detections(detections):
+    """Convert detections to Norfair format (optional if norfair is not available)."""
+    if Detection is None:
+        raise RuntimeError("norfair is not installed. Install it with: pip install norfair")
+    
     face_norfair_detections = []
 
     for bbox in detections:
@@ -301,13 +309,40 @@ def create_logger(name, level = 'DEBUG', log_dir=None, file = None):
         
     return logger
 
-def write_text(frame, text, fps, x=25, y=10):
-    text = text + str(math.ceil(fps))
-    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
-    # h, w = frame.shape[:2]
-    text_w, text_h = text_size[0]
-    cv2.rectangle(frame, (x, y), (x+text_w+5, y+text_h+30), (255, 255, 255), -1) #x+text_w+5
-    cv2.putText(frame, text, (x+5, y+text_h+15), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2, lineType=cv2.LINE_AA)
+def write_text(frame, text, position="top_left", padding_ratio=0.02, color=(0, 0, 0)):
+    h, w = frame.shape[:2]
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(w, h) / 1000
+    thickness = max(1, int(font_scale * 2))
+
+    (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
+
+    padding = int(padding_ratio * min(w, h))
+
+    if position == "top_left":
+        x = padding
+        y = padding + text_h
+    elif position == "top_right":
+        x = w - text_w - padding
+        y = padding + text_h
+    elif position == "bottom_left":
+        x = padding
+        y = h - padding
+    elif position == "bottom_right":
+        x = w - text_w - padding
+        y = h - padding
+    else:
+        raise ValueError("position must be: top_left, top_right, bottom_left, bottom_right")
+
+    cv2.rectangle(
+        frame,
+        (x - 5, y - text_h - 5),
+        (x + text_w + 5, y + 5),
+        (255, 255, 255),
+        -1
+    )
+    cv2.putText(frame, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
 
 def overlay_text_count(frame, text, count):
     text = text + str(count)
