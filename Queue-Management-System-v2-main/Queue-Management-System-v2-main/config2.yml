@@ -19,15 +19,16 @@ tip_offset: 0.5
 entry_confirmation_seconds: 1.5  # delay before a person track becomes a counted entry
 counting_mode: line_crossing      # roi | line_crossing
 entry_line_direction: forward    # forward | reverse | any
-entry_line_points: [[185, 231], [470, 227]]   # tuned to door zone
+entry_line_points: [[185, 260], [470, 260]]   # tuned to door zone
 entry_line_width: 20         # band total width in pixels (half on each side of line)
 entry_line_min_displacement: 10  # min forward movement (px) inside the band to confirm a crossing
+avg_person_width: 55         # expected single-person box width in pixels — tuned from logs
 
 # Run face/age/gender analysis only every N frames (1 = every frame, 3 = every 3rd frame)
 # Increase to reduce CPU load on the entrance pipeline
 face_skip_frames: 3
 
-min_elapsed_time: 10 #seconds
+min_elapsed_time: 4 #seconds
 
 min_face_size: 0  # 0 = no size filter (all detected faces pass through)
 

@@ -245,8 +245,9 @@ queue_count  = int(snap["queue_count"])       if snap is not None else 0
 active_lanes = int(snap["active_lanes"] or 2) if snap is not None else 2
 snap_ts      = snap["timestamp"]              if snap is not None else None
 
-wait_15m = float(pred_df.iloc[0]["wait_15m"]) if not pred_df.empty and pred_df.iloc[0]["wait_15m"] is not None else None
-wait_30m = float(pred_df.iloc[0]["wait_30m"]) if not pred_df.empty and pred_df.iloc[0]["wait_30m"] is not None else None
+wait_15m   = float(pred_df.iloc[0]["wait_15m"])  if not pred_df.empty and pred_df.iloc[0]["wait_15m"]  is not None else None
+wait_30m   = float(pred_df.iloc[0]["wait_30m"])  if not pred_df.empty and pred_df.iloc[0]["wait_30m"]  is not None else None
+est_wait   = float(pred_df.iloc[0]["wait_min"])  if not pred_df.empty and pred_df.iloc[0]["wait_min"]  is not None else wait_15m
 
 entries_last_hr = entries_delta[0] if entries_delta else 0
 entries_prev_hr = entries_delta[1] if entries_delta else 0
@@ -287,14 +288,14 @@ if not status_breakdown.empty:
         alert_slots = int(alert_row.iloc[0]["slots"])
 alert_minutes_today = alert_slots * BUCKET_MIN
 
-if wait_15m is None:
+if est_wait is None:
     status_class, status_text = "status-ok",    "System OK - forecast not available"
-elif wait_15m >= WAIT_ALERT_MIN:
-    status_class, status_text = "status-alert", f"ALERT - Estimated wait {wait_15m:.0f} min in 15 minutes"
-elif wait_15m >= WAIT_BUSY_MIN:
-    status_class, status_text = "status-busy",  f"BUSY - Estimated wait {wait_15m:.0f} min in 15 minutes"
+elif est_wait >= WAIT_ALERT_MIN:
+    status_class, status_text = "status-alert", f"ALERT - Estimated wait {est_wait:.0f} min"
+elif est_wait >= WAIT_BUSY_MIN:
+    status_class, status_text = "status-busy",  f"BUSY - Estimated wait {est_wait:.0f} min"
 else:
-    status_class, status_text = "status-ok",    f"All Clear - Estimated wait {wait_15m:.0f} min in 15 minutes"
+    status_class, status_text = "status-ok",    f"All Clear - Estimated wait {est_wait:.0f} min"
 
 
 # ── Header ─────────────────────────────────────────────────────────────────────

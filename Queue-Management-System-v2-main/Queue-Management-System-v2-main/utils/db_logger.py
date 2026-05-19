@@ -254,6 +254,22 @@ class DBLogger:
         except Exception:
             return default
 
+    def get_today_entry_timestamps(self):
+        """Return today's entrance event timestamps as Unix epoch floats for counted_entry_times."""
+        if not self.enabled:
+            return []
+        try:
+            self.cursor.execute("""
+                SELECT EXTRACT(EPOCH FROM timestamp)
+                FROM entrance_events
+                WHERE timestamp >= CURRENT_DATE::TIMESTAMPTZ
+                ORDER BY timestamp ASC
+            """)
+            return [float(row[0]) for row in self.cursor.fetchall()]
+        except Exception as e:
+            print(f"[DB] get_today_entry_timestamps error: {e}")
+            return []
+
     def log_service_event(self, camera_id, track_id, total_dwell_sec):
         """Record a service completion (customer leaves). Used for future exit-ROI integration."""
         if not self.enabled:

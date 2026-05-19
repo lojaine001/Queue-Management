@@ -14,7 +14,6 @@ import json
 import norfair
 from shapely.geometry import Polygon, Point
 from norfair import Detection, Tracker
-from norfair.distances import frobenius
 from uniface.analyzer import FaceAnalyzer
 from uniface.detection import RetinaFace, YOLOv8Face
 from uniface.attribute import AgeGender
@@ -287,6 +286,7 @@ def main():
     entry_line_direction = config2.get('entry_line_direction', 'forward').lower()
     entry_line_width     = config2.get('entry_line_width', 0)
     entry_line_min_disp  = config2.get('entry_line_min_displacement', 10)
+    avg_person_width     = config2.get('avg_person_width', 80)
     mask_zones           = config2.get('mask_zones', [])
     active_lanes         = config2.get('active_lanes', 2)
 
@@ -332,7 +332,7 @@ def main():
     face_worker = FaceWorker(face_analyzer)
 
     tracker = Tracker(
-        distance_function=frobenius,
+        distance_function=iou,
         distance_threshold=max_distance_between_points,
         hit_counter_max=max_age,
         past_detections_length=max_age,
@@ -391,11 +391,9 @@ def main():
     _T_REPORT_EVERY = 30.0     # seconds between timing reports
     track_data = {}        # track_id -> {gender, age, confidence, best_conf} accumulated while alive
     prev_track_ids = set() # track_ids active in the previous frame
-    counted_entry_times = deque()
-    track_prev_side: dict[int, int]   = {}   # line crossing: last known side per track
-    track_crossed:   set[int]         = set()  # tracks that already triggered a count
-    track_cross_candidate: dict       = {}   # track_id → (from, to, count) for thin-line mode
-    band_entry_dist: dict[int, float] = {}   # track_id → signed_dist when it entered the band
+    counted_entry_times = deque(db.get_today_entry_timestamps())
+    track_crossed:  set[int]        = set()   # tracks that already triggered a count
+    band_candidate: dict[int, list] = {}      # track_id → [dist1, dist2, ...] for 3-frame confirm
 
     try:
         while True:
@@ -427,9 +425,28 @@ def main():
                 cv2.polylines(viz_img, [pts], True, (0, 255, 255), 3, lineType=cv2.LINE_AA)
 
             if counting_mode == 'line_crossing' and line_p1 and line_p2:
-                cv2.line(viz_img, tuple(line_p1), tuple(line_p2), (0, 0, 255), 2, cv2.LINE_AA)
-                cv2.putText(viz_img, "ENTRY LINE", (line_p1[0], line_p1[1] - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+                # Middle line — faded grey
+                cv2.line(viz_img, tuple(line_p1), tuple(line_p2), (120, 120, 120), 1, cv2.LINE_AA)
+
+                # Band lines (offset perpendicular to the entry line)
+                if entry_line_width > 0:
+                    _dx = line_p2[0] - line_p1[0]
+                    _dy = line_p2[1] - line_p1[1]
+                    _len = (_dx * _dx + _dy * _dy) ** 0.5
+                    if _len > 0:
+                        _hb = entry_line_width / 2
+                        _nx = int(_dy / _len * _hb)
+                        _ny = int(-_dx / _len * _hb)
+                        _p1_top = (line_p1[0] + _nx, line_p1[1] + _ny)
+                        _p2_top = (line_p2[0] + _nx, line_p2[1] + _ny)
+                        _p1_bot = (line_p1[0] - _nx, line_p1[1] - _ny)
+                        _p2_bot = (line_p2[0] - _nx, line_p2[1] - _ny)
+                        cv2.line(viz_img, _p1_top, _p2_top, (255, 255, 255), 2, cv2.LINE_AA)
+                        cv2.line(viz_img, _p1_bot, _p2_bot, (255, 255, 255), 2, cv2.LINE_AA)
+                        cv2.putText(viz_img, "TOP BAND", (_p1_top[0], _p1_top[1] - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.putText(viz_img, "BOTTOM BAND", (_p1_bot[0], _p1_bot[1] + 14),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
             timestamp_str = get_datetime_str()
 
@@ -532,46 +549,7 @@ def main():
 
             current_time = time.time()
             current_track_ids = set()
-            _half_band = entry_line_width / 2
 
-            def _group_count(triggering_id):
-                """At crossing moment: count raw detection boxes in band, mark all band
-                tracks as crossed, insert NULL DB rows for people with no individual track."""
-                if _half_band <= 0 or not line_p1 or not line_p2:
-                    track_crossed.add(triggering_id)
-                    counted_entry_times.append(current_time)
-                    return
-
-                det_count = 0
-                for _box, _, __ in persons:
-                    _fx = (_box[0] + _box[2]) / 2
-                    _fy = _box[3]
-                    if abs(_line_signed_dist(_fx, _fy, line_p1, line_p2)) <= _half_band:
-                        det_count += 1
-                det_count = max(det_count, 1)
-
-                tracked_in_band = 0
-                for _obj in tracked_objects:
-                    _raw = _obj.estimate
-                    _fx = (_raw[0][0] + _raw[1][0]) / 2
-                    _fy = _raw[1][1]
-                    if abs(_line_signed_dist(_fx, _fy, line_p1, line_p2)) <= _half_band:
-                        if _obj.global_id not in track_crossed:
-                            track_crossed.add(_obj.global_id)
-                            tracked_in_band += 1
-
-                for _ in range(det_count):
-                    counted_entry_times.append(current_time)
-
-                untracked_extras = max(0, det_count - tracked_in_band)
-                for _ in range(untracked_extras):
-                    db.insert_entrance(None, None, None, 0.0, camID,
-                                       dwell_seconds=0.0, entry_time=None, has_bag=False)
-
-                systems_logger.info(
-                    f"[COUNTER] Group crossing id={triggering_id}: "
-                    f"{det_count} people ({tracked_in_band} tracked + {untracked_extras} untracked)"
-                )
 
             for obj in tracked_objects:
                 track_id = obj.global_id
@@ -606,105 +584,55 @@ def main():
 
                 # ── Line crossing check ───────────────────────────────────────
                 if counting_mode == 'line_crossing' and line_p1 and line_p2:
-                    # Append feet position to history, keep last 5 frames
+                    # Smooth position over recent frames to suppress jitter
                     _hist = track_data[track_id]["crossing_history"]
                     _hist.append((_cx, _cy_bottom))
                     if len(_hist) > 5:
                         _hist.pop(0)
-
-                    # Smooth position over recent frames to suppress jitter
                     _sx = int(sum(h[0] for h in _hist) / len(_hist))
                     _sy = int(sum(h[1] for h in _hist) / len(_hist))
 
                     signed_dist = _line_signed_dist(_sx, _sy, line_p1, line_p2)
-                    half_band   = entry_line_width / 2
-                    in_band     = (half_band > 0 and abs(signed_dist) <= half_band)
-                    curr_side   = 1 if signed_dist >= 0 else -1
                     systems_logger.debug(
                         f"[LINE] id={track_id} pos=({_sx},{_sy}) feet=({_cx},{_cy_bottom}) "
-                        f"side={curr_side} dist={signed_dist:.1f}"
-                        + (" [IN BAND]" if in_band else "")
+                        f"dist={signed_dist:.1f}"
                     )
 
-                    if track_id not in track_prev_side:
-                        # First frame for this track — check near-line birth on inside.
-                        # Only count when clearly past the line (not in band), so we don't
-                        # count someone born right inside the band who then bounces back.
-                        if (not in_band and curr_side == 1
-                                and track_id not in track_crossed
-                                and entry_line_direction in ('forward', 'any')):
-                            line_y = (line_p1[1] + line_p2[1]) / 2
-                            if abs(_sy - line_y) <= 60:
-                                counted_entry_times.append(current_time)
-                                track_crossed.add(track_id)
-                                systems_logger.info(
-                                    f"[COUNTER] Near-line birth id={track_id} "
-                                    f"at ({_sx},{_sy}) line_y={line_y:.0f} — counted as entry"
-                                )
-                    elif track_id not in track_crossed:
-                        prev_side = track_prev_side[track_id]
-                        if entry_line_width > 0:
-                            # ── Band / displacement mode (Arnaud) ─────────────
-                            if in_band:
-                                if track_id not in band_entry_dist and prev_side == -1:
-                                    # Just entered band from outside — record entry point
-                                    band_entry_dist[track_id] = signed_dist
-                                if track_id in band_entry_dist:
-                                    displacement = signed_dist - band_entry_dist[track_id]
-                                    if displacement >= entry_line_min_disp:
-                                        if entry_line_direction in ('forward', 'any'):
-                                            band_entry_dist.pop(track_id, None)
-                                            systems_logger.info(
-                                                f"[COUNTER] Band displacement id={track_id} "
-                                                f"disp={displacement:.1f}px"
-                                            )
-                                            _group_count(track_id)
+                    # ── 3-frame confirmation + direction validation ────────────
+                    if track_id not in track_crossed:
+                        _prox = max(entry_line_width * 3, 60)
+                        if track_id in band_candidate:
+                            # Candidate already started — keep accumulating as person
+                            # walks deeper. Only clear if they walk back far outside.
+                            if signed_dist > _prox:
+                                band_candidate.pop(track_id, None)
                             else:
-                                if track_id in band_entry_dist:
-                                    # Was tracking inside band — now exited
-                                    if curr_side == 1 and entry_line_direction in ('forward', 'any'):
-                                        # Exited to inside without reaching min_disp — still count
+                                band_candidate[track_id].append(signed_dist)
+                                dists = band_candidate[track_id]
+                                if len(dists) >= 3:
+                                    _was_outside = any(d > 0 for d in dists)
+                                    _is_inside = dists[-1] < -(entry_line_width / 2)
+                                    _crossed_undetected = (
+                                        abs(dists[0]) <= entry_line_width * 3 and
+                                        _is_inside and
+                                        dists[-1] < dists[0]
+                                    )
+                                    if (_was_outside and _is_inside) or _crossed_undetected:
+                                        _box_w = abs(_raw[1][0] - _raw[0][0])
+                                        _n = max(1, round(_box_w / avg_person_width))
                                         systems_logger.info(
-                                            f"[COUNTER] Band full-cross id={track_id}"
+                                            f"[COUNTER] 3-frame confirm id={track_id} "
+                                            f"dist: {dists[0]:.1f}→{dists[-1]:.1f} "
+                                            f"box_w={_box_w:.0f}px → {_n} person(s)"
                                         )
-                                        _group_count(track_id)
-                                    band_entry_dist.pop(track_id, None)
-                                elif prev_side == -1 and curr_side == 1:
-                                    # Fast mover: skipped band entirely in one frame
-                                    if entry_line_direction in ('forward', 'any'):
-                                        systems_logger.info(
-                                            f"[COUNTER] Fast cross id={track_id} — skipped band"
-                                        )
-                                        _group_count(track_id)
-                        else:
-                            # ── Thin-line mode: 2-frame debounce ─────────────
-                            if prev_side != curr_side:
-                                track_cross_candidate[track_id] = (prev_side, curr_side, 1)
-                            elif track_id in track_cross_candidate:
-                                from_side, to_side, count = track_cross_candidate[track_id]
-                                if curr_side == to_side:
-                                    count += 1
-                                    if count >= 2:
-                                        crossed_forward = (from_side == -1 and to_side == 1)
-                                        should_count = (
-                                            entry_line_direction == 'any'
-                                            or (entry_line_direction == 'forward' and crossed_forward)
-                                            or (entry_line_direction == 'reverse' and not crossed_forward)
-                                        )
-                                        if should_count:
+                                        track_crossed.add(track_id)
+                                        for _ in range(_n):
                                             counted_entry_times.append(current_time)
-                                            track_crossed.add(track_id)
-                                            systems_logger.info(f"[COUNTER] Line crossed id={track_id} direction={'fwd' if crossed_forward else 'rev'}")
-                                        track_cross_candidate.pop(track_id, None)
-                                    else:
-                                        track_cross_candidate[track_id] = (from_side, to_side, count)
-                                else:
-                                    track_cross_candidate.pop(track_id, None)
-
-                    # Always record current side (even in band) so the track is known
-                    # next frame. When in_band we still update so the first-frame branch
-                    # doesn't keep firing.
-                    track_prev_side[track_id] = curr_side
+                                        band_candidate.pop(track_id, None)
+                        elif abs(signed_dist) <= _prox:
+                            # Start candidate if close enough to the line
+                            if signed_dist >= -(entry_line_width * 3):
+                                band_candidate[track_id] = [signed_dist]
 
                 person_conf = 0.0
                 if hasattr(obj.last_detection, "data") and obj.last_detection.data:
@@ -760,8 +688,7 @@ def main():
                     track_start_times.pop(track_id, None)
                     track_data.pop(track_id, None)
                     person_loggers.pop(track_id, None)
-                    track_prev_side.pop(track_id, None)
-                    track_cross_candidate.pop(track_id, None)
+                    band_candidate.pop(track_id, None)
                     continue
                 if dwell >= min_elapsed_time:
                     td = track_data.get(track_id, {})
@@ -789,10 +716,8 @@ def main():
                 track_start_times.pop(track_id, None)
                 track_data.pop(track_id, None)
                 person_loggers.pop(track_id, None)
-                track_prev_side.pop(track_id, None)
                 track_crossed.discard(track_id)
-                track_cross_candidate.pop(track_id, None)
-                band_entry_dist.pop(track_id, None)
+                band_candidate.pop(track_id, None)
 
             prev_track_ids = current_track_ids
 
@@ -814,15 +739,13 @@ def main():
             count_1_hour = sum(1 for ts in counted_entry_times if current_time - ts <= 3600)
             count_1_day = len(counted_entry_times)
 
-            active_person_count = len(current_track_ids)
-            track_label = f"Persons: {active_person_count}"
-            write_text(viz_img, track_label, position="top_right")
+            write_text(viz_img, f"At Door: {len(current_track_ids)}", position="top_right")
             draw_text_lines(
                 viz_img,
                 [
-                    f"3 min: {count_3_min}",
-                    f"1 hour: {count_1_hour}",
-                    f"1 day: {count_1_day}",
+                    f"Last 3 min:  {count_3_min}",
+                    f"Last hour:   {count_1_hour}",
+                    f"Today:       {count_1_day}",
                 ],
                 position="bottom_left",
             )

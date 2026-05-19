@@ -1017,20 +1017,21 @@ with tab_live:
     active_lanes = int(snap["active_lanes"] or 2) if snap is not None else 2
     wait_15m = float(pred_df.iloc[0]["wait_15m"]) if not pred_df.empty and pred_df.iloc[0]["wait_15m"] is not None else None
     wait_30m = float(pred_df.iloc[0]["wait_30m"]) if not pred_df.empty and pred_df.iloc[0]["wait_30m"] is not None else None
+    est_wait = float(pred_df.iloc[0]["wait_min"])  if not pred_df.empty and pred_df.iloc[0]["wait_min"]  is not None else wait_15m
     entries_last = entries_delta[0] if entries_delta else 0
     entries_prev = entries_delta[1] if entries_delta else 0
     entries_diff = entries_last - entries_prev
     queue_diff   = (queue_count - q1h_ago) if q1h_ago is not None else None
 
     # Status banner
-    if wait_15m is None:
+    if est_wait is None:
         banner_color, banner_text = "#16a34a", "System OK — forecast not available"
-    elif wait_15m >= _WAIT_ALERT:
-        banner_color, banner_text = "#dc2626", f"ALERT — Estimated wait {wait_15m:.0f} min in 15 minutes"
-    elif wait_15m >= _WAIT_BUSY:
-        banner_color, banner_text = "#d97706", f"BUSY — Estimated wait {wait_15m:.0f} min in 15 minutes"
+    elif est_wait >= _WAIT_ALERT:
+        banner_color, banner_text = "#dc2626", f"ALERT — Estimated wait {est_wait:.0f} min"
+    elif est_wait >= _WAIT_BUSY:
+        banner_color, banner_text = "#d97706", f"BUSY — Estimated wait {est_wait:.0f} min"
     else:
-        banner_color, banner_text = "#16a34a", f"All Clear — Estimated wait {wait_15m:.0f} min in 15 minutes"
+        banner_color, banner_text = "#16a34a", f"All Clear — Estimated wait {est_wait:.0f} min"
 
     st.markdown(
         f'<div style="background:{banner_color};padding:12px 24px;border-radius:10px;'
