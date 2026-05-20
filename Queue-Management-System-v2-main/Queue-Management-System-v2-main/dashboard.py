@@ -30,9 +30,11 @@ def _conn():
 
 def _run_prediction():
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensemble_predict.py")
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     result = subprocess.run(
         [sys.executable, script, "--source", "REAL"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env,
         cwd=os.path.dirname(os.path.abspath(__file__)),
     )
     return result.returncode == 0, result.stdout, result.stderr
@@ -277,7 +279,7 @@ snap_ts      = snap["timestamp"]              if snap is not None else None
 wait_15m   = float(pred_df.iloc[0]["wait_15m"])  if not pred_df.empty and pred_df.iloc[0]["wait_15m"]  is not None else None
 wait_30m   = float(pred_df.iloc[0]["wait_30m"])  if not pred_df.empty and pred_df.iloc[0]["wait_30m"]  is not None else None
 wait_45m   = float(pred_df.iloc[0]["wait_45m"])  if not pred_df.empty and pred_df.iloc[0].get("wait_45m") is not None else None
-est_wait   = float(pred_df.iloc[0]["wait_min"])  if not pred_df.empty and pred_df.iloc[0]["wait_min"]  is not None else wait_15m
+est_wait   = wait_15m
 lane_w1    = float(pred_df.iloc[0]["wait_1lane_15m"]) if not pred_df.empty and pred_df.iloc[0].get("wait_1lane_15m") is not None else None
 lane_w2    = float(pred_df.iloc[0]["wait_2lane_15m"]) if not pred_df.empty and pred_df.iloc[0].get("wait_2lane_15m") is not None else None
 lane_w3    = float(pred_df.iloc[0]["wait_3lane_15m"]) if not pred_df.empty and pred_df.iloc[0].get("wait_3lane_15m") is not None else None
