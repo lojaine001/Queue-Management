@@ -39,6 +39,7 @@ The current local version includes fixes for:
 - undercounting in v2 when no face was matched
 - repeated model retraining overhead
 - fixed wait-time estimation based only on predicted arrivals
+- duplicate DB inserts caused by simultaneous venv + system Python processes (May 2026)
 
 The most recent improvements also add:
 
@@ -46,6 +47,7 @@ The most recent improvements also add:
 - `service_events` hypertable placeholder for future exit-line logic
 - dynamic wait estimation based on snapshot state
 - `wait_15m` and `wait_30m` forecast horizon outputs
+- Windows Named Mutex single-instance lock in `queue_management_v2.py`
 
 ---
 
@@ -597,6 +599,62 @@ def insert_entrance(self, track_id, gender, age, confidence, camera_id,
 
 ---
 
+---
+
+## May 2026 — Duplicate Process / Double DB Insert
+
+### 20. Duplicate `entrance_events` inserts from simultaneous processes
+
+**Problem**
+
+Starting 2026-05-19, `entrance_events` was recording approximately twice the real number of people entering the store. Every real person generated two DB rows instead of one.
+
+**Root cause**
+
+On the production machine (arnau), the venv Python interpreter (`Head-Detector/.venv/Scripts/python.exe`) was spawning a second copy of itself using the system Python (`C:\Program Files\Python310\python.exe`) with identical arguments. Both processes ran the full detection and DB-insert loop simultaneously against the same camera stream and the same database. The same pattern affected `main.py` and `dashboard.py` — for dashboard this produced two Streamlit instances on separate ports (8501 and 8502).
+
+The root cause of the spawning is not yet fully identified. No explicit subprocess calls were found in any script or bat file. Suspected: a worker-spawn pattern inside a third-party library (ONNX Runtime, multiprocessing, or Streamlit's file watcher). Confirmed via `Get-WmiObject Win32_Process` that the venv Python (`ParentProcessId`) always spawned the system Python (`ProcessId`) — the spawning is consistent across all three scripts.
+
+**Fix applied to `queue_management_v2.py`**
+
+A Windows Named Mutex (`QueueManagementV2Lock`) is acquired at startup before any DB or camera work begins. If the mutex already exists (ERROR_ALREADY_EXISTS = 183), the second process prints an error and exits immediately.
+
+```python
+_k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+def _acquire_lock() -> bool:
+    global _LOCK_MUTEX
+    _LOCK_MUTEX = _k32.CreateMutexW(None, True, "QueueManagementV2Lock")
+    err = ctypes.get_last_error()
+    if err == 183:
+        _k32.CloseHandle(_LOCK_MUTEX)
+        _LOCK_MUTEX = None
+        return False
+    return bool(_LOCK_MUTEX)
+```
+
+**Why not socket lock or msvcrt lock**
+
+- `msvcrt` locks: not cross-interpreter. The `.venv` Python and system Python use different C runtimes — the lock is invisible between them.
+- Socket port lock: `SO_REUSEADDR` on Windows allows a second process to rebind the same port, so both processes think they hold the lock.
+- Windows Named Mutex: an OS kernel object shared across all Python versions and interpreters on the same machine.
+
+**Critical implementation note**
+
+`ctypes.windll.kernel32.GetLastError()` is unreliable — Python's internal ctypes machinery resets the last error code between the `CreateMutexW` call and the `GetLastError()` call. The correct pattern is `ctypes.WinDLL('kernel32', use_last_error=True)` combined with `ctypes.get_last_error()`.
+
+**Data impact**
+
+Rows in `entrance_events` from 2026-05-19 through the evening of 2026-05-20 are likely doubled. A deduplication cleanup query will be needed once the exact affected window is confirmed (similar to the April 2026 cleanup in Bug 15).
+
+**Status as of 2026-05-20**
+
+- Named Mutex deployed on production machine for `queue_management_v2.py`
+- Root cause of the venv Python spawning a system Python child is still under investigation
+- `main.py` and `dashboard.py` do not yet have equivalent locks (lower priority — they do not write to `entrance_events`)
+
+---
+
 ## Current Limitations Still Present
 
 - `service_events` exists but is not yet populated by a true exit-line workflow in the live production pipelines
@@ -604,6 +662,8 @@ def insert_entrance(self, track_id, gender, age, confidence, camera_id,
 - `prophet_predict.py` remains a console-only forecast helper and does not write predictions to `queue_predictions`
 - the simulator writes into shared production tables using `SIM_*` camera IDs rather than dedicated simulator-only tables
 - gender/age enrichment in buckets only meaningful for Pipeline B camera; Pipeline A always stores `unknown`/`NULL`
+- `entrance_events` rows from 2026-05-19 through 2026-05-20 evening are likely doubled due to Bug 20 — a deduplication cleanup query is pending (see Bug 15 for the cleanup pattern used in April 2026)
+- root cause of the venv Python spawning a system Python child process is still under investigation — `main.py` and `dashboard.py` do not yet have a single-instance lock
 
 ---
 

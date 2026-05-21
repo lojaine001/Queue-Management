@@ -296,11 +296,19 @@ Debug mode renders an orange **BAG** label on the person bounding box when a bag
 
 `utils/queue_utils.py` contains the `match_boxes` function. It uses a face-to-body containment match and returns a list of `(body_box, conf, face_data[])` tuples. `face_data` is an empty list when no face was matched to a body — this is now a valid state that still produces a DB insert.
 
-### 5.5 Snapshot logging
+### 5.5 Single-instance lock
+
+`queue_management_v2.py` uses a Windows Named Mutex (`QueueManagementV2Lock`) to prevent more than one instance from running simultaneously. The lock is acquired at the very start of `main()` before any DB connection or camera work. If a second process starts (e.g. spawned by a library or restarted before the first exits), it detects the mutex, prints an error, and exits immediately.
+
+The mutex uses `ctypes.WinDLL('kernel32', use_last_error=True)` and `ctypes.get_last_error()` — not `ctypes.windll.kernel32.GetLastError()` — because Python's ctypes machinery resets the last error between the `CreateMutexW` call and a plain `GetLastError()` call, making the latter unreliable for detecting `ERROR_ALREADY_EXISTS` (183).
+
+See Bug 20 in `BUG_FIXES.md` for full background.
+
+### 5.6 Snapshot logging
 
 Identical to Pipeline A: every `SNAPSHOT_INTERVAL` seconds the pipeline computes live queue metrics from `tracked_objects` and calls `db.log_queue_snapshot()`. The Head-Detector and v2 pipelines are never run simultaneously on the same camera, so there is no snapshot duplication concern.
 
-### 5.6 Insert-at-death pattern
+### 5.7 Insert-at-death pattern
 
 Same as Pipeline A (see §4.2): track_data is accumulated while alive, a single `entrance_events` row is inserted on track death with `entry_time = entry_dt` (first-frame timestamp). Tracks shorter than `min_elapsed_time` are discarded without a DB insert.
 
@@ -865,6 +873,9 @@ The table and `log_service_event()` method exist in both `DBLogger` classes. How
 **`active_lanes` is static**  
 The `active_lanes` value is read from `config.yml` at startup and written to every snapshot. It does not update dynamically if a lane opens or closes during a session. Restart the pipeline after changing `active_lanes` in `config.yml`.
 
+**Duplicate process spawning (under investigation — May 2026)**  
+On the production machine, the venv Python was observed spawning a system Python child process with identical arguments for every script (`queue_management_v2.py`, `main.py`, `dashboard.py`). The root cause is not yet identified (no explicit subprocess calls found). A Named Mutex lock was added to `queue_management_v2.py` to prevent the second process from writing to the DB. See Bug 20 in `BUG_FIXES.md`. `main.py` and `dashboard.py` do not yet have equivalent locks.
+
 **Forecast not a service**  
 `ensemble_predict.py` is a one-shot script, not a daemon. It must be scheduled externally (Windows Task Scheduler / cron). Forecasts are stale between runs.
 
@@ -1171,4 +1182,4 @@ This is the recommended way to validate the prediction layer against synthetic w
 
 ---
 
-*Last updated: April 2026*
+*Last updated: May 2026*
