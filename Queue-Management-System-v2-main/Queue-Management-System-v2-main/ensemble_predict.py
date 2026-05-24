@@ -40,6 +40,7 @@ from prediction.core import (  # noqa: E402
     ROLLING_WINDOW_STEPS,
     SEQUENCE_LEN,
     SNAPSHOT_MAX_AGE_MIN,
+    WAIT_45M_INDEX,
     add_closed_zeros,
     build_sim_history,
     compute_wait_estimates,
@@ -392,6 +393,24 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
     )
     wait_estimates = [float(r["wait_min"]) for r in wait_rows]
 
+    # 45-minute horizon
+    wait_45m = float(wait_rows[WAIT_45M_INDEX]["wait_min"]) if len(wait_rows) > WAIT_45M_INDEX else wait_30m
+
+    # Lane scenario comparisons — wait at +15 min for 1, 2, 3 lanes
+    lane_waits_15m: dict[int, float] = {}
+    for n_lanes in [1, 2, 3]:
+        _rows, _w15, _, _ = compute_wait_estimates(
+            wait_frame,
+            current_queue=current_queue,
+            avg_dwell_min=est_service_min,
+            active_lanes=n_lanes,
+            max_queue_per_lane=MAX_QUEUE_PER_LANE,
+            max_wait_min=MAX_WAIT_MIN,
+        )
+        lane_waits_15m[n_lanes] = float(_w15) if _w15 is not None else 0.0
+    print(f"[Wait] Lane scenarios @ +15m — 1 lane: {lane_waits_15m[1]:.1f} min | "
+          f"2 lanes: {lane_waits_15m[2]:.1f} min | 3 lanes: {lane_waits_15m[3]:.1f} min")
+
     return {
         "source":             source,
         "prophet_preds":      prophet_preds,
@@ -403,6 +422,8 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
         "wait_estimates":     wait_estimates,
         "wait_15m":           wait_15m,
         "wait_30m":           wait_30m,
+        "wait_45m":           wait_45m,
+        "lane_waits_15m":     lane_waits_15m,
         "current_queue":      current_queue,
         "avg_dwell_min":      avg_dwell_min,
         "active_lanes":       active_lanes,
@@ -510,29 +531,53 @@ def _save_to_db(result: dict) -> None:
         END $$;
     """)
     cur.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'queue_predictions' AND column_name = 'wait_45m'
+            ) THEN
+                ALTER TABLE queue_predictions
+                    ADD COLUMN wait_45m        NUMERIC(8,2),
+                    ADD COLUMN wait_1lane_15m  NUMERIC(8,2),
+                    ADD COLUMN wait_2lane_15m  NUMERIC(8,2),
+                    ADD COLUMN wait_3lane_15m  NUMERIC(8,2);
+            END IF;
+        END $$;
+    """)
+    cur.execute("""
         SELECT create_hypertable('queue_predictions', 'prediction_for',
             if_not_exists => TRUE, migrate_data => TRUE);
     """)
 
-    predicted_at = datetime.now()
+    predicted_at  = datetime.now()
+    lw            = result["lane_waits_15m"]
+    _w45          = round(result["wait_45m"], 2)  if result["wait_45m"]  is not None else None
+    _w15          = round(result["wait_15m"], 2)  if result["wait_15m"]  is not None else None
+    _w30          = round(result["wait_30m"], 2)  if result["wait_30m"]  is not None else None
+    _lw1          = round(lw.get(1, 0.0), 2)
+    _lw2          = round(lw.get(2, 0.0), 2)
+    _lw3          = round(lw.get(3, 0.0), 2)
+
     for i, row in prophet_preds.iterrows():
         wait   = round(wait_estimates[i], 2)
         status = "OK" if wait < 5 else "BUSY" if wait < 10 else "ALERT"
         cur.execute("""
             INSERT INTO queue_predictions
                 (predicted_at, prediction_for, prophet_yhat, lstm_yhat,
-                 xgb_yhat, ensemble_yhat, est_wait_minutes, wait_15m, wait_30m, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 xgb_yhat, ensemble_yhat, est_wait_minutes,
+                 wait_15m, wait_30m, wait_45m,
+                 wait_1lane_15m, wait_2lane_15m, wait_3lane_15m, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             predicted_at,
             row["ds"].to_pydatetime(),
-            round(float(prophet_vals[i]), 2),
-            round(float(lstm_vals[i]),    2),
-            round(float(xgb_vals[i]),     2),
+            round(float(prophet_vals[i]),  2),
+            round(float(lstm_vals[i]),     2),
+            round(float(xgb_vals[i]),      2),
             round(float(ensemble_vals[i]), 2),
             wait,
-            round(result["wait_15m"], 2) if result["wait_15m"] is not None else None,
-            round(result["wait_30m"], 2) if result["wait_30m"] is not None else None,
+            _w15, _w30, _w45,
+            _lw1, _lw2, _lw3,
             status,
         ))
 

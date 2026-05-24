@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import psycopg2
 import streamlit as st
 import pandas as pd
@@ -26,6 +28,18 @@ def _conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
+def _run_prediction():
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensemble_predict.py")
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    result = subprocess.run(
+        [sys.executable, script, "--source", "REAL"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+    return result.returncode == 0, result.stdout, result.stderr
+
+
 # ── Live data ──────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=REFRESH_SEC)
@@ -51,17 +65,34 @@ def load_queue_delta():
 @st.cache_data(ttl=REFRESH_SEC)
 def load_predictions():
     with _conn() as conn:
-        df = pd.read_sql("""
-            SELECT DISTINCT ON (prediction_for)
-                   prediction_for  AS ds,
-                   ensemble_yhat   AS arrivals,
-                   est_wait_minutes AS wait_min,
-                   wait_15m, wait_30m, status
-            FROM queue_predictions
-            WHERE prediction_for >= NOW()
-              AND prediction_for <= NOW() + INTERVAL '30 minutes'
-            ORDER BY prediction_for, predicted_at DESC
-        """, conn)
+        try:
+            df = pd.read_sql("""
+                SELECT DISTINCT ON (prediction_for)
+                       prediction_for  AS ds,
+                       ensemble_yhat   AS arrivals,
+                       est_wait_minutes AS wait_min,
+                       wait_15m, wait_30m, wait_45m, status,
+                       wait_1lane_15m, wait_2lane_15m, wait_3lane_15m
+                FROM queue_predictions
+                WHERE prediction_for >= NOW()
+                  AND prediction_for <= NOW() + INTERVAL '30 minutes'
+                ORDER BY prediction_for, predicted_at DESC
+            """, conn)
+        except Exception:
+            conn.rollback()
+            df = pd.read_sql("""
+                SELECT DISTINCT ON (prediction_for)
+                       prediction_for  AS ds,
+                       ensemble_yhat   AS arrivals,
+                       est_wait_minutes AS wait_min,
+                       wait_15m, wait_30m, status
+                FROM queue_predictions
+                WHERE prediction_for >= NOW()
+                  AND prediction_for <= NOW() + INTERVAL '30 minutes'
+                ORDER BY prediction_for, predicted_at DESC
+            """, conn)
+            for col in ["wait_45m", "wait_1lane_15m", "wait_2lane_15m", "wait_3lane_15m"]:
+                df[col] = None
     return df
 
 @st.cache_data(ttl=REFRESH_SEC)
@@ -245,8 +276,13 @@ queue_count  = int(snap["queue_count"])       if snap is not None else 0
 active_lanes = int(snap["active_lanes"] or 2) if snap is not None else 2
 snap_ts      = snap["timestamp"]              if snap is not None else None
 
-wait_15m = float(pred_df.iloc[0]["wait_15m"]) if not pred_df.empty and pred_df.iloc[0]["wait_15m"] is not None else None
-wait_30m = float(pred_df.iloc[0]["wait_30m"]) if not pred_df.empty and pred_df.iloc[0]["wait_30m"] is not None else None
+wait_15m   = float(pred_df.iloc[0]["wait_15m"])  if not pred_df.empty and pred_df.iloc[0]["wait_15m"]  is not None else None
+wait_30m   = float(pred_df.iloc[0]["wait_30m"])  if not pred_df.empty and pred_df.iloc[0]["wait_30m"]  is not None else None
+wait_45m   = float(pred_df.iloc[0]["wait_45m"])  if not pred_df.empty and pred_df.iloc[0].get("wait_45m") is not None else None
+est_wait   = wait_15m
+lane_w1    = float(pred_df.iloc[0]["wait_1lane_15m"]) if not pred_df.empty and pred_df.iloc[0].get("wait_1lane_15m") is not None else None
+lane_w2    = float(pred_df.iloc[0]["wait_2lane_15m"]) if not pred_df.empty and pred_df.iloc[0].get("wait_2lane_15m") is not None else None
+lane_w3    = float(pred_df.iloc[0]["wait_3lane_15m"]) if not pred_df.empty and pred_df.iloc[0].get("wait_3lane_15m") is not None else None
 
 entries_last_hr = entries_delta[0] if entries_delta else 0
 entries_prev_hr = entries_delta[1] if entries_delta else 0
@@ -287,14 +323,14 @@ if not status_breakdown.empty:
         alert_slots = int(alert_row.iloc[0]["slots"])
 alert_minutes_today = alert_slots * BUCKET_MIN
 
-if wait_15m is None:
+if est_wait is None:
     status_class, status_text = "status-ok",    "System OK - forecast not available"
-elif wait_15m >= WAIT_ALERT_MIN:
-    status_class, status_text = "status-alert", f"ALERT - Estimated wait {wait_15m:.0f} min in 15 minutes"
-elif wait_15m >= WAIT_BUSY_MIN:
-    status_class, status_text = "status-busy",  f"BUSY - Estimated wait {wait_15m:.0f} min in 15 minutes"
+elif est_wait >= WAIT_ALERT_MIN:
+    status_class, status_text = "status-alert", f"ALERT - Estimated wait {est_wait:.0f} min"
+elif est_wait >= WAIT_BUSY_MIN:
+    status_class, status_text = "status-busy",  f"BUSY - Estimated wait {est_wait:.0f} min"
 else:
-    status_class, status_text = "status-ok",    f"All Clear - Estimated wait {wait_15m:.0f} min in 15 minutes"
+    status_class, status_text = "status-ok",    f"All Clear - Estimated wait {est_wait:.0f} min"
 
 
 # ── Header ─────────────────────────────────────────────────────────────────────
@@ -330,7 +366,7 @@ def delta_html(diff, unit="", invert=False):
 q_color   = "green" if queue_count <= 5 else "orange" if queue_count <= 10 else "red"
 w15_color = "green" if (wait_15m or 0) < WAIT_BUSY_MIN else "orange" if (wait_15m or 0) < WAIT_ALERT_MIN else "red"
 w30_color = "green" if (wait_30m or 0) < WAIT_BUSY_MIN else "orange" if (wait_30m or 0) < WAIT_ALERT_MIN else "red"
-l_color   = "red" if active_lanes == 1 else "orange" if active_lanes == 2 else "green"
+w45_color = "green" if (wait_45m or 0) < WAIT_BUSY_MIN else "orange" if (wait_45m or 0) < WAIT_ALERT_MIN else "red"
 e_color   = "green" if entries_diff >= 0 else "orange"
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -348,7 +384,7 @@ with c2:
     st.markdown(f"""
     <div class="metric-card {w15_color}">
       <div class="metric-val">{w15_disp}<span style="font-size:1.1rem; font-weight:400"> min</span></div>
-      <div class="metric-lbl">Est. Wait in 15 min</div>
+      <div class="metric-lbl">Est. Wait +15 min</div>
     </div>""", unsafe_allow_html=True)
 
 with c3:
@@ -356,14 +392,15 @@ with c3:
     st.markdown(f"""
     <div class="metric-card {w30_color}">
       <div class="metric-val">{w30_disp}<span style="font-size:1.1rem; font-weight:400"> min</span></div>
-      <div class="metric-lbl">Est. Wait in 30 min</div>
+      <div class="metric-lbl">Est. Wait +30 min</div>
     </div>""", unsafe_allow_html=True)
 
 with c4:
+    w45_disp = f"{wait_45m:.1f}" if wait_45m is not None else "-"
     st.markdown(f"""
-    <div class="metric-card {l_color}">
-      <div class="metric-val">{active_lanes}</div>
-      <div class="metric-lbl">Active Lanes</div>
+    <div class="metric-card {w45_color}">
+      <div class="metric-val">{w45_disp}<span style="font-size:1.1rem; font-weight:400"> min</span></div>
+      <div class="metric-lbl">Est. Wait +45 min</div>
     </div>""", unsafe_allow_html=True)
 
 with c5:
@@ -385,7 +422,7 @@ if snap_ts is not None:
 
 # ── Predicted wait chart ───────────────────────────────────────────────────────
 
-st.markdown('<div class="section-title">Predicted Wait Time - Next 60 Min</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Predicted Wait Time - Next 30 Min</div>', unsafe_allow_html=True)
 
 if not pred_df.empty:
     pf = pred_df.copy()
@@ -451,7 +488,46 @@ if not pred_df.empty:
     </table><br>
     """, unsafe_allow_html=True)
 else:
-    st.info("No predictions found. Run ensemble_predict.py to generate a forecast.")
+    _msg_col, _btn_col = st.columns([4, 1])
+    with _msg_col:
+        st.warning("No forecast available yet. Predictions may not have run today, or all existing rows have expired.")
+    with _btn_col:
+        if st.button("Run Now", key="run_no_pred", type="primary", use_container_width=True):
+            with st.spinner("Running prediction model... (1–3 min)"):
+                _ok, _out, _err = _run_prediction()
+            if _ok:
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error("Prediction failed.")
+                if _err:
+                    with st.expander("Error details"):
+                        st.code(_err[-3000:])
+
+
+# ── Lane scenarios ────────────────────────────────────────────────────────────
+
+st.markdown('<div class="section-title">Lane Scenarios — Estimated Wait at +15 min</div>', unsafe_allow_html=True)
+
+if lane_w1 is not None or lane_w2 is not None or lane_w3 is not None:
+    st.caption(f"Currently active: {active_lanes} lane{'s' if active_lanes != 1 else ''}")
+    _lc1, _lc2, _lc3 = st.columns(3)
+    for _col, _n, _w in [(_lc1, 1, lane_w1), (_lc2, 2, lane_w2), (_lc3, 3, lane_w3)]:
+        with _col:
+            _is_current = (_n == active_lanes)
+            _border = "#9b59b6" if _is_current else "#3498db"
+            _w_disp = f"{_w:.1f}" if _w is not None else "-"
+            _badge_txt = "ALERT" if (_w or 0) >= WAIT_ALERT_MIN else "BUSY" if (_w or 0) >= WAIT_BUSY_MIN else "OK"
+            _badge_cls = "badge-alert" if _badge_txt == "ALERT" else "badge-busy" if _badge_txt == "BUSY" else "badge-ok"
+            _active_note = " &nbsp;<small style='color:#9b59b6;font-weight:700'>← current</small>" if _is_current else ""
+            st.markdown(f"""
+            <div class="metric-card" style="border-top-color:{_border}">
+              <div class="metric-val">{_w_disp}<span style="font-size:1.1rem;font-weight:400"> min</span></div>
+              <div class="metric-lbl">{_n} Lane{'s' if _n != 1 else ''} Open{_active_note}</div>
+              <div style="margin-top:8px"><span class="badge {_badge_cls}">{_badge_txt}</span></div>
+            </div>""", unsafe_allow_html=True)
+else:
+    st.info("Run the prediction model to see lane scenario comparisons.")
 
 
 # ── Live queue depth (last 2h) ─────────────────────────────────────────────────
@@ -640,11 +716,23 @@ with col_right:
 # ── Footer ─────────────────────────────────────────────────────────────────────
 
 st.divider()
-col_r, col_b = st.columns([6, 1])
+col_r, col_p, col_b = st.columns([5, 1, 1])
 with col_b:
-    if st.button("Refresh", use_container_width=True, type="primary"):
+    if st.button("Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+with col_p:
+    if st.button("Run Prediction", use_container_width=True, type="primary"):
+        with st.spinner("Running prediction model... (1–3 min)"):
+            _ok, _out, _err = _run_prediction()
+        if _ok:
+            st.cache_data.clear()
+            st.rerun()
+        else:
+            st.error("Prediction failed.")
+            if _err:
+                with st.expander("Error details"):
+                    st.code(_err[-3000:])
 with col_r:
     st.caption(
         f"Auto-refreshes every {REFRESH_SEC}s  -  "

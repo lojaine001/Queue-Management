@@ -66,6 +66,7 @@ ROLLING_WINDOW_STEPS  = ROLLING_WINDOW_MINUTES // BUCKET_MINUTES
 SEQUENCE_LEN          = LOOKBACK_MINUTES // BUCKET_MINUTES
 WAIT_15M_INDEX        = max(0, (15 // BUCKET_MINUTES) - 1)
 WAIT_30M_INDEX        = max(0, (30 // BUCKET_MINUTES) - 1)
+WAIT_45M_INDEX        = max(0, (45 // BUCKET_MINUTES) - 1)
 
 
 def get_where_clause(source: str) -> str:
