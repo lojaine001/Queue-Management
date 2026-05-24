@@ -1371,7 +1371,7 @@ _ARRIVAL_MODEL_OPTIONS = ["prophet", "lstm", "xgboost"]
 _ARRIVAL_MODEL_DEFAULT = ["prophet", "lstm", "xgboost"]
 _DWELL_MODEL_OPTIONS = ["safe", "legacy"]
 _DWELL_FORECAST_MODEL_OPTIONS = ["xgboost", "lstm"]
-_DWELL_FORECAST_MODEL_DEFAULT = ["xgboost"]
+_DWELL_FORECAST_MODEL_DEFAULT = ["xgboost", "lstm"]
 if "arrival_models" not in st.session_state:
     _qp_am = st.query_params.get("arrival_models", "")
     _parsed_am = [m for m in _qp_am.split(",") if m in _ARRIVAL_MODEL_OPTIONS] if _qp_am else []
@@ -2492,7 +2492,13 @@ _active_model_label = " + ".join(_model_labels.get(m, m) for m in _active_models
 _section_title(f"Predicted Wait - Next {FORECAST_DISPLAY_MIN} Min", f"{_active_model_label} arrivals · {_lane_phrase(selected_lanes)} open")
 # Use base dwell (no residual correction) for all display values — correction only affects simulation
 _eff_dwell = float(_dwell_per_slot_base[0]) if _dwell_per_slot_base else service_minutes
-_dwell_label = f"{_eff_dwell:.1f} min/customer (XGBoost)" if _dwell_per_slot_base else f"{_eff_dwell:.1f} min/customer"
+_dwell_source_label = (
+    "Average of " + _dwell_forecast_label_str
+    if len(_dwell_pred_by_model) > 1
+    else _dwell_forecast_label.get(next(iter(_dwell_pred_by_model)), "Forecast")
+    if _dwell_pred_by_model else ""
+)
+_dwell_label = f"{_eff_dwell:.1f} min/customer ({_dwell_source_label})" if _dwell_per_slot_base and _dwell_source_label else f"{_eff_dwell:.1f} min/customer"
 _capacity_per_lane = BUCKET_MIN / _eff_dwell if _eff_dwell > 0 else 0
 _capacity_per_bucket = selected_lanes * _capacity_per_lane
 # Effective capacity = lane throughput + in-service customers completing this bucket
@@ -2779,7 +2785,7 @@ if not pred_df.empty:
             pc1.metric("Active lanes", selected_lanes)
             pc2.metric("In service now", _in_svc_now, help="Customers currently at checkout (excluded from wait queue)")
             pc3.metric("Waiting (backlog)", int(max(0, queue_count - selected_lanes)), help="Customers in line, used as simulation seed")
-            pc4.metric("Dwell / customer", f"{_eff_dwell:.1f} min" + (" (XGB now)" if _dwell_per_slot_base else ""))
+            pc4.metric("Dwell / customer", f"{_eff_dwell:.1f} min" + (f" ({_dwell_source_label} now)" if _dwell_per_slot_base and _dwell_source_label else ""))
             pc5.metric("Capacity / bucket", f"{_effective_cap:.1f} cust",
                        help=f"{_capacity_per_bucket:.1f} lane throughput + {_in_svc_now} in service = {_effective_cap:.1f} effective")
             pc6.metric("Browsing gap", f"{BROWSING_GAP_MIN} min")
@@ -2845,7 +2851,7 @@ if not pred_df.empty:
             st.markdown(
                 '<div class="detail-note">'
                 f"Formula: <b>queue[t] = max(0, queue[t-1] + arrivals[t] − capacity[t])</b>. "
-                f"Capacity per slot = {selected_lanes} lane{'s' if selected_lanes > 1 else ''} × {BUCKET_MIN} min ÷ dwell (XGB, varies per slot, now {_eff_dwell:.1f} min) "
+                f"Capacity per slot = {selected_lanes} lane{'s' if selected_lanes > 1 else ''} × {BUCKET_MIN} min ÷ dwell ({_dwell_source_label or 'forecast'}, varies per slot, now {_eff_dwell:.1f} min) "
                 f"= ~{_capacity_per_bucket:.1f}/bucket. "
                 f"Slot 0 adds {_in_service} in-service → <b>{_effective_cap:.1f} effective capacity</b>. "
                 f"Wait = (queue ÷ capacity) × {BUCKET_MIN} min. "
