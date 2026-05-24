@@ -1,0 +1,3 @@
+day_of_week,n,actual_avg,MAE,RMSE
+Tuesday,59.0,16.305084745762713,6.346,8.415
+Thursday,20.0,13.65,4.145,5.091

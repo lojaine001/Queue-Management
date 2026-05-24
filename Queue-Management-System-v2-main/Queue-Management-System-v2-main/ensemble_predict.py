@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 import pickle
 import time as _time
 from pathlib import Path
@@ -32,6 +34,8 @@ from prediction.core import (  # noqa: E402
     BUCKET_MINUTES,
     DEFAULT_DWELL_MIN,
     DEFAULT_LANES,
+    DWELL_MAX_CAP,
+    DWELL_MIN_FLOOR,
     FORECAST_STEPS,
     LAG_HOUR_STEPS,
     MAX_QUEUE_PER_LANE,
@@ -39,12 +43,15 @@ from prediction.core import (  # noqa: E402
     MIN_REAL_DAYS_FOR_SIM,
     ROLLING_WINDOW_STEPS,
     SEQUENCE_LEN,
+    SHOP_OPEN_TOT,
     SNAPSHOT_MAX_AGE_MIN,
     WAIT_45M_INDEX,
     add_closed_zeros,
     build_sim_history,
     compute_wait_estimates,
+    future_open_timestamps,
     get_where_clause,
+    is_open,
 )
 from prediction.pipeline import DB_CONFIG  # noqa: E402
 
@@ -52,12 +59,102 @@ W_PROPHET           = float(os.getenv("W_PROPHET",          0.40))
 W_LSTM              = float(os.getenv("W_LSTM",             0.30))
 W_XGB               = float(os.getenv("W_XGB",             0.30))
 MODEL_MAX_AGE_HOURS = int(os.getenv("MODEL_MAX_AGE_HOURS",  24))
-MODELS_DIR     = 'models'
-LSTM_PATH      = os.path.join(MODELS_DIR, f'lstm_queue_{BUCKET_MINUTES}m.keras')
-SCALER_PATH    = os.path.join(MODELS_DIR, f'lstm_scaler_{BUCKET_MINUTES}m.pkl')
-XGB_PATH       = os.path.join(MODELS_DIR, f'xgb_queue_{BUCKET_MINUTES}m.json')
-PROPHET_PATH   = os.path.join(MODELS_DIR, f'prophet_queue_{BUCKET_MINUTES}m.pkl')
-os.makedirs(MODELS_DIR, exist_ok=True)
+LSTM_OPENING_BLEND_MAX = float(os.getenv("LSTM_OPENING_BLEND_MAX", 0.85))
+LSTM_OPENING_BLEND_MIN = float(os.getenv("LSTM_OPENING_BLEND_MIN", 0.25))
+LSTM_OPENING_BLEND_MINUTES = int(os.getenv("LSTM_OPENING_BLEND_MINUTES", 60))
+LSTM_OPENING_FLOOR_SHARE_MAX = float(os.getenv("LSTM_OPENING_FLOOR_SHARE_MAX", 0.65))
+LSTM_OPENING_FLOOR_SHARE_MIN = float(os.getenv("LSTM_OPENING_FLOOR_SHARE_MIN", 0.20))
+SCRIPT_DIR = Path(__file__).resolve().parent
+MODELS_DIR = SCRIPT_DIR / "models"
+LEGACY_MODEL_DIRS = [Path.cwd() / "models", ROOT_DIR / "models"]
+MODELS_DIR.mkdir(exist_ok=True)
+
+
+def _resolve_model_path(filename: str) -> Path:
+    preferred = MODELS_DIR / filename
+    if preferred.exists():
+        return preferred
+    for model_dir in LEGACY_MODEL_DIRS:
+        candidate = Path(model_dir) / filename
+        if candidate.exists():
+            return candidate
+    return preferred
+
+
+LSTM_PATH         = _resolve_model_path(f'lstm_queue_{BUCKET_MINUTES}m.keras')
+SCALER_PATH       = _resolve_model_path(f'lstm_scaler_{BUCKET_MINUTES}m.pkl')
+XGB_PATH          = _resolve_model_path(f'xgb_queue_{BUCKET_MINUTES}m.json')
+PROPHET_PATH      = _resolve_model_path(f'prophet_queue_{BUCKET_MINUTES}m.pkl')
+DWELL_MODEL_PATH  = _resolve_model_path(f'xgb_dwell_{BUCKET_MINUTES}m.json')
+
+DWELL_FEATURE_COLS = ["hour", "minute_of_hour", "day_of_week", "is_weekend"]
+
+
+def _build_lstm_opening_profile(history_df: pd.DataFrame, scaler: MinMaxScaler) -> dict[int, float]:
+    """Build a historical opening-hour target in scaled space for early-day LSTM stabilization."""
+    if history_df.empty:
+        return {}
+
+    opening_end_tot = SHOP_OPEN_TOT + max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
+    profile_df = history_df.copy()
+    profile_df["ds"] = pd.to_datetime(profile_df["ds"], errors="coerce")
+    profile_df["y"] = pd.to_numeric(profile_df["y"], errors="coerce").fillna(0.0)
+    profile_df = profile_df.dropna(subset=["ds"])
+
+    if profile_df.empty:
+        return {}
+
+    profile_df["minute_of_day"] = profile_df["ds"].dt.hour * 60 + profile_df["ds"].dt.minute
+    profile_df = profile_df[
+        profile_df["ds"].map(is_open)
+        & profile_df["minute_of_day"].between(SHOP_OPEN_TOT, opening_end_tot - 1)
+    ]
+
+    if profile_df.empty:
+        return {}
+
+    opening_profile = (
+        profile_df.groupby("minute_of_day", as_index=True)["y"]
+        .median()
+        .sort_index()
+    )
+
+    scaled_profile = scaler.transform(opening_profile.to_numpy(dtype=float).reshape(-1, 1)).flatten()
+    return {
+        int(minute_of_day): float(scaled_value)
+        for minute_of_day, scaled_value in zip(opening_profile.index.tolist(), scaled_profile.tolist())
+    }
+
+
+def _build_lstm_opening_profile_raw(history_df: pd.DataFrame) -> dict[int, float]:
+    """Build a raw-space opening profile for a conservative morning floor."""
+    if history_df.empty:
+        return {}
+
+    opening_end_tot = SHOP_OPEN_TOT + max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
+    profile_df = history_df.copy()
+    profile_df["ds"] = pd.to_datetime(profile_df["ds"], errors="coerce")
+    profile_df["y"] = pd.to_numeric(profile_df["y"], errors="coerce").fillna(0.0)
+    profile_df = profile_df.dropna(subset=["ds"])
+
+    if profile_df.empty:
+        return {}
+
+    profile_df["minute_of_day"] = profile_df["ds"].dt.hour * 60 + profile_df["ds"].dt.minute
+    profile_df = profile_df[
+        profile_df["ds"].map(is_open)
+        & profile_df["minute_of_day"].between(SHOP_OPEN_TOT, opening_end_tot - 1)
+    ]
+
+    if profile_df.empty:
+        return {}
+
+    opening_profile = (
+        profile_df.groupby("minute_of_day", as_index=True)["y"]
+        .median()
+        .sort_index()
+    )
+    return {int(minute_of_day): float(value) for minute_of_day, value in opening_profile.items()}
 
 
 def _models_are_fresh() -> bool:
@@ -68,19 +165,18 @@ def _models_are_fresh() -> bool:
     return (_time.time() - oldest) < MODEL_MAX_AGE_HOURS * 3600
 
 
-def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict:
+DATA_SPAN_DAYS_DEFAULT = int(os.getenv("DATA_SPAN_DAYS", 30))
+
+
+def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_span_days: int = DATA_SPAN_DAYS_DEFAULT) -> dict:
     """Train Prophet + LSTM + XGBoost ensemble and return a forecast dict."""
     where_clause = get_where_clause(source)
 
     # ── 1. Load data ─────────────────────────────────────────────────────────
     conn = psycopg2.connect(**DB_CONFIG)
-    print(f"[Ensemble] Connected to PostgreSQL (Source: {source}) ✓")
+    print(f"[Ensemble] Connected to PostgreSQL (Source: {source}, span: {data_span_days}d) ✓")
 
-    # Clean data only: Apr 13-15 (before overcounting) + Apr 21 onwards (current pipeline)
-    clean_filter = """(
-        (timestamp >= '2026-04-13' AND timestamp < '2026-04-16')
-        OR timestamp >= '2026-04-21'
-    ) AND dwell_seconds >= 10"""
+    clean_filter = f"timestamp >= NOW() - INTERVAL '{data_span_days} days' AND dwell_seconds >= 10"
     if where_clause:
         data_filter = f"{where_clause} AND {clean_filter}"
     else:
@@ -141,16 +237,23 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
         cap_value = max(float(non_zero.quantile(0.99)), 30.0)
         df["y"] = df["y"].clip(upper=cap_value)
 
+    # ── 3b. 15-min rolling median smooth (5 × 3-min buckets) ─────────────────
+    df["y"] = (
+        df["y"]
+        .rolling(window=5, center=True, min_periods=1)
+        .median()
+        .round(2)
+    )
+    print(f"[Ensemble] Applied 15-min rolling median smooth to training data")
+
     # ── 4. Closed-hour zeros ─────────────────────────────────────────────────
     df = add_closed_zeros(df[["ds", "y"]].copy(), days=30)
 
     print(f"[Ensemble] DataFrame shape: {df.shape}")
 
-    now = pd.Timestamp.now()
-    future_timestamps = [
-        now + pd.Timedelta(minutes=BUCKET_MINUTES * (i + 1)) for i in range(FORECAST_STEPS)
-    ]
+    future_timestamps = future_open_timestamps()
     future_df = pd.DataFrame({"ds": future_timestamps})
+    n_steps = len(future_timestamps)
 
     # ── MODEL 1 — PROPHET ────────────────────────────────────────────────────
     if _models_are_fresh():
@@ -189,24 +292,32 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
     y_values = pd.to_numeric(df["y"], errors="coerce").fillna(0).values
     y_values = np.nan_to_num(y_values, nan=0.0, posinf=0.0, neginf=0.0)
 
+    # Use open-hours-only data for LSTM training and seed.
+    # Closed-hour zeros contaminate the sequence window and cause the model to
+    # predict near-zero when it runs outside shop hours (zero-seed problem).
+    _open_mask_lstm = np.array([is_open(pd.Timestamp(t)) for t in df["ds"].values])
+    y_open_values   = y_values[_open_mask_lstm]
+
     if _models_are_fresh():
         print("[LSTM] Loading saved model and scaler...")
         lstm_model = tf.keras.models.load_model(LSTM_PATH)
         with open(SCALER_PATH, "rb") as _f:
             scaler = pickle.load(_f)
-        y_scaled = scaler.transform(y_values.reshape(-1, 1))
+        y_open_scaled = scaler.transform(y_open_values.reshape(-1, 1))
         print("[LSTM] Loaded ✓")
     else:
         scaler = MinMaxScaler(feature_range=(0, 1))
         if len(df_real_r) > 0:
-            real_y = pd.to_numeric(df_real_r["y"], errors="coerce").fillna(0).values
-            scaler.fit(real_y.reshape(-1, 1))
-            y_scaled = scaler.transform(y_values.reshape(-1, 1))
+            real_y_all  = pd.to_numeric(df_real_r["y"], errors="coerce").fillna(0).values
+            _real_open  = np.array([is_open(pd.Timestamp(t)) for t in df_real_r["ds"].values])
+            real_y_open = real_y_all[_real_open]
+            scaler.fit((real_y_open if len(real_y_open) > 0 else real_y_all).reshape(-1, 1))
         else:
-            y_scaled = scaler.fit_transform(y_values.reshape(-1, 1))
+            scaler.fit(y_open_values.reshape(-1, 1))
+        y_open_scaled = scaler.transform(y_open_values.reshape(-1, 1))
 
-        X_lstm, y_lstm = _make_sequences(y_scaled, SEQUENCE_LEN)
-        print(f"[LSTM] Training on {len(X_lstm)} sequences (epochs=20)...")
+        X_lstm, y_lstm = _make_sequences(y_open_scaled, SEQUENCE_LEN)
+        print(f"[LSTM] Training on {len(X_lstm)} open-hour sequences (epochs=20)...")
         lstm_model = Sequential([
             LSTM(64, input_shape=(SEQUENCE_LEN, 1), return_sequences=True),
             Dropout(0.2),
@@ -221,11 +332,34 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
             pickle.dump(scaler, _f)
         print("[LSTM] Trained and saved ✓")
 
-    last_seq = y_scaled[-SEQUENCE_LEN:].copy()
+    opening_profile_source = df_real_r if len(df_real_r) > 0 else df[["ds", "y"]]
+    opening_profile_scaled = _build_lstm_opening_profile(opening_profile_source, scaler)
+    opening_profile_raw = _build_lstm_opening_profile_raw(opening_profile_source)
+    if opening_profile_scaled:
+        print(
+            "[LSTM] Built opening profile "
+            f"({len(opening_profile_scaled)} buckets over first {LSTM_OPENING_BLEND_MINUTES} min)"
+        )
+
+    # Seed from the last SEQUENCE_LEN open-hour values — not the raw tail
+    # which may end in overnight zeros and cause near-zero rollout predictions.
+    last_seq = y_open_scaled[-SEQUENCE_LEN:].copy() if len(y_open_scaled) >= SEQUENCE_LEN \
+               else y_open_scaled.copy()
     lstm_scaled_preds = []
-    for _ in range(FORECAST_STEPS):
+    opening_span = max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
+    opening_fade_span = max(1, opening_span - BUCKET_MINUTES)
+    for ts in future_timestamps:
         inp      = last_seq.reshape(1, SEQUENCE_LEN, 1)
         next_val = lstm_model.predict(inp, verbose=0)[0][0]
+        ts_dt = pd.Timestamp(ts)
+        minute_of_day = ts_dt.hour * 60 + ts_dt.minute
+        opening_target = opening_profile_scaled.get(minute_of_day)
+        if opening_target is not None and SHOP_OPEN_TOT <= minute_of_day < (SHOP_OPEN_TOT + opening_span):
+            progress = min(1.0, max(0.0, (minute_of_day - SHOP_OPEN_TOT) / opening_fade_span))
+            blend_weight = LSTM_OPENING_BLEND_MAX + (
+                (LSTM_OPENING_BLEND_MIN - LSTM_OPENING_BLEND_MAX) * progress
+            )
+            next_val = ((1.0 - blend_weight) * float(next_val)) + (blend_weight * opening_target)
         lstm_scaled_preds.append(next_val)
         last_seq = np.append(last_seq[1:], [[next_val]], axis=0)
 
@@ -290,6 +424,24 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
         recent_y.append(pred)
     xgb_vals = np.array(xgb_vals)
 
+    # Apply a conservative first-hour opening floor so the LSTM does not stay at
+    # the previous evening's low regime when Prophet/XGBoost already indicate demand.
+    for i, ts in enumerate(future_timestamps):
+        ts_dt = pd.Timestamp(ts)
+        minute_of_day = ts_dt.hour * 60 + ts_dt.minute
+        if not (SHOP_OPEN_TOT <= minute_of_day < (SHOP_OPEN_TOT + opening_span)):
+            continue
+
+        progress = min(1.0, max(0.0, (minute_of_day - SHOP_OPEN_TOT) / opening_fade_span))
+        floor_share = LSTM_OPENING_FLOOR_SHARE_MAX + (
+            (LSTM_OPENING_FLOOR_SHARE_MIN - LSTM_OPENING_FLOOR_SHARE_MAX) * progress
+        )
+        model_baseline = max(float(prophet_vals[i]), float(xgb_vals[i]))
+        opening_hist = float(opening_profile_raw.get(minute_of_day, 0.0))
+        opening_baseline = max(opening_hist, 0.6 * model_baseline)
+        morning_floor = max(0.0, floor_share * opening_baseline)
+        lstm_vals[i] = max(float(lstm_vals[i]), morning_floor)
+
     # ── ENSEMBLE ─────────────────────────────────────────────────────────────
     print("\n[Ensemble] Combining predictions (Prophet 40% / LSTM 30% / XGBoost 30%)...")
     ensemble_vals = (W_PROPHET * prophet_vals + W_LSTM * lstm_vals + W_XGB * xgb_vals).clip(min=0).round(1)
@@ -298,18 +450,10 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
     print("\n[Wait] Loading current queue state from snapshots...")
     _conn_snap = psycopg2.connect(**DB_CONFIG)
     try:
-        # Average the last 5 minutes of snapshots to smooth out per-frame noise.
-        # Use only the most recent row for queue_count (current depth) and
-        # active_lanes (current config), but average dwell over the window.
         snap_latest = pd.read_sql("""
-            SELECT timestamp, queue_count, avg_dwell_sec, active_lanes
+            SELECT timestamp, queue_count, active_lanes
             FROM queue_state_snapshots
             ORDER BY timestamp DESC LIMIT 1
-        """, _conn_snap)
-        snap_avg = pd.read_sql("""
-            SELECT AVG(avg_dwell_sec) AS avg_dwell_sec
-            FROM queue_state_snapshots
-            WHERE timestamp >= NOW() - INTERVAL '5 minutes'
         """, _conn_snap)
     finally:
         _conn_snap.close()
@@ -322,23 +466,73 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
         else:
             snap_age_min = (pd.Timestamp.now(tz="UTC").tz_localize(None) - snap_ts).total_seconds() / 60.0
 
-    if len(snap_latest) > 0 and (snap_age_min is None or snap_age_min < SNAPSHOT_MAX_AGE_MIN):
-        current_queue = int(snap_latest.iloc[0]["queue_count"])
-        raw_dwell_sec = (
-            float(snap_avg.iloc[0]["avg_dwell_sec"])
-            if len(snap_avg) > 0 and snap_avg.iloc[0]["avg_dwell_sec"] is not None
-            else float(snap_latest.iloc[0]["avg_dwell_sec"])
+    # ── Dwell model: XGBoost on service_events → per-bucket prediction ────────
+    print("\n[Dwell] Loading service events for dwell model...")
+    _conn_svc = psycopg2.connect(**DB_CONFIG)
+    try:
+        df_svc = pd.read_sql(f"""
+            SELECT timestamp, total_dwell_sec / 60.0 AS service_min
+            FROM service_events
+            WHERE total_dwell_sec >= {DWELL_MIN_FLOOR * 60}
+              AND total_dwell_sec <= {DWELL_MAX_CAP * 60}
+              AND timestamp >= NOW() - INTERVAL '{data_span_days} days'
+        """, _conn_svc)
+    finally:
+        _conn_svc.close()
+
+    # Flat median fallback (always compute as safety net)
+    svc_median = None
+    if not df_svc.empty:
+        svc_vals = pd.to_numeric(df_svc["service_min"], errors="coerce").dropna()
+        if not svc_vals.empty:
+            svc_median = float(svc_vals.median())
+    avg_dwell_min = float(np.clip(svc_median, DWELL_MIN_FLOOR, DWELL_MAX_CAP)) if svc_median else float(os.getenv("CHECKOUT_SERVICE_MIN", DEFAULT_DWELL_MIN))
+
+    # Train / load XGBoost dwell model
+    dwell_model = None
+    _dwell_fresh = os.path.exists(DWELL_MODEL_PATH) and (_time.time() - os.path.getmtime(DWELL_MODEL_PATH)) < MODEL_MAX_AGE_HOURS * 3600
+    if _dwell_fresh:
+        print("[Dwell] Loading saved dwell model...")
+        dwell_model = xgb.XGBRegressor()
+        dwell_model.load_model(DWELL_MODEL_PATH)
+        print("[Dwell] Loaded ✓")
+    elif not df_svc.empty and len(df_svc) >= 30:
+        print(f"[Dwell] Training dwell model on {len(df_svc)} service events...")
+        _ds = df_svc.copy()
+        _ds["timestamp"] = pd.to_datetime(_ds["timestamp"]).dt.tz_localize(None)
+        _ds["hour"]           = _ds["timestamp"].dt.hour
+        _ds["minute_of_hour"] = _ds["timestamp"].dt.minute
+        _ds["day_of_week"]    = _ds["timestamp"].dt.dayofweek
+        _ds["is_weekend"]     = (_ds["day_of_week"] >= 5).astype(int)
+        _ds["service_min"]    = _ds["service_min"].clip(DWELL_MIN_FLOOR, DWELL_MAX_CAP)
+        dwell_model = xgb.XGBRegressor(
+            n_estimators=300, max_depth=4, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, random_state=42, verbosity=0,
         )
-        raw_dwell_min = raw_dwell_sec / 60.0
-        # Snapshot dwell reflects entrance-zone tracking time (~6s), not checkout service time.
-        # Only use it if it looks like a real service time; otherwise use the configured default.
-        checkout_service_min = float(os.getenv("CHECKOUT_SERVICE_MIN", DEFAULT_DWELL_MIN))
-        avg_dwell_min = raw_dwell_min if raw_dwell_min >= 1.0 else checkout_service_min
+        dwell_model.fit(_ds[DWELL_FEATURE_COLS], _ds["service_min"])
+        dwell_model.save_model(DWELL_MODEL_PATH)
+        print(f"[Dwell] Trained and saved ✓  (median={avg_dwell_min:.2f} min)")
+    else:
+        print(f"[Dwell] Not enough data ({len(df_svc)} events) — using flat median fallback ({avg_dwell_min:.2f} min)")
+
+    # Per-bucket dwell predictions for future timestamps
+    if dwell_model is not None:
+        _dwell_rows = [{"hour": pd.Timestamp(ts).hour, "minute_of_hour": pd.Timestamp(ts).minute,
+                        "day_of_week": pd.Timestamp(ts).dayofweek, "is_weekend": int(pd.Timestamp(ts).dayofweek >= 5)}
+                       for ts in future_timestamps]
+        _dwell_raw = dwell_model.predict(pd.DataFrame(_dwell_rows))
+        per_bucket_dwell = np.clip(_dwell_raw, DWELL_MIN_FLOOR, DWELL_MAX_CAP).tolist()
+        print(f"[Dwell] Per-bucket predictions — min={min(per_bucket_dwell):.2f} max={max(per_bucket_dwell):.2f} mean={np.mean(per_bucket_dwell):.2f} min")
+    else:
+        per_bucket_dwell = avg_dwell_min  # scalar fallback
+
+    if len(snap_latest) > 0 and (snap_age_min is None or snap_age_min < SNAPSHOT_MAX_AGE_MIN):
+        _raw_queue    = int(snap_latest.iloc[0]["queue_count"])
         active_lanes  = max(1, int(snap_latest.iloc[0]["active_lanes"] or DEFAULT_LANES))
-        print(f"[Wait] queue={current_queue}, service={avg_dwell_min:.1f}min/customer, lanes={active_lanes}")
+        current_queue = max(0, _raw_queue - active_lanes)
+        print(f"[Wait] raw_queue={_raw_queue}, in_service={active_lanes}, waiting={current_queue}, service={avg_dwell_min:.1f}min/customer, lanes={active_lanes}")
     else:
         current_queue = 0
-        avg_dwell_min = DEFAULT_DWELL_MIN
         active_lanes  = DEFAULT_LANES
         print("[Wait] No snapshot — using defaults")
 
@@ -370,9 +564,10 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
             df_hist["entry_count"].astype(float))
     )
 
-    checkout_arrivals = np.zeros(FORECAST_STEPS)
-    now_floored = pd.Timestamp.now().floor(f"{BUCKET_MINUTES}min")
-    for i in range(FORECAST_STEPS):
+    checkout_arrivals = np.zeros(n_steps)
+    now_floored = pd.Timestamp.now().replace(second=0, microsecond=0,
+                  minute=(pd.Timestamp.now().minute // BUCKET_MINUTES) * BUCKET_MINUTES)
+    for i in range(n_steps):
         entrance_idx = i - browsing_lag_steps
         if entrance_idx < 0:
             entrance_time = now_floored + pd.Timedelta(minutes=BUCKET_MINUTES * entrance_idx)
@@ -382,11 +577,11 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
 
     wait_frame = prophet_preds[["ds"]].copy()
     wait_frame["yhat"] = checkout_arrivals
-    est_service_min = min(max(avg_dwell_min, 0.5), 10.0)
+
     wait_rows, wait_15m, wait_30m, service_per_bucket = compute_wait_estimates(
         wait_frame,
         current_queue=current_queue,
-        avg_dwell_min=est_service_min,
+        avg_dwell_min=per_bucket_dwell,
         active_lanes=active_lanes,
         max_queue_per_lane=MAX_QUEUE_PER_LANE,
         max_wait_min=MAX_WAIT_MIN,
@@ -402,7 +597,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
         _rows, _w15, _, _ = compute_wait_estimates(
             wait_frame,
             current_queue=current_queue,
-            avg_dwell_min=est_service_min,
+            avg_dwell_min=per_bucket_dwell,
             active_lanes=n_lanes,
             max_queue_per_lane=MAX_QUEUE_PER_LANE,
             max_wait_min=MAX_WAIT_MIN,
@@ -426,6 +621,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False) -> dict
         "lane_waits_15m":     lane_waits_15m,
         "current_queue":      current_queue,
         "avg_dwell_min":      avg_dwell_min,
+        "per_bucket_dwell":   per_bucket_dwell,
         "active_lanes":       active_lanes,
         "service_per_bucket": service_per_bucket,
         "real_span_days":     real_span_days,
@@ -548,19 +744,45 @@ def _save_to_db(result: dict) -> None:
         SELECT create_hypertable('queue_predictions', 'prediction_for',
             if_not_exists => TRUE, migrate_data => TRUE);
     """)
+    cur.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'queue_predictions_prediction_for_key'
+            ) THEN
+                ALTER TABLE queue_predictions
+                    ADD CONSTRAINT queue_predictions_prediction_for_key
+                    UNIQUE (prediction_for);
+            END IF;
+        END $$;
+    """)
+
+    def _db_val(v):
+        """Convert NaN/inf to None so PostgreSQL stores NULL instead of raising."""
+        try:
+            f = float(v)
+            return None if (f != f or f == float("inf") or f == float("-inf")) else round(f, 2)
+        except (TypeError, ValueError):
+            return None
 
     predicted_at  = datetime.now()
     lw            = result["lane_waits_15m"]
-    _w45          = round(result["wait_45m"], 2)  if result["wait_45m"]  is not None else None
-    _w15          = round(result["wait_15m"], 2)  if result["wait_15m"]  is not None else None
-    _w30          = round(result["wait_30m"], 2)  if result["wait_30m"]  is not None else None
-    _lw1          = round(lw.get(1, 0.0), 2)
-    _lw2          = round(lw.get(2, 0.0), 2)
-    _lw3          = round(lw.get(3, 0.0), 2)
+    _lw1          = _db_val(lw.get(1, 0.0))
+    _lw2          = _db_val(lw.get(2, 0.0))
+    _lw3          = _db_val(lw.get(3, 0.0))
+
+    _steps_15 = 15 // BUCKET_MINUTES
+    _steps_30 = 30 // BUCKET_MINUTES
+    _steps_45 = 45 // BUCKET_MINUTES
+    _we: list[float] = [float(v) for v in wait_estimates]  # type: ignore[union-attr]
+    _n  = len(_we)
 
     for i, row in prophet_preds.iterrows():
-        wait   = round(wait_estimates[i], 2)
+        wait   = round(_we[i], 2)
         status = "OK" if wait < 5 else "BUSY" if wait < 10 else "ALERT"
+        _w15 = round(_we[i + _steps_15], 2) if i + _steps_15 < _n else None
+        _w30 = round(_we[i + _steps_30], 2) if i + _steps_30 < _n else None
+        _w45 = round(_we[i + _steps_45], 2) if i + _steps_45 < _n else None
         cur.execute("""
             INSERT INTO queue_predictions
                 (predicted_at, prediction_for, prophet_yhat, lstm_yhat,
@@ -568,13 +790,27 @@ def _save_to_db(result: dict) -> None:
                  wait_15m, wait_30m, wait_45m,
                  wait_1lane_15m, wait_2lane_15m, wait_3lane_15m, status)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (prediction_for) DO UPDATE SET
+                predicted_at    = EXCLUDED.predicted_at,
+                prophet_yhat    = EXCLUDED.prophet_yhat,
+                lstm_yhat       = EXCLUDED.lstm_yhat,
+                xgb_yhat        = EXCLUDED.xgb_yhat,
+                ensemble_yhat   = EXCLUDED.ensemble_yhat,
+                est_wait_minutes= EXCLUDED.est_wait_minutes,
+                wait_15m        = EXCLUDED.wait_15m,
+                wait_30m        = EXCLUDED.wait_30m,
+                wait_45m        = EXCLUDED.wait_45m,
+                wait_1lane_15m  = EXCLUDED.wait_1lane_15m,
+                wait_2lane_15m  = EXCLUDED.wait_2lane_15m,
+                wait_3lane_15m  = EXCLUDED.wait_3lane_15m,
+                status          = EXCLUDED.status
         """, (
             predicted_at,
             row["ds"].to_pydatetime(),
-            round(float(prophet_vals[i]),  2),
-            round(float(lstm_vals[i]),     2),
-            round(float(xgb_vals[i]),      2),
-            round(float(ensemble_vals[i]), 2),
+            _db_val(prophet_vals[i]),
+            _db_val(lstm_vals[i]),
+            _db_val(xgb_vals[i]),
+            _db_val(ensemble_vals[i]),
             wait,
             _w15, _w30, _w45,
             _lw1, _lw2, _lw3,
@@ -594,9 +830,11 @@ if __name__ == "__main__":
     parser.add_argument("--source", type=str, default="REAL", choices=["REAL", "SIM", "ALL"])
     parser.add_argument("--bootstrap", action="store_true",
                         help="Pad sparse real data with synthetic history when < 14 days available.")
+    parser.add_argument("--days", type=int, default=DATA_SPAN_DAYS_DEFAULT,
+                        help="Number of past days of entrance_events to use for training (default: DATA_SPAN_DAYS env var or 30).")
     args = parser.parse_args()
 
-    result = run_ensemble_forecast(source=args.source, bootstrap=args.bootstrap)
+    result = run_ensemble_forecast(source=args.source, bootstrap=args.bootstrap, data_span_days=args.days)
     _print_results(result)
     _save_to_db(result)
     print("\n[Ensemble] All done.")

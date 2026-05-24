@@ -243,16 +243,16 @@ class DBLogger:
         except Exception as e:
             print(f"[DB] Snapshot error: {e}")
 
-    def log_service_event(self, camera_id, track_id, total_dwell_sec):
-        """Record a service completion (customer leaves). Used for future exit-ROI integration."""
+    def log_service_event(self, camera_id, track_id, total_dwell_sec, lane_id=None):
+        """Record a service completion (customer leaves)."""
         if not self.enabled:
             return
         try:
             self.cursor.execute("""
                 INSERT INTO service_events
-                    (camera_id, track_id, total_dwell_sec)
-                VALUES (%s, %s, %s)
-            """, (camera_id, track_id, total_dwell_sec))
+                    (camera_id, track_id, total_dwell_sec, lane_id)
+                VALUES (%s, %s, %s, %s)
+            """, (camera_id, track_id, total_dwell_sec, lane_id))
         except Exception as e:
             print(f"[DB] Service event error: {e}")
 

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-DEFAULT_OPEN_HOUR = 8
+DEFAULT_OPEN_HOUR = 9
 DEFAULT_CLOSE_HOUR = 20
 
 SCENARIOS = {

@@ -1,6 +1,7 @@
 import os
 import logging
 import sys
+import ctypes
 from collections import deque
 from tracemalloc import start
 import cv2
@@ -240,7 +241,32 @@ def draw_text_lines(frame, lines, position="bottom_left", padding_ratio=0.02, co
         cv2.putText(frame, line, (x, line_y), font, font_scale, color, thickness, cv2.LINE_AA)
 
 
+_LOCK_MUTEX = None
+_k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+def _acquire_lock() -> bool:
+    global _LOCK_MUTEX
+    _LOCK_MUTEX = _k32.CreateMutexW(None, True, "QueueManagementV2Lock")
+    err = ctypes.get_last_error()
+    print(f"[LOCK] PID={os.getpid()} err={err} exe={sys.executable[-40:]}", flush=True)
+    if err == 183:
+        _k32.CloseHandle(_LOCK_MUTEX)
+        _LOCK_MUTEX = None
+        return False
+    return bool(_LOCK_MUTEX)
+
+def _release_lock():
+    global _LOCK_MUTEX
+    if _LOCK_MUTEX:
+        _k32.ReleaseMutex(_LOCK_MUTEX)
+        _k32.CloseHandle(_LOCK_MUTEX)
+        _LOCK_MUTEX = None
+
+
 def main():
+    if not _acquire_lock():
+        print("[ERROR] Another instance of queue_management_v2.py is already running. Exiting.")
+        sys.exit(0)
     args = commandline_args()
 
     config_name = './config.yml'
@@ -286,9 +312,9 @@ def main():
     entry_line_direction = config2.get('entry_line_direction', 'forward').lower()
     entry_line_width     = config2.get('entry_line_width', 0)
     entry_line_min_disp  = config2.get('entry_line_min_displacement', 10)
-    avg_person_width     = config2.get('avg_person_width', 80)
     mask_zones           = config2.get('mask_zones', [])
     active_lanes         = config2.get('active_lanes', 2)
+    face_skip_frames     = config2.get('face_skip_frames', 1)
 
     # Validate line crossing config
     line_p1 = line_p2 = None
@@ -394,6 +420,8 @@ def main():
     counted_entry_times = deque(db.get_today_entry_timestamps())
     track_crossed:  set[int]        = set()   # tracks that already triggered a count
     band_candidate: dict[int, list] = {}      # track_id → [dist1, dist2, ...] for 3-frame confirm
+    face_analyzed_tracks: set[int]  = set()   # tracks that received at least one real face result
+    _face_frame_counter: int        = 0
 
     try:
         while True:
@@ -491,7 +519,9 @@ def main():
 
             # Submit current frame to face worker (non-blocking).
             # Worker runs in background; results() returns latest cached output.
-            if len(p_dets) > 0:
+            _face_frame_counter += 1
+            _unanalyzed = bool(prev_track_ids - face_analyzed_tracks)
+            if len(p_dets) > 0 and _face_frame_counter % face_skip_frames == 0 and _unanalyzed:
                 face_worker.submit(im0)
             min_face_size = config2.get('min_face_size', 40)
             faces     = [f for f in face_worker.results()
@@ -618,16 +648,12 @@ def main():
                                         dists[-1] < dists[0]
                                     )
                                     if (_was_outside and _is_inside) or _crossed_undetected:
-                                        _box_w = abs(_raw[1][0] - _raw[0][0])
-                                        _n = max(1, round(_box_w / avg_person_width))
                                         systems_logger.info(
                                             f"[COUNTER] 3-frame confirm id={track_id} "
-                                            f"dist: {dists[0]:.1f}→{dists[-1]:.1f} "
-                                            f"box_w={_box_w:.0f}px → {_n} person(s)"
+                                            f"dist: {dists[0]:.1f}→{dists[-1]:.1f}"
                                         )
                                         track_crossed.add(track_id)
-                                        for _ in range(_n):
-                                            counted_entry_times.append(current_time)
+                                        counted_entry_times.append(current_time)
                                         band_candidate.pop(track_id, None)
                         elif abs(signed_dist) <= _prox:
                             # Start candidate if close enough to the line
@@ -660,6 +686,7 @@ def main():
                         track_data[track_id]["best_conf"] = max(
                             track_data[track_id]["best_conf"], person_conf
                         )
+                        face_analyzed_tracks.add(track_id)
 
                 track_dur = current_time - track_start_times[track_id]
                 time_elapsed = float(obj.age / expect_fps)
@@ -717,6 +744,7 @@ def main():
                 track_data.pop(track_id, None)
                 person_loggers.pop(track_id, None)
                 track_crossed.discard(track_id)
+                face_analyzed_tracks.discard(track_id)
                 band_candidate.pop(track_id, None)
 
             prev_track_ids = current_track_ids
@@ -797,6 +825,7 @@ def main():
         systems_logger.error(f"An exception occurred - {str(e)}", exc_info=True)
 
     finally:
+        _release_lock()
         db.close()
         if 'video_writer' in locals(): video_writer.release()
         if 'thread' in locals(): thread.stop()

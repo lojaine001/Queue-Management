@@ -19,6 +19,7 @@ by the Streamlit dashboard, REST APIs, and the command-line interface.
 prediction/
 ├── core.py         Constants, utility functions, and the wait-time model
 ├── pipeline.py     Full ETL pipeline (load → train → forecast → wait estimates)
+├── hybrid_wait.py  Separate REAL-only hybrid wait projection layer
 ├── quick.py        Lightweight fast forecast for dashboard use
 ├── cli.py          Command-line interface (3 subcommands)
 ├── __init__.py     Package init
@@ -47,8 +48,10 @@ pipeline.py / quick.py
     ├─ 5. Fill closed-hour gaps with zeros
     ├─ 6. Train Prophet (daily + weekly seasonality)
     ├─ 7. Forecast next 60 open minutes
-    ├─ 8. Derive current queue state from latest snapshot
-    └─ 9. Compute wait estimates bucket-by-bucket
+    ├─ 8. Derive current waiting backlog from latest snapshot
+    ├─ 9. Prefer measured checkout service time from service_events
+    ├─ 10. Rescale entrance forecast into checkout-arrival demand
+    └─ 11. Compute wait estimates bucket-by-bucket
     │
     ▼
 Output dict (forecast DataFrame + wait times + lane scenarios)
@@ -66,8 +69,9 @@ Configuration hub and shared utility functions.
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `SHOP_OPEN` | 8 | Shop opening hour |
-| `SHOP_CLOSE` | 21 | Shop closing hour |
+| `SHOP_OPEN` | 8 | Default opening hour (all days) |
+| `SHOP_CLOSE` | 21 | Default closing hour (all days) |
+| `SHOP_SCHEDULE_OVERRIDE` | `{}` | JSON dict of per-day overrides; keyed by weekday string `"0"`=Mon…`"6"`=Sun |
 | `BUCKET_MINUTES` | 3 | Arrival bucket granularity in minutes |
 | `FORECAST_HORIZON_MINUTES` | 60 | How far ahead to forecast |
 | `MIN_REAL_DAYS_FOR_SIM` | 14 | Min real-data span before skipping bootstrap |
@@ -80,11 +84,12 @@ Configuration hub and shared utility functions.
 **Key functions**:
 
 - `get_where_clause(source)` — Returns SQL WHERE clause filtering by REAL/SIM/ALL
-- `is_open(ts)` — Returns True if timestamp is within shop hours
-- `future_open_timestamps()` — List of future bucket timestamps during opening hours
+- `_day_hours(weekday)` — Returns `(open_hour, open_minute, close_hour, close_minute)` for a given weekday (0=Mon…6=Sun), applying any `SHOP_SCHEDULE_OVERRIDE` entry
+- `is_open(ts)` — Returns True if timestamp falls within the shop's open window for that day (uses `_day_hours`)
+- `future_open_timestamps()` — List of future 3-min bucket timestamps during the current or next operating window (uses `_day_hours` to handle per-day close times)
 - `add_closed_zeros(df, days)` — Fills Prophet training data with zeros outside shop hours
 - `build_sim_history(days=7)` — Generates synthetic Poisson-distributed arrival history for bootstrapping
-- `compute_wait_estimates(forecast_df, current_queue, avg_dwell_min, active_lanes)` — Core wait-time simulation
+- `compute_wait_estimates(forecast_df, current_queue, avg_dwell_min, active_lanes)` — Core wait-time simulation; returns `([], None, None, 0.0)` immediately when `forecast_df` is empty; pads `dwell_per_step` and `lanes_per_step` lists to match forecast length with safe fallback values
 
 ---
 
@@ -106,6 +111,9 @@ Full production pipeline. Used by the Streamlit dashboard and the `pipeline` CLI
 
 - `estimate_browsing_gap(df_dwell, df_service)` — Cross-correlates entrance exits vs service arrivals to estimate unmeasured browsing time between queue and checkout
 - `latest_snapshot_for_wait(df_snapshots, source)` — Returns most recent snapshot, preferring REAL cameras
+- `_preferred_service_minutes(df_service, snapshot_dwell_min)` — Picks the best service-time basis for the wait model
+- `_observed_checkout_rate(df_service, bucket_minutes)` — Estimates checkout throughput from `service_events`
+- `_infer_active_lanes(df_service_recent, est_service_min, window_min)` — Estimates live lane count from recent service activity when possible
 
 **Main function**:
 
@@ -127,14 +135,130 @@ result = run_prediction_pipeline(
 | `wait_30m` | float\|None | Estimated wait at +30 minutes |
 | `wait_estimates` | list[dict] | Per-bucket wait times |
 | `lane_scenarios` | dict[int, dict] | Wait estimates for 1–5 lanes |
-| `current_queue` | int | Queue depth at forecast time |
-| `active_lanes` | int | Lanes used for wait calculation |
+| `current_queue` | int | Waiting backlog at forecast time (queue after subtracting in-service lanes) |
+| `active_lanes` | int | Snapshot lane count kept for dashboard compatibility |
+| `inferred_lanes` | int\|None | Lane count inferred from recent `service_events` |
+| `est_service_min` | float | Service time used by the wait model |
+| `service_time_source` | str | `service_events_median`, `snapshot_avg_dwell`, or `default_dwell` |
+| `service_median_min` | float\|None | Median service time from `service_events` |
+| `checkout_fraction` | float | Scalar used to convert entrance forecast into checkout-arrival demand |
+| `demand_source` | str | `service_events` or `snapshot_fallback` |
 | `browsing_est` | dict | Browsing-gap cross-correlation results |
 | `df_combined` | DataFrame | Final training data fed to Prophet |
 | `real_span_days` | float | Days of real data available |
 | `used_sim_history` | bool | True if synthetic data was mixed in |
 
 ---
+
+## Current Wait-Model Strategy
+
+The production wait model now uses a layered strategy:
+
+1. **Queue backlog now**
+   - Start from the newest `queue_state_snapshots` row
+   - Convert raw `queue_count` into **waiting backlog** by subtracting lanes currently serving customers
+   - If recent `service_events` are available, the pipeline may infer a better live lane count than the snapshot alone
+
+2. **Per-customer service time**
+   - Prefer the **median** `service_events.total_dwell_sec`
+   - Fall back to snapshot `avg_dwell_sec`
+   - Fall back again to `DEFAULT_DWELL_MIN` only when no better signal exists
+
+3. **Demand conversion**
+   - Prophet forecasts **entrance arrivals**
+   - The pipeline rescales those arrivals into **checkout-arrival demand** using a single `checkout_fraction`
+   - Primary source: observed checkout throughput from `service_events`
+   - Fallback source: snapshot lane history and estimated service capacity
+
+4. **Forward simulation**
+   - For each forecast bucket:
+     - add predicted checkout arrivals
+     - subtract service capacity (`lanes × bucket_minutes / service_time`)
+     - clamp backlog to `MAX_QUEUE_PER_LANE × lanes`
+     - convert remaining backlog into wait minutes
+
+This is intentionally transparent rather than “black box”. The Streamlit app surfaces the chosen service-time source, checkout scaling factor, lane estimate, and historical observed-vs-estimated wait comparisons for debugging.
+
+---
+
+## Prediction Tab Diagnostics
+
+`simulator/app.py` now exposes several wait-debug views:
+
+- **Wait model inputs**
+  - queue backlog now
+  - snapshot or inferred lane count
+  - chosen service time and its source
+  - checkout scaling factor and demand source
+- **Training-Period Wait Comparison**
+  - overlays historical observed wait proxy and model-estimated wait over the same period used to train Prophet
+- **Today's Forecast values**
+  - shows the exact 15-minute aggregated forecast values rendered in the chart, alongside the aggregated wait forecast
+
+These diagnostics are intended to help locate “factor” errors: whether the mismatch comes from service time, lane count, demand scaling, or backlog interpretation.
+
+---
+
+### `hybrid_wait.py`
+
+Additive helper layer for the separate `simulator/app_hybrid_wait.py` dashboard.
+It does not replace `pipeline.py`, and it does not change the behavior of the
+existing `simulator/app.py` prediction tab.
+
+**Purpose**:
+
+- keep the existing Prophet + wait pipeline intact
+- build a second, REAL-only wait projection path that anchors on current
+  operational state first
+- blend recent measured checkout behavior with historical/predicted future
+  inflow
+
+**High-level strategy**:
+
+1. Reuse `pipeline.run_prediction_pipeline(source="REAL", ...)` as a read-only
+   base forecast
+2. Derive current state from REAL snapshots and service events:
+   - waiting backlog now
+   - snapshot lanes and inferred live lanes
+   - recent checkout throughput
+   - recent median service time
+3. Build historical profiles from REAL history:
+   - checkout completions by time-of-day bucket
+   - lane counts by time-of-day bucket
+   - service-time profile by time-of-day bucket
+   - sparse checkout history is zero-filled across reference buckets so the
+     model does not overstate demand by averaging only non-empty buckets
+4. Blend:
+   - **current signal** from recent REAL operations
+   - **historical/predicted signal** from historical profiles plus the reused
+     Prophet demand shape
+5. Roll the queue forward bucket-by-bucket and return:
+   - `wait_15m`
+   - `wait_30m`
+   - a detailed per-bucket hybrid wait curve
+   - a historical comparison frame for factor debugging
+
+**Primary functions**:
+
+- `load_base_real_prediction(...)` — cached-friendly wrapper around the
+  existing REAL prediction pipeline
+- `build_hybrid_wait_view(base_result, ...)` — overlays the hybrid wait model
+  on top of a previously loaded base result
+- `run_hybrid_wait_dashboard(...)` — convenience wrapper that loads the base
+  result and builds the hybrid view in one call
+
+**Dashboard behavior exposed by `simulator/app_hybrid_wait.py`**:
+
+- direct comparison of base-pipeline vs hybrid `+15 min` and `+30 min` waits
+- model-input diagnostics including snapshot freshness
+- future wait values table with per-bucket blend inputs
+- training-period backtest with factor and absolute-error metrics
+
+**Important scope note**:
+
+The hybrid wait dashboard is intentionally additive. It exists so the team can
+compare a more operationally anchored future-wait model without destabilizing
+the current dashboard or CLI behavior.
 
 ### `quick.py`
 
@@ -203,9 +327,15 @@ DB_NAME=iqms
 DB_USER=postgres
 DB_PASSWORD=your_password
 
-# Shop hours
+# Shop hours (defaults apply to all days)
 SHOP_OPEN=8
 SHOP_CLOSE=21
+
+# Per-day overrides (JSON, weekday 0=Mon … 6=Sun). Only keys that differ from
+# the defaults are needed. Supported keys: open_hour, open_minute,
+# close_hour, close_minute.
+# Example: Sunday closes at 13:00
+SHOP_SCHEDULE_OVERRIDE={"6": {"close_hour": 13, "close_minute": 0}}
 
 # Prediction settings
 BUCKET_MINUTES=3
@@ -239,8 +369,13 @@ For each future bucket i:
 **Inputs**:
 - `forecast_df` — Prophet `yhat` values for the next 60 minutes
 - `current_queue` — people in queue right now (from latest snapshot)
-- `avg_dwell_min` — average service time per person (from snapshot or default)
-- `active_lanes` — open service lanes (from snapshot or default)
+- `avg_dwell_min` — average service time per person; may be a list (one value per bucket) or a scalar
+- `active_lanes` — open service lanes; may be a list (one value per bucket) or a scalar
+
+**Edge-case guards**:
+- Returns `([], None, None, 0.0)` immediately when `forecast_df` is empty (`n_steps == 0`)
+- `dwell_per_step` is padded to `n_steps` with a fill value of `1.0` if the source list is shorter or empty
+- `lanes_per_step` is padded to `n_steps` with a fill value of `1` if the source list is shorter or empty
 
 ---
 

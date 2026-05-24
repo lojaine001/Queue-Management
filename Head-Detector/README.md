@@ -119,8 +119,11 @@ python main.py
 python main.py --execution_provider openvino
 python main.py --execution_provider cuda
 python main.py --execution_provider tensorrt --inference_type fp16
-python main.py --source path/to/video.mp4 --view-img
+python main.py --source path/to/video.mp4
+python main.py --no-view-img
 ```
+
+`python main.py` now defaults to `--execution_provider openvino` and opens the OpenCV preview window automatically. Use `--no-view-img` if you want a headless run.
 
 ## Configuration files
 

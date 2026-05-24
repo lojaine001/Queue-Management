@@ -189,7 +189,7 @@ async def handler(websocket):
                     data.get("prob_bakery", config.get("prob_bakery", 0.25))
                 )
 
-                open_hour = int(config.get("open_hour", 8))
+                open_hour = int(config.get("open_hour", 9))
                 close_hour = int(config.get("close_hour", 20))
 
                 if start_mode == "Specific date/time" and start_datetime:

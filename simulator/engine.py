@@ -9,7 +9,7 @@ class SimulatorEngine:
     def __init__(self, scenario_config: Dict[str, Any], db: SimDB):
         self.config = scenario_config
         self.db = db
-        self.open_hour = int(scenario_config.get('open_hour', 8))
+        self.open_hour = int(scenario_config.get('open_hour', 9))
         self.close_hour = int(scenario_config.get('close_hour', 20))
 
         start_time = scenario_config.get('start_time', datetime.now())

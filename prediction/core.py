@@ -3,12 +3,14 @@ core.py — Shared constants, utilities, and wait-time model for the prediction 
 
 All tuneable parameters are loaded from environment variables (or .env file) so
 they can be overridden without touching the code.  Defaults are chosen for a
-typical retail shop open 08:00–21:00 with 3-minute arrival buckets.
+typical retail shop open 08:30–20:30 with 3-minute arrival buckets.
 
 Environment variables
 ─────────────────────
-  SHOP_OPEN                 int   Hour the shop opens (default 8)
-  SHOP_CLOSE                int   Hour the shop closes (default 21)
+  SHOP_OPEN                 int   Opening hour   (default 8,  i.e. 08:xx)
+  SHOP_OPEN_MINUTE          int   Opening minute (default 30, i.e. xx:30)
+  SHOP_CLOSE_HOUR           int   Closing hour   (default 20, i.e. 20:xx)
+  SHOP_CLOSE_MINUTE         int   Closing minute (default 30, i.e. xx:30)
   BUCKET_MINUTES            int   Granularity of arrival buckets in minutes (default 3)
   FORECAST_HORIZON_MINUTES  int   How far ahead to forecast (default 60)
   LOOKBACK_MINUTES          int   Lookback window used in sequence models (default 60)
@@ -26,6 +28,7 @@ Environment variables
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta
 
@@ -36,8 +39,31 @@ from dotenv import find_dotenv, load_dotenv
 load_dotenv(find_dotenv(usecwd=True))
 
 # ── Shop hours ────────────────────────────────────────────────────────────────
-SHOP_OPEN  = int(os.getenv("SHOP_OPEN",  8))
-SHOP_CLOSE = int(os.getenv("SHOP_CLOSE", 21))
+SHOP_OPEN        = int(os.getenv("SHOP_OPEN",         8))   # opening hour (integer, for slot iteration)
+SHOP_OPEN_MINUTE = int(os.getenv("SHOP_OPEN_MINUTE",  30))  # opening minute
+SHOP_CLOSE_HOUR  = int(os.getenv("SHOP_CLOSE_HOUR",   20))  # closing hour
+SHOP_CLOSE_MINUTE = int(os.getenv("SHOP_CLOSE_MINUTE", 30))  # closing minute
+SHOP_CLOSE = SHOP_CLOSE_HOUR + 1                             # exclusive upper bound for slot-building loops
+# Actual open/close as total minutes from midnight — used for all time comparisons
+SHOP_OPEN_TOT  = SHOP_OPEN * 60 + SHOP_OPEN_MINUTE          # 8*60+30 = 510
+SHOP_CLOSE_TOT = SHOP_CLOSE_HOUR * 60 + SHOP_CLOSE_MINUTE   # 20*60+30 = 1230
+
+# ── Per-day schedule overrides ────────────────────────────────────────────────
+# JSON keyed by weekday number (0=Mon … 6=Sun). Only specified keys/fields are
+# overridden; all others inherit the defaults above.
+# Example .env:  SHOP_SCHEDULE_OVERRIDE={"6": {"close_hour": 13, "close_minute": 0}}
+_SCHEDULE_OVERRIDE: dict = json.loads(os.getenv("SHOP_SCHEDULE_OVERRIDE", "{}"))
+
+
+def _day_hours(weekday: int) -> tuple[int, int, int, int]:
+    """Return (open_hour, open_minute, close_hour, close_minute) for *weekday* (0=Mon, 6=Sun)."""
+    ov = _SCHEDULE_OVERRIDE.get(str(weekday), {})
+    return (
+        int(ov.get("open_hour",    SHOP_OPEN)),
+        int(ov.get("open_minute",  SHOP_OPEN_MINUTE)),
+        int(ov.get("close_hour",   SHOP_CLOSE_HOUR)),
+        int(ov.get("close_minute", SHOP_CLOSE_MINUTE)),
+    )
 
 # ── Prediction buckets & horizon ──────────────────────────────────────────────
 BUCKET_MINUTES            = int(os.getenv("BUCKET_MINUTES",            3))
@@ -55,6 +81,13 @@ DWELL_MAX_CAP        = float(os.getenv("DWELL_MAX_CAP",      10.0))
 DEFAULT_LANES        = int(os.getenv("DEFAULT_LANES",        2))
 SNAPSHOT_MAX_AGE_MIN = int(os.getenv("SNAPSHOT_MAX_AGE_MIN", 30))
 SHOP_TIME_MAX_LAG_MIN = int(os.getenv("SHOP_TIME_MAX_LAG_MIN", 120))
+# Minimum dwell in service_events to count as a real completed checkout (filters noise)
+SERVICE_MIN_DWELL_SEC = int(os.getenv("SERVICE_MIN_DWELL_SEC", 60))
+# Minimum number of non-empty buckets required to use observed-rate calibration
+MIN_DEMAND_BUCKETS = int(os.getenv("MIN_DEMAND_BUCKETS", 10))
+# Camera IDs — entrance camera counts arrivals; exit camera is the checkout head counter
+ENTRANCE_CAMERA_ID = os.getenv("ENTRANCE_CAMERA_ID", "Bosch_Camera_Entrance")
+EXIT_CAMERA_ID     = os.getenv("EXIT_CAMERA_ID",     "Bosch_Camera_exit")
 
 # ── Training defaults ─────────────────────────────────────────────────────────
 DATA_SINCE_DEFAULT_DAYS = int(os.getenv("DATA_SINCE_DEFAULT_DAYS", 7))
@@ -91,53 +124,40 @@ def get_where_clause(source: str) -> str:
     return ""
 
 
-def is_open(ts: pd.Timestamp, shop_open: int = SHOP_OPEN, shop_close: int = SHOP_CLOSE) -> bool:
-    """Return True if the timestamp falls within shop opening hours.
-
-    Parameters
-    ----------
-    ts         : pd.Timestamp  Timestamp to check.
-    shop_open  : int           Opening hour (inclusive, default SHOP_OPEN).
-    shop_close : int           Closing hour (exclusive, default SHOP_CLOSE).
-    """
-    return shop_open <= ts.hour < shop_close
+def is_open(ts: pd.Timestamp) -> bool:
+    """Return True if the timestamp falls within shop opening hours (minute-accurate, per-day schedule)."""
+    oh, om, ch, cm = _day_hours(ts.weekday())
+    tot = ts.hour * 60 + ts.minute
+    return (oh * 60 + om) <= tot < (ch * 60 + cm)
 
 
-def future_open_timestamps(
-    interval_min: int = BUCKET_MINUTES,
-    shop_open: int = SHOP_OPEN,
-    shop_close: int = SHOP_CLOSE,
-) -> list[pd.Timestamp]:
-    """Generate a list of future timestamps during shop opening hours.
+def future_open_timestamps(interval_min: int = BUCKET_MINUTES) -> list[pd.Timestamp]:
+    """Generate a list of future timestamps during shop opening hours (minute-accurate).
 
     Starting from the next bucket after now, steps forward by `interval_min`
     until the shop closes today (or opens tomorrow if currently outside hours).
-
-    Parameters
-    ----------
-    interval_min : int  Bucket size in minutes.
-    shop_open    : int  Opening hour (inclusive).
-    shop_close   : int  Closing hour (exclusive).
-
-    Returns
-    -------
-    list[pd.Timestamp]
-        Ordered list of future open timestamps for the forecast horizon.
     """
     now = pd.Timestamp.now().floor(f"{interval_min}min")
-    today_close = now.replace(hour=shop_close, minute=0, second=0, microsecond=0)
+    now_tot = now.hour * 60 + now.minute
+    today = now.normalize()
+    oh, om, ch, cm = _day_hours(today.weekday())
+    open_tot_today  = oh * 60 + om
+    close_tot_today = ch * 60 + cm
 
-    if now.hour >= shop_close or now.hour < shop_open:
-        base = now + pd.Timedelta(days=1) if now.hour >= shop_close else now
-        open_start = base.replace(hour=shop_open, minute=0, second=0, microsecond=0)
-        open_end   = base.replace(hour=shop_close, minute=0, second=0, microsecond=0)
-    else:
-        open_start = now + pd.Timedelta(minutes=interval_min)
-        open_end   = today_close
+    open_ts  = today.replace(hour=oh, minute=om, second=0, microsecond=0)
+    close_ts = today.replace(hour=ch, minute=cm, second=0, microsecond=0)
+
+    if now_tot >= close_tot_today:
+        tomorrow = today + pd.Timedelta(days=1)
+        oh2, om2, ch2, cm2 = _day_hours(tomorrow.weekday())
+        open_ts  = tomorrow.replace(hour=oh2, minute=om2, second=0, microsecond=0)
+        close_ts = tomorrow.replace(hour=ch2, minute=cm2, second=0, microsecond=0)
+    elif now_tot >= open_tot_today:
+        open_ts = now + pd.Timedelta(minutes=interval_min)
 
     result: list[pd.Timestamp] = []
-    t = open_start
-    while t < open_end:
+    t = open_ts
+    while t < close_ts:
         result.append(t)
         t += pd.Timedelta(minutes=interval_min)
     return result
@@ -147,8 +167,6 @@ def add_closed_zeros(
     df: pd.DataFrame,
     days: int,
     interval_min: int = BUCKET_MINUTES,
-    shop_open: int = SHOP_OPEN,
-    shop_close: int = SHOP_CLOSE,
 ) -> pd.DataFrame:
     """Fill Prophet training data with zero-arrival rows during closed hours.
 
@@ -162,8 +180,6 @@ def add_closed_zeros(
     df           : pd.DataFrame  Training DataFrame with columns ["ds", "y"].
     days         : int           Number of past days to fill.
     interval_min : int           Bucket granularity in minutes.
-    shop_open    : int           Opening hour (inclusive).
-    shop_close   : int           Closing hour (exclusive).
 
     Returns
     -------
@@ -177,7 +193,7 @@ def add_closed_zeros(
     rows = []
     t = start
     while t <= end:
-        if not is_open(t, shop_open=shop_open, shop_close=shop_close):
+        if not is_open(t):
             rows.append({"ds": t, "y": 0})
         t += pd.Timedelta(minutes=interval_min)
     if not rows:
@@ -194,8 +210,6 @@ def add_closed_zeros(
 def build_sim_history(
     days: int = 7,
     interval_min: int = BUCKET_MINUTES,
-    shop_open: int = SHOP_OPEN,
-    shop_close: int = SHOP_CLOSE,
 ) -> pd.DataFrame:
     """Generate synthetic arrival history using a Poisson process.
 
@@ -207,8 +221,6 @@ def build_sim_history(
     ----------
     days         : int  Number of synthetic days to generate (default 7).
     interval_min : int  Bucket granularity in minutes.
-    shop_open    : int  Opening hour (inclusive).
-    shop_close   : int  Closing hour (exclusive).
 
     Returns
     -------
@@ -220,9 +232,12 @@ def build_sim_history(
     for day in range(days):
         current_day = start + timedelta(days=day)
         is_weekend = current_day.weekday() >= 5
-        for hour in range(shop_open, shop_close):
+        _doh, _dom, _dch, _dcm = _day_hours(current_day.weekday())
+        for hour in range(_doh, _dch + 1):
             for minute in range(0, 60, interval_min):
                 t = current_day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if not is_open(pd.Timestamp(t)):
+                    continue
                 if 8 <= hour < 10:
                     base = 3 if is_weekend else 2
                 elif 10 <= hour < 13:
@@ -242,8 +257,8 @@ def build_sim_history(
 def compute_wait_estimates(
     forecast_df: pd.DataFrame,
     current_queue: float,
-    avg_dwell_min: float,
-    active_lanes: int,
+    avg_dwell_min: "float | list[float]",
+    active_lanes: "int | list[int]",
     *,
     arrivals_col: str = "yhat",
     bucket_minutes: int = BUCKET_MINUTES,
@@ -254,52 +269,76 @@ def compute_wait_estimates(
 
     For each future bucket the model:
       1. Adds the forecasted arrivals to the running queue.
-      2. Subtracts the service capacity (lanes × bucket_min / avg_dwell_min).
+      2. Subtracts the service capacity (lanes × bucket_min / dwell_per_step[i]).
       3. Clamps the queue to [0, max_queue_per_lane × lanes].
       4. Converts remaining queue depth to a wait-time estimate.
 
     Parameters
     ----------
-    forecast_df        : pd.DataFrame  Must contain columns "ds" and `arrivals_col`.
-    current_queue      : float         Queue depth right now (people waiting).
-    avg_dwell_min      : float         Average service time per person in minutes.
-    active_lanes       : int           Number of open service lanes.
-    arrivals_col       : str           Column name for forecast values (default "yhat").
-    bucket_minutes     : int           Bucket size in minutes (default BUCKET_MINUTES).
-    max_queue_per_lane : int | None    Per-lane queue cap; None = uncapped.
-    max_wait_min       : float | None  Maximum wait cap in minutes; None = uncapped.
+    forecast_df        : pd.DataFrame            Must contain columns "ds" and `arrivals_col`.
+    current_queue      : float                   Queue depth right now (people waiting).
+    avg_dwell_min      : float | list[float]     Scalar OR per-bucket predicted service time (min).
+    active_lanes       : int | list[int]         Scalar OR per-bucket lane count. When a list is
+                                                  provided each bucket uses its own lane count,
+                                                  enabling time-of-day lane schedules.
+    arrivals_col       : str                     Column name for forecast values (default "yhat").
+    bucket_minutes     : int                     Bucket size in minutes (default BUCKET_MINUTES).
+    max_queue_per_lane : int | None              Per-lane queue cap; None = uncapped.
+    max_wait_min       : float | None            Maximum wait cap in minutes; None = uncapped.
 
     Returns
     -------
-    wait_estimates   : list[dict]   One dict per bucket with keys "ds" and "wait_min".
-    wait_15m         : float | None Estimated wait at the +15-minute mark.
-    wait_30m         : float | None Estimated wait at the +30-minute mark.
-    service_per_bucket : float      Throughput per bucket (people served per bucket).
+    wait_estimates     : list[dict]   One dict per bucket with keys "ds" and "wait_min".
+    wait_15m           : float | None Estimated wait at the +15-minute mark.
+    wait_30m           : float | None Estimated wait at the +30-minute mark.
+    mean_service_per_bucket : float   Mean throughput across all buckets.
     """
-    active_lanes  = max(1, int(active_lanes))
-    avg_dwell_min = max(float(avg_dwell_min), 0.5)
-    service_per_bucket = active_lanes * (bucket_minutes / avg_dwell_min)
+    n_steps = len(forecast_df)
+    if n_steps == 0:
+        return [], None, None, 0.0
+
+    if isinstance(avg_dwell_min, (int, float)):
+        dwell_per_step = [max(float(avg_dwell_min), 0.5)] * n_steps
+    else:
+        dwell_per_step = [max(float(d), 0.5) for d in avg_dwell_min]
+        _dwell_fill = dwell_per_step[-1] if dwell_per_step else 1.0
+        if len(dwell_per_step) < n_steps:
+            dwell_per_step += [_dwell_fill] * (n_steps - len(dwell_per_step))
+
+    if isinstance(active_lanes, (int, float)):
+        lanes_per_step = [max(1, int(active_lanes))] * n_steps
+    else:
+        lanes_per_step = [max(1, int(l)) for l in active_lanes]
+        _lanes_fill = lanes_per_step[-1] if lanes_per_step else 1
+        if len(lanes_per_step) < n_steps:
+            lanes_per_step += [_lanes_fill] * (n_steps - len(lanes_per_step))
 
     running_queue = max(0.0, float(current_queue))
     if max_queue_per_lane is not None:
-        running_queue = min(running_queue, float(active_lanes * max_queue_per_lane))
+        running_queue = min(running_queue, float(lanes_per_step[0] * max_queue_per_lane))
 
     wait_estimates: list[dict[str, object]] = []
     wait_15m = None
     wait_30m = None
+    total_service_per_bucket = 0.0
 
     for step_i, row in enumerate(forecast_df.itertuples(index=False)):
+        lanes_now = lanes_per_step[step_i]
+        service_per_bucket = lanes_now * (bucket_minutes / dwell_per_step[step_i])
+        total_service_per_bucket += service_per_bucket
+
         arrivals      = max(0.0, float(getattr(row, arrivals_col)))
         running_queue = max(0.0, running_queue + arrivals - service_per_bucket)
         if max_queue_per_lane is not None:
-            running_queue = min(running_queue, float(active_lanes * max_queue_per_lane))
+            running_queue = min(running_queue, float(lanes_now * max_queue_per_lane))
 
         wait_min = (
-            round((running_queue / service_per_bucket) * bucket_minutes, 1)
+            (running_queue / service_per_bucket) * bucket_minutes
             if service_per_bucket > 0 else 0.0
         )
         if max_wait_min is not None:
             wait_min = min(wait_min, max_wait_min)
+        wait_min = round(float(wait_min), 2)
 
         wait_estimates.append({"ds": getattr(row, "ds"), "wait_min": wait_min})
         if step_i == WAIT_15M_INDEX:
@@ -307,4 +346,5 @@ def compute_wait_estimates(
         if step_i == WAIT_30M_INDEX:
             wait_30m = wait_min
 
-    return wait_estimates, wait_15m, wait_30m, service_per_bucket
+    mean_service_per_bucket = total_service_per_bucket / max(n_steps, 1)
+    return wait_estimates, wait_15m, wait_30m, mean_service_per_bucket

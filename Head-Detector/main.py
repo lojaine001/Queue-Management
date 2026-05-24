@@ -281,13 +281,16 @@ def commandline_args():
     parser = argparse.ArgumentParser()
     # parser.add_argument('--pretrained_weights', type=str, default='yolov9-t.pt', help='model.pt path(s)')
     parser.add_argument('--inference_type', type=str, choices=['fp32','fp16', 'int8'], default='fp32', help='Inference type. Default: fp16')
-    parser.add_argument('--execution_provider', type=str, choices=['cpu', 'cuda', 'tensorrt', 'openvino'], default='cpu', help='Execution provider for ONNXRuntime.')
+    parser.add_argument('--execution_provider', type=str, choices=['cpu', 'cuda', 'tensorrt', 'openvino'], default='openvino', help='Execution provider for ONNXRuntime. Default: openvino.')
     parser.add_argument('--custom_weights', type=str, default='best.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='inference/images', help='source')  # file/folder, 0 for webcam
     # parser.add_argument('--out', type=str, help='path to save demo') # file/folder, 0 for webcam
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     # parser.add_argument('--device', default='cpu', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--view-img', action='store_true', help='display results')
+    view_group = parser.add_mutually_exclusive_group()
+    view_group.add_argument('--view-img', dest='view_img', action='store_true', help='display results (default)')
+    view_group.add_argument('--no-view-img', dest='view_img', action='store_false', help='disable display window')
+    parser.set_defaults(view_img=True)
     # parser.add_argument('--save_demo', action='store_true', help='save_demos')
     args = parser.parse_args()
     return args
@@ -415,6 +418,9 @@ def main():
     }
 
     providers = providers_dict.get(execution_provider, None)
+    preview_enabled = args.view_img
+    preview_window_name = 'Detection Application YOLOv9'
+    preview_window_created = False
 
     # Model initialization
     head_model = YOLOv9(
@@ -892,6 +898,7 @@ def main():
                                    dwell_seconds=final_dwell, entry_time=entry_time,
                                    active_head_tracks_in_lane=confirmed_lane_active_count,
                                    equipment_type=equip_type)
+                db.log_service_event(camID, tid, final_dwell, lane_id=dead_roi)
                 lane_last_insert[lane_name] = (tid, final_dwell, confirmed_lane_active_count)
                 systems_logger.info(
                     f"[DB] Inserted id={tid} | lane={lane_name} | dwell={final_dwell:.1f}s "
@@ -992,11 +999,20 @@ def main():
                 cv2.imwrite(debug_image_path, img)
                 no_snapshots += 1
 
-            if args.view_img:
-                im_show = cv2.resize(img, (600, 400), interpolation=cv2.INTER_AREA)
-                cv2.imshow('Detection Application YOLOv9', im_show)
-                if cv2.waitKey(1) in {ord("q"), ord("Q"), 27}:
-                    break
+            if preview_enabled:
+                try:
+                    if not preview_window_created:
+                        cv2.namedWindow(preview_window_name, cv2.WINDOW_NORMAL)
+                        preview_window_created = True
+                    im_show = cv2.resize(img, (600, 400), interpolation=cv2.INTER_AREA)
+                    cv2.imshow(preview_window_name, im_show)
+                    if cv2.waitKey(1) in {ord("q"), ord("Q"), 27}:
+                        break
+                except cv2.error as exc:
+                    print(Color.YELLOW(
+                        f'[VIEW] WARNING: Failed to open preview window, disabling --view-img. Reason: {exc}'
+                    ))
+                    preview_enabled = False
 
     except Exception as e:
         print(f"{get_datetime_str()} ERROR: An exception occurred - {str(e)}")
@@ -1010,7 +1026,7 @@ def main():
         if 'db' in locals(): db.close()
         if 'video_writer' in locals(): video_writer.release()
         if 'thread' in locals(): thread.stop()
-        if args.view_img: # Only destroy windows if they were created
+        if preview_window_created:
             cv2.destroyAllWindows()
         print(f"{get_datetime_str()} INFO: Cleanup complete. Exiting.")
         os._exit(0)

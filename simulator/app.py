@@ -1,4 +1,4 @@
-"""
+﻿"""
 Queue Simulator — Streamlit Dashboard
 ──────────────────────────────────────
 Run with:
@@ -26,11 +26,16 @@ import importlib, sys
 from simulator.calibrate import calibrate
 from simulator.scenarios import SCENARIOS, get_scenario
 import simulator.predict_viz as _pv_mod
-from prediction import pipeline as pred_pipeline
 # Force Streamlit hot-reloads to use the current source, not a cached module.
 if "simulator.predict_viz" in sys.modules:
     importlib.reload(sys.modules["simulator.predict_viz"])
+# core must be reloaded before pipeline so pipeline's from-import gets the fresh functions
+if "prediction.core" in sys.modules:
+    importlib.reload(sys.modules["prediction.core"])
+if "prediction.pipeline" in sys.modules:
+    importlib.reload(sys.modules["prediction.pipeline"])
 import simulator.predict_viz as predict_viz
+from prediction import pipeline as pred_pipeline
 
 BACKEND_HOST  = os.getenv("BACKEND_HOST",  "127.0.0.1")
 FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", 8081))
@@ -135,7 +140,7 @@ if not (open_hour <= selected_start_dt.hour < close_hour):
     if selected_start_dt.hour >= close_hour:
         effective_preview_dt += timedelta(days=1)
 
-num_lanes   = st.sidebar.slider("Active Caisse Lanes", 1, 5, min(5, max(1, default_lanes)),   key="num_lanes")
+num_lanes   = st.sidebar.slider("Active Caisse Lanes", 1, 4, min(4, max(1, default_lanes)),   key="num_lanes")
 arrival_gap = st.sidebar.slider("Avg Arrival Gap (sec)", 10, 300, min(300, max(10, default_gap)), key="arrival_gap")
 caddy_pct   = st.sidebar.slider("Caddy customers (%)", 0, 100, min(100, max(0, default_caddy_pct)), key="caddy_pct")
 bakery_pct  = st.sidebar.slider("Bakery customers (%)", 0, 100, min(100, max(0, default_bakery_pct)), key="bakery_pct")
@@ -458,13 +463,23 @@ def _get_pred_result(source: str, days: int, use_bootstrap: bool,
 
 
 def _render_pred_results(result: dict, live_actuals: "pd.DataFrame | None" = None) -> None:
-    w15 = result["wait_15m"] or 0.0
-    banner_color = "#16a34a" if w15 < 5 else "#d97706" if w15 < 10 else "#dc2626"
-    label        = "🟢 OK"  if w15 < 5 else "🟡 BUSY" if w15 < 10 else "🔴 ALERT"
+    def _fmt_wait(value: float | None) -> str:
+        return f"{float(value):.2f} min" if value is not None else "—"
+
+    w15 = result.get("wait_15m")
+    w30 = result.get("wait_30m")
+    if w15 is None:
+        banner_color = "#475569"
+        label = "⏳ PENDING"
+        banner_text = "Waiting for a valid +15 min wait estimate"
+    else:
+        banner_color = "#16a34a" if w15 < 2 else "#d97706" if w15 < 5 else "#dc2626"
+        label = "🟢 OK" if w15 < 2 else "🟡 BUSY" if w15 < 5 else "🔴 ALERT"
+        banner_text = f"Predicted wait in 15 min: {_fmt_wait(w15)}"
     st.markdown(
         f'<div style="background:{banner_color};padding:10px 18px;border-radius:8px;'
         f'font-size:1.2em;font-weight:bold;color:white">'
-        f'{label} — Predicted wait in 15 min: {w15} min</div>',
+        f'{label} — {banner_text}</div>',
         unsafe_allow_html=True,
     )
     st.markdown("")
@@ -490,47 +505,237 @@ def _render_pred_results(result: dict, live_actuals: "pd.DataFrame | None" = Non
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("📦 Training rows",  len(result["df_combined"]))
     k2.metric("📅 Real data span", f"{result['real_span_days']:.0f} days")
-    k3.metric("⏳ Wait @ +15 min", f"{w15} min")
-    k4.metric("⏳ Wait @ +30 min", f"{result['wait_30m']} min")
+    k3.metric("⏳ Wait @ +15 min", _fmt_wait(w15))
+    k4.metric("⏳ Wait @ +30 min", _fmt_wait(w30))
     k5.metric("👜 Bag rate (24h)", bag_rate)
+    service_source = result.get("service_time_source", "unknown")
+    service_used = result.get("est_service_min")
+    snapshot_dwell = result.get("snapshot_avg_dwell_min")
+    service_median = result.get("service_median_min")
+    current_queue = result.get("current_queue", "—")
+    active_lanes_r = result.get("active_lanes", "—")
+    inferred_lanes_r = result.get("inferred_lanes")
+    demand_source_r = result.get("demand_source", "snapshot_fallback")
+
+    _src_icon = {
+        "service_events_median": "✅",
+        "snapshot_avg_dwell":    "⚠️",
+        "default_dwell":         "🔴",
+    }.get(service_source, "❓")
+    _src_text = {
+        "service_events_median": "Measured (service events)",
+        "snapshot_avg_dwell":    "Proxy (snapshot dwell)",
+        "default_dwell":         "Config default",
+    }.get(service_source, service_source)
+
+    _demand_icon = "✅" if demand_source_r == "service_events" else "⚠️"
+    _lanes_display = (
+        f"{inferred_lanes_r} (detected)" if inferred_lanes_r is not None
+        else f"{active_lanes_r} (snapshot)"
+    )
+
+    with st.expander("🔧 Wait model inputs", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Queue waiting now", current_queue if not isinstance(current_queue, int) else max(0, current_queue))
+        c2.metric("Active lanes", _lanes_display)
+        c3.metric("Service time", f"{service_used:.1f} min" if service_used is not None else "—")
+
+        detail_parts = []
+        if service_median is not None:
+            detail_parts.append(f"Service events median: **{service_median:.1f} min**")
+        checkout_frac = result.get("checkout_fraction")
+        if checkout_frac is not None:
+            detail_parts.append(f"Checkout scale: **{checkout_frac:.2f}**")
+        hist_cf = result.get("historical_checkout_fraction")
+        if hist_cf is not None:
+            detail_parts.append(f"Historical checkout fraction: **{hist_cf:.3f}**")
+        else:
+            detail_parts.append("Historical checkout fraction: **N/A** (sparse service data — Phase 3 inactive)")
+        detail_parts.append(f"Demand source: {_demand_icon} {demand_source_r.replace('_', ' ')}")
+        detail_parts.append(f"Service time: {_src_icon} {_src_text}")
+
+        st.caption("  ·  ".join(detail_parts))
+
+        # Lane schedule (historical) and real-time lane count used for wait estimates
+        _lane_sched = result.get("lane_schedule", {})
+        _per_bucket = result.get("per_bucket_lanes", [])
+        _rt_lanes   = result.get("active_lanes")
+        if _lane_sched:
+            _sched_str = "  ".join(
+                f"`{slot}→{lanes}L`" for slot, lanes in sorted(_lane_sched.items())
+            )
+            st.caption(f"Historical lane schedule (planning chart): {_sched_str}")
+        else:
+            st.caption("Historical lane schedule: empty")
+        if _per_bucket:
+            _unique = sorted(set(_per_bucket))
+            _is_dynamic = len(_unique) > 1
+            st.caption(
+                f"Historical schedule diversity: {'🟢 varies' if _is_dynamic else '🔴 flat'} "
+                f"— values: {_unique}"
+            )
+        _per_bucket_unique = sorted(set(result.get("per_bucket_lanes", [])))
+        if _per_bucket_unique:
+            st.caption(
+                f"Wait estimate lanes (from schedule): 🟢 {_per_bucket_unique} — "
+                f"matches Active Lanes chart"
+            )
+
+        # ── Wait model internals diagnostic ──────────────────────────────────
+        st.markdown("**⚠️ Wait model internals** — use to diagnose unrealistic wait estimates")
+        _d_src   = result.get("demand_source", "—")
+        _d_pb    = result.get("demand_per_bucket")
+        _avg_yh  = result.get("avg_prophet_yhat")
+        _cf      = result.get("checkout_fraction")
+        _sl      = result.get("snap_lanes_formula")
+        _cq      = result.get("current_queue")
+        _esm     = result.get("est_service_min")
+        _svc_src = result.get("service_time_source", "—")
+        _lanes   = _sl or result.get("active_lanes") or 1
+        _svc     = min(max(float(_esm or 3.0), 0.5), 10.0)
+        _cap     = round(_lanes * 3.0 / _svc, 2)
+
+        _cf_flag  = " 🔴 AT CAP" if _cf is not None and _cf >= 3.9 else (" ⚠️ HIGH" if _cf is not None and _cf > 1.5 else "")
+        _src_flag = " ⚠️ fallback" if _d_src == "snapshot_fallback" else " ✅"
+        _hist_cf  = result.get("historical_checkout_fraction")
+        _hist_cr  = result.get("hist_checkout_rate")
+        _cr_prof  = result.get("checkout_rate_profile", {})
+        _cf_warn  = (" ⚠️ > 1.0 — more checkouts than entrances detected (camera scale mismatch?)"
+                     if _hist_cf is not None and _hist_cf > 1.0 else "")
+
+        _sim_demand  = result.get("_demand")
+        _sim_floor   = result.get("_capacity_floor")
+        _sim_avglane = result.get("_avg_forecast_lanes")
+        diag_rows = {
+            "demand_source": f"{_d_src}{_src_flag}",
+            "► _demand (flat/bucket, drives simulation)": f"{_sim_demand:.3f}" if _sim_demand is not None else "—",
+            "► _capacity_floor (min demand)": f"{_sim_floor:.3f}" if _sim_floor is not None else "—",
+            "► avg forecast lanes (for floor)": f"{_sim_avglane:.1f}" if _sim_avglane is not None else "—",
+            "hist_checkout_rate (observed/bucket)": f"{_hist_cr:.2f}" if _hist_cr is not None else "— (no service data)",
+            "avg_prophet_yhat (entrance)": f"{_avg_yh:.2f}" if _avg_yh is not None else "—",
+            "historical_checkout_fraction": f"{_hist_cf:.3f}{_cf_warn}" if _hist_cf is not None else "— N/A",
+            "snap_lanes (formula)": str(_sl) if _sl is not None else "—",
+            "current_queue": str(_cq) if _cq is not None else "—",
+            "est_service_min": f"{_esm:.2f} min  [{_svc_src}]" if _esm is not None else "—",
+            "service_per_bucket (throughput)": f"{_cap} customers / 3 min",
+        }
+        st.table(diag_rows)
+        if _hist_cf is not None and _hist_cf > 1.0:
+            st.warning(
+                f"historical_checkout_fraction = {_hist_cf:.2f} > 1.0 — "
+                "This means the model sees more checkouts than store entrances, which is physically impossible. "
+                "Likely cause: entrance camera undercounts, or service_events records group transactions "
+                "(1 per group vs N entrances). The wait model now uses the service_events rate profile directly "
+                "to avoid inflating demand."
+            )
+
+        st.plotly_chart(
+            predict_viz.fig_queue_evolution(result),
+            use_container_width=True, key="fig_queue_evo",
+        )
+
+        st.plotly_chart(
+            predict_viz.fig_active_lanes_history(result),
+            width="stretch", key="fig_active_lanes_hist",
+        )
 
     st.subheader("Training Data")
+    st.markdown("**Historique des entrées utilisé pour entraîner le modèle — affiché par tranche de 3 minutes sur l'ensemble des jours disponibles.**")
     st.plotly_chart(predict_viz.fig_training_data(result, live_actuals),
-                    use_container_width=True, key="fig_train")
+                    width='stretch', key="fig_train")
+    st.subheader("Training-Period Wait Comparison")
+    st.markdown("**Comparaison entre l'attente réellement observée et l'attente estimée sur la période d'entraînement — permet de vérifier la précision du modèle avant de lui faire confiance.**")
+    st.plotly_chart(predict_viz.fig_training_wait_comparison(result),
+                    width='stretch', key="fig_train_wait_compare")
+    with st.expander("Training-period wait values", expanded=False):
+        wait_comp = predict_viz.training_wait_comparison_frame(result)
+        if not wait_comp.empty:
+            wait_comp = wait_comp.copy()
+            wait_comp["Time"] = pd.to_datetime(wait_comp["ds"]).dt.strftime("%Y-%m-%d %H:%M")
+            wait_comp["Observed wait (min)"] = wait_comp["observed_wait_min"].round(2)
+            wait_comp["Estimated wait (min)"] = wait_comp["estimated_wait_min"].round(2)
+            wait_comp["Factor"] = (
+                wait_comp["Estimated wait (min)"] / wait_comp["Observed wait (min)"]
+            ).where(wait_comp["Observed wait (min)"] > 0).round(2)
+            wait_comp["Queue"] = wait_comp["queue_count"].round(2)
+            wait_comp["Lanes"] = wait_comp["active_lanes"].round(2)
+            st.dataframe(
+                wait_comp[["Time", "Observed wait (min)", "Estimated wait (min)", "Factor", "Queue", "Lanes"]],
+                width='stretch',
+            )
+        else:
+            st.info("No training-period wait comparison values available.")
 
     st.subheader("Today's Forecast")
+    st.markdown("**Prévision du nombre de clients entrant dans le magasin pour aujourd'hui — modèle Prophet avec intervalle de confiance à 80 %. Les points réels de la journée sont superposés dès qu'ils sont disponibles.**")
     st.plotly_chart(predict_viz.fig_prophet_forecast(result, live_actuals),
-                    use_container_width=True, key="fig_forecast")
+                    width='stretch', key="fig_forecast")
+    with st.expander("Today's Forecast values", expanded=False):
+        fc_vals = predict_viz.forecast_display_frame(result)
+        wait_vals = predict_viz.wait_display_frame(result)
+        if not fc_vals.empty:
+            forecast_table = fc_vals.copy()
+            forecast_table["Time"] = pd.to_datetime(forecast_table["ds"]).dt.strftime("%H:%M")
+            forecast_table["Forecast"] = forecast_table["yhat"].round(2)
+            forecast_table["Min (80%CI)"] = forecast_table["yhat_lower"].round(2)
+            forecast_table["Max (80%CI)"] = forecast_table["yhat_upper"].round(2)
+            if not wait_vals.empty:
+                wait_join = wait_vals.copy().rename(columns={"wait_min": "Wait forecast (min)"})
+                forecast_table = forecast_table.merge(wait_join, on="ds", how="left")
+                forecast_table["Wait forecast (min)"] = forecast_table["Wait forecast (min)"].round(2)
+            st.dataframe(
+                forecast_table[
+                    ["Time", "Forecast", "Min (80%CI)", "Max (80%CI)", "Wait forecast (min)"]
+                    if "Wait forecast (min)" in forecast_table.columns else
+                    ["Time", "Forecast", "Min (80%CI)", "Max (80%CI)"]
+                ],
+                width='stretch',
+            )
+        else:
+            st.info("No forecast values available yet.")
 
     st.subheader("Seasonality Components")
+    st.markdown("**Décomposition du modèle de prévision : tendance hebdomadaire (jours creux vs affluents) et profil horaire type de la journée — utile pour identifier les pics de fréquentation récurrents.**")
     st.plotly_chart(predict_viz.fig_prophet_components(result),
-                    use_container_width=True, key="fig_comp")
+                    width='stretch', key="fig_comp")
 
     st.subheader("Wait Estimates")
+    st.markdown("**Estimation du temps d'attente en caisse sur la prochaine heure — calculé en simulant l'évolution de la file à partir du flux prévu, du nombre de caisses estimé et du temps de service moyen.**")
     st.plotly_chart(predict_viz.fig_wait_estimates(result),
-                    use_container_width=True, key="fig_wait")
+                    width='stretch', key="fig_wait")
 
-    st.subheader("Lane Planning — 1 to 5 Lanes")
+    st.subheader("Lane Planning — 1 to 4 Lanes")
+    st.markdown("**Simulation comparative de l'attente pour 1 à 4 caisses ouvertes — aide le responsable à décider du bon moment pour ouvrir ou fermer une caisse en fonction du flux prévu.**")
     st.plotly_chart(predict_viz.fig_lane_scenarios(result),
-                    use_container_width=True, key="fig_lanes")
+                    width='stretch', key="fig_lanes")
 
     st.subheader("Queue History")
-    st.plotly_chart(predict_viz.fig_queue_history(result),
-                    use_container_width=True, key="fig_queue")
+    st.markdown("**Historique de la file d'attente sur les dernières heures — données réelles issues des capteurs, avec le nombre de caisses ouvertes en superposition.**")
+    _qh_col1, _qh_col2 = st.columns([3, 1])
+    with _qh_col2:
+        _qh_window = st.selectbox(
+            "Time window", [4, 8, 12, 24, 48], index=3,
+            format_func=lambda h: f"Last {h} h", key="qh_window",
+        )
+    st.plotly_chart(predict_viz.fig_queue_history(result, window_hours=_qh_window),
+                    width='stretch', key="fig_queue")
 
     st.subheader("Dwell & Shop Time Analysis")
+    st.markdown("**Analyse de la durée moyenne de passage en caisse et du temps de visite en magasin — ces valeurs calibrent directement le modèle de simulation de la file d'attente.**")
     st.plotly_chart(predict_viz.fig_dwell_analysis(result),
-                    use_container_width=True, key="fig_dwell")
+                    width='stretch', key="fig_dwell")
 
     st.subheader("Demographics")
+    st.markdown("**Répartition par genre et âge des visiteurs sur la période sélectionnée — donne le profil de la clientèle et ses variations selon le moment de la journée.**")
     st.plotly_chart(predict_viz.fig_demographics(result, live_actuals),
-                    use_container_width=True, key="fig_demo")
+                    width='stretch', key="fig_demo")
 
     with st.expander("📊 Forecast table"):
         fc = result["forecast"][["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
         fc.columns = ["Time", "Predicted", "Min (80%CI)", "Max (80%CI)"]
         fc["Time"] = fc["Time"].dt.strftime("%H:%M")
-        st.dataframe(fc, use_container_width=True)
+        st.dataframe(fc, width='stretch')
+
 
 
 with tab_pred:
@@ -610,9 +815,49 @@ with tab_pred:
                 f"Latest data in DB: **{last_bucket}** (**{latest_bucket_count}** entries / 3 min). "
                 f"Click 🔄 to retrain immediately."
             )
-            _render_pred_results(result, live_actuals)
+            # ── Lane override slider ──────────────────────────────────────────
+            snapshot_lanes = int(result.get("active_lanes", 2))
+            st.markdown("---")
+            lane_col1, lane_col2 = st.columns([1, 3])
+            with lane_col1:
+                selected_lanes = st.slider(
+                    "🏪 Open checkout lanes",
+                    min_value=1,
+                    max_value=4,
+                    value=min(max(snapshot_lanes, 1), 4),
+                    key="pred_lanes",
+                    help="Planning override — changes the +15/+30 min KPI numbers and highlights the selected lane curve in the Lane Planning chart. The Wait Estimates chart always shows the dynamic schedule forecast.",
+                )
+            with lane_col2:
+                if selected_lanes != snapshot_lanes:
+                    st.info(
+                        f"Snapshot shows **{snapshot_lanes}** lane(s) active. "
+                        f"KPIs show the forecast for **{selected_lanes}** lane(s). "
+                        f"Wait chart uses the dynamic lane schedule."
+                    )
+                else:
+                    st.caption(
+                        f"Snapshot: **{snapshot_lanes}** lane(s) active. "
+                        f"Wait chart uses the dynamic per-hour lane schedule."
+                    )
+
+            view = dict(result)
+            # Preserve base pipeline wait_estimates before any slider override so the
+            # yellow dot in fig_wait_estimates always matches what was saved to history.
+            view["base_wait_estimates"] = result["wait_estimates"]
+            scenario = view.get("lane_scenarios", {}).get(selected_lanes, {})
+            if scenario:
+                view["wait_15m"]      = scenario.get("wait_15m",      view["wait_15m"])
+                view["wait_30m"]      = scenario.get("wait_30m",      view["wait_30m"])
+                view["wait_estimates"] = scenario.get("wait_estimates", view["wait_estimates"])
+            view["active_lanes"] = selected_lanes
+
+            _render_pred_results(view, live_actuals)
+
         except Exception as exc:
+            import traceback as _tb
             st.error(f"Training failed: {exc}")
+            st.code(_tb.format_exc(), language="python")
 
     # ── Camera diagnostics ────────────────────────────────────────────────────
 
@@ -672,7 +917,7 @@ with tab_pred:
                         "peak_camera_cnt": "largest single-camera count",
                         "camera_count": "cameras contributing",
                     }),
-                    use_container_width=True,
+                    width='stretch',
                 )
                 _top_cnt = int(_spikes["total_cnt"].max())
                 if _top_cnt > 100:
@@ -687,7 +932,7 @@ with tab_pred:
             else:
                 _df["is_sim"] = _df["camera_id"].str.startswith("SIM_", na=False)
                 st.dataframe(_df[["camera_id", "total_entries", "latest_entry", "is_sim"]],
-                             use_container_width=True)
+                             width='stretch')
 
                 st.markdown("**All 3-min bucket values for one camera**")
                 _camera_options = _df["camera_id"].dropna().astype(str).tolist()
@@ -723,7 +968,7 @@ with tab_pred:
                     st.dataframe(
                         _camera_buckets[["bucket_local", "cnt"]]
                         .rename(columns={"bucket_local": "bucket (local)", "cnt": "count"}),
-                        use_container_width=True,
+                        width='stretch',
                     )
                 else:
                     st.info(f"No entrance_events rows found for `{_selected_camera}`.")
@@ -822,8 +1067,8 @@ from datetime import timezone as _timezone
 
 _TRACKER_CAM   = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
 _BUCKET_MIN    = int(os.getenv("BUCKET_MINUTES", 3))
-_WAIT_BUSY     = float(os.getenv("WAIT_BUSY_MIN", 5.0))
-_WAIT_ALERT    = float(os.getenv("WAIT_ALERT_MIN", 10.0))
+_WAIT_BUSY     = float(os.getenv("WAIT_BUSY_MIN", 2.0))
+_WAIT_ALERT    = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 _DB_CFG        = pred_pipeline.DB_CONFIG
 
 @st.cache_data(ttl=30)
@@ -912,7 +1157,7 @@ with tab_tracker:
         fig_fd.update_layout(height=220, margin=dict(l=0,r=20,t=10,b=0),
             plot_bgcolor="white", paper_bgcolor="white",
             xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6"), showlegend=False)
-        st.plotly_chart(fig_fd, use_container_width=True)
+        st.plotly_chart(fig_fd, width='stretch')
     else:
         st.info("No queue data recorded today yet.")
 
@@ -932,7 +1177,7 @@ with tab_tracker:
             fig_bar.update_layout(height=260, margin=dict(l=0,r=20,t=20,b=0),
                 plot_bgcolor="white", paper_bgcolor="white",
                 xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6"), showlegend=False)
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar, width='stretch')
         else:
             st.info("No entry data for today yet.")
 
@@ -951,7 +1196,7 @@ with tab_tracker:
                 showlegend=False, paper_bgcolor="white",
                 annotations=[dict(text=f"<b>{sum(minutes)}<br>min</b>",
                     x=0.5, y=0.5, showarrow=False, font=dict(size=16, color="#2c3e50"))])
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width='stretch')
         else:
             st.info("No prediction history for today yet.")
 
@@ -1068,7 +1313,7 @@ with tab_live:
             plot_bgcolor="white", paper_bgcolor="white",
             xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6", ticksuffix=" min"),
             showlegend=False, hovermode="x unified")
-        st.plotly_chart(fig_w, use_container_width=True)
+        st.plotly_chart(fig_w, width='stretch')
 
         with st.expander("Forecast detail table"):
             rows = []
@@ -1077,7 +1322,7 @@ with tab_live:
                 badge = "🔴 ALERT" if w >= _WAIT_ALERT else "🟡 BUSY" if w >= _WAIT_BUSY else "🟢 OK"
                 rows.append({"Time": row["time_str"], "Arrivals": f"{float(row['arrivals']):.1f}",
                              "Est. Wait": f"{w:.1f} min", "Status": badge})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
     else:
         st.info("No predictions found. Run ensemble_predict.py to generate a forecast.")
 
@@ -1097,6 +1342,6 @@ with tab_live:
             plot_bgcolor="white", paper_bgcolor="white",
             xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#f0f2f6"),
             showlegend=False, hovermode="x unified")
-        st.plotly_chart(fig_q, use_container_width=True)
+        st.plotly_chart(fig_q, width='stretch')
     else:
         st.info("No queue history available.")

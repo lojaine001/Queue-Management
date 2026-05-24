@@ -27,10 +27,14 @@ Environment variables (DB connection)
 from __future__ import annotations
 
 import os
+import warnings
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 import psycopg2
+
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable")
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
@@ -38,14 +42,24 @@ load_dotenv(find_dotenv(usecwd=True))
 from .core import (
     BUCKET_MINUTES,
     DEFAULT_DWELL_MIN,
+    FORECAST_HORIZON_MINUTES,
     DEFAULT_LANES,
     DWELL_MIN_FLOOR,
     DWELL_MAX_CAP,
+    ENTRANCE_CAMERA_ID,
+    EXIT_CAMERA_ID,
     MAX_QUEUE_PER_LANE,
     MAX_WAIT_MIN,
+    MIN_DEMAND_BUCKETS,
     MIN_REAL_DAYS_FOR_SIM,
+    SERVICE_MIN_DWELL_SEC,
     SHOP_CLOSE,
+    SHOP_CLOSE_HOUR,
+    SHOP_CLOSE_MINUTE,
+    SHOP_CLOSE_TOT,
     SHOP_OPEN,
+    SHOP_OPEN_MINUTE,
+    SHOP_OPEN_TOT,
     SHOP_TIME_MAX_LAG_MIN,
     SNAPSHOT_MAX_AGE_MIN,
     add_closed_zeros,
@@ -111,11 +125,23 @@ def load_arrivals(
     since = data_since.astimezone(timezone.utc) if data_since else (
         datetime.now(timezone.utc) - timedelta(days=days)
     )
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+
     where_clause = get_where_clause(source)
     if where_clause:
         where_clause += f" AND timestamp >= '{since.isoformat()}'"
     else:
         where_clause = f"WHERE timestamp >= '{since.isoformat()}'"
+
+    # Restrict REAL data to the entrance camera only — the exit camera also writes
+    # to entrance_events (head counter) and would double-count arrivals.
+    where_clause += f" AND (camera_id LIKE 'SIM_%%' OR camera_id = '{ENTRANCE_CAMERA_ID}')"
+    # Strict shop-hours filter in local time so out-of-hours rows never reach Prophet.
+    where_clause += (
+        f" AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) >= {SHOP_OPEN_TOT}"
+        f" AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) < {SHOP_CLOSE_TOT}"
+    )
 
     query = f"""
         SELECT
@@ -157,7 +183,13 @@ def load_today_actuals(source: str) -> pd.DataFrame:
         Columns: bucket, entry_count, male_count, female_count, avg_age,
                  avg_dwell_sec, max_lane_depth, avg_lane_depth, camera_id, source.
     """
-    today_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    local_midnight = datetime.now().astimezone().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    today_utc = local_midnight.astimezone(timezone.utc)
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+
     where_clause = get_where_clause(source)
     if where_clause:
         where_clause += f" AND timestamp >= '{today_utc.isoformat()}'"
@@ -177,6 +209,9 @@ def load_today_actuals(source: str) -> pd.DataFrame:
             camera_id
         FROM entrance_events
         {where_clause}
+          AND (camera_id LIKE 'SIM_%%' OR camera_id = '{ENTRANCE_CAMERA_ID}')
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) < {SHOP_CLOSE_TOT}
         GROUP BY bucket, camera_id
         ORDER BY bucket
     """
@@ -222,6 +257,9 @@ def load_snapshots(
     since = data_since.astimezone(timezone.utc) if data_since else (
         datetime.now(timezone.utc) - timedelta(days=days)
     )
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+
     where_clause = get_where_clause(source)
     if where_clause:
         where_clause += f" AND timestamp >= '{since.isoformat()}'"
@@ -232,6 +270,8 @@ def load_snapshots(
         SELECT timestamp, queue_count, avg_dwell_sec, active_lanes, camera_id
         FROM queue_state_snapshots
         {where_clause}
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) < {SHOP_CLOSE_TOT}
         ORDER BY timestamp
     """
     df = pd.read_sql(query, conn)
@@ -260,18 +300,100 @@ def load_dwell_events(conn, days: int = 1) -> pd.DataFrame:
         Empty DataFrame if no rows match.
     """
     since = datetime.now(timezone.utc) - timedelta(days=days)
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
     query = f"""
         SELECT timestamp, dwell_seconds / 60.0 AS dwell_min
         FROM entrance_events
-        WHERE camera_id NOT LIKE 'SIM_%%'
+        WHERE camera_id = '{ENTRANCE_CAMERA_ID}'
           AND dwell_seconds > 0
           AND timestamp >= '{since.isoformat()}'
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) < {SHOP_CLOSE_TOT}
         ORDER BY timestamp
     """
     df = pd.read_sql(query, conn)
     if df.empty:
         return df
     df["timestamp"] = to_local(df["timestamp"])
+    return df
+
+
+def save_prediction(wait_15m: float, wait_30m: float, prophet_yhat: float) -> None:
+    """Persist the current wait prediction to queue_predictions for history tracking."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur  = conn.cursor()
+        now_utc = datetime.now(timezone.utc)
+        pred_for = now_utc + timedelta(minutes=15)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS queue_predictions (
+                id               BIGSERIAL,
+                predicted_at     TIMESTAMPTZ NOT NULL,
+                prediction_for   TIMESTAMPTZ NOT NULL,
+                prophet_yhat     NUMERIC(8,2),
+                est_wait_minutes NUMERIC(8,2),
+                wait_15m         NUMERIC(8,2),
+                wait_30m         NUMERIC(8,2),
+                status           VARCHAR(10)
+            )
+        """)
+        cur.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'queue_predictions' AND column_name = 'pipeline_source'
+                ) THEN
+                    ALTER TABLE queue_predictions ADD COLUMN pipeline_source VARCHAR(20);
+                END IF;
+            END $$;
+        """)
+        cur.execute("""
+            INSERT INTO queue_predictions
+                (predicted_at, prediction_for, prophet_yhat, est_wait_minutes, wait_15m, wait_30m, status, pipeline_source)
+            VALUES (%s, %s, %s, %s, %s, %s, 'OK', 'pipeline_v2')
+            ON CONFLICT (prediction_for) DO UPDATE SET
+                predicted_at     = EXCLUDED.predicted_at,
+                prophet_yhat     = EXCLUDED.prophet_yhat,
+                est_wait_minutes = EXCLUDED.est_wait_minutes,
+                wait_15m         = EXCLUDED.wait_15m,
+                wait_30m         = EXCLUDED.wait_30m,
+                status           = 'OK',
+                pipeline_source  = 'pipeline_v2'
+        """, (now_utc, pred_for, round(prophet_yhat, 2),
+              round(wait_15m, 2), round(wait_15m, 2), round(wait_30m, 2)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass  # never crash the pipeline because of a save failure
+
+
+def load_prediction_history(conn, days: int = 1) -> pd.DataFrame:
+    """Load today's wait_15m predictions from queue_predictions.
+
+    Returns columns: prediction_for (local) — the time being predicted,
+    and wait_15m. Plotted at prediction_for so the curve aligns with the
+    observed wait at the same timestamp on the chart.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    query = f"""
+        SELECT predicted_at, prediction_for, wait_15m
+        FROM queue_predictions
+        WHERE predicted_at >= '{since.isoformat()}'
+          AND wait_15m IS NOT NULL
+          AND pipeline_source = 'pipeline_v2'
+        ORDER BY prediction_for
+    """
+    try:
+        df = pd.read_sql(query, conn)
+    except Exception:
+        return pd.DataFrame(columns=["predicted_at", "prediction_for", "wait_15m"])
+    if df.empty:
+        return df
+    df["predicted_at"]   = to_local(df["predicted_at"])
+    df["prediction_for"] = to_local(df["prediction_for"])
+    df["wait_15m"] = pd.to_numeric(df["wait_15m"], errors="coerce")
     return df
 
 
@@ -294,23 +416,189 @@ def load_service_events(conn, days: int = 30) -> pd.DataFrame:
         Returns an empty DataFrame with correct columns on any DB error.
     """
     since = datetime.now(timezone.utc) - timedelta(days=days)
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
     query = f"""
         SELECT timestamp, total_dwell_sec / 60.0 AS service_min,
-               camera_id
+               total_dwell_sec, lane_id, camera_id
         FROM service_events
         WHERE camera_id NOT LIKE 'SIM_%%'
           AND total_dwell_sec > 0
           AND timestamp >= '{since.isoformat()}'
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) < {SHOP_CLOSE_TOT}
         ORDER BY timestamp
     """
     try:
         df = pd.read_sql(query, conn)
     except Exception:
-        return pd.DataFrame(columns=["timestamp", "service_min", "camera_id"])
+        return pd.DataFrame(columns=["timestamp", "service_min", "total_dwell_sec", "lane_id", "camera_id"])
     if df.empty:
         return df
     df["timestamp"] = to_local(df["timestamp"])
     return df
+
+
+def load_lane_history_agg(
+    conn,
+    days: int,
+    shop_open: int,
+    shop_close: int,
+    checkout_service_min: float,
+    service_min_dwell_sec: int,
+    slot_minutes: int = 15,
+) -> pd.DataFrame:
+    """Three-source merge for median active lanes per slot_minutes time-of-day slot.
+
+    Phase 1 — service_events with lane_id (best): COUNT(DISTINCT lane_id) per (day, slot).
+    Phase 2 — queue_state_snapshots.active_lanes: median per slot across all days.
+    Phase 3 — entrance_events arrival rate: median count per slot, returned raw so
+               the chart can scale it to demand-implied lanes using checkout_fraction.
+
+    Returns one row per slot (all open hours) with columns:
+      slot_label, median_lanes, lanes_source, n_days_observed,
+      snapshot_lanes, n_days_snapshot,
+      median_entrance_per_30min, n_days_entrance
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since_str = since.isoformat()
+    # Convert UTC timestamps to local time in SQL so slot labels match the local-time
+    # slot labels produced by _forecast_lanes_vector (which uses local pd.Timestamps).
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    slot_expr = (
+        f"LPAD(EXTRACT(HOUR FROM {_local_ts})::int::text, 2, '0') || ':' || "
+        f"LPAD((FLOOR(EXTRACT(MINUTE FROM {_local_ts}) / {slot_minutes}) * {slot_minutes})::int::text, 2, '0')"
+    )
+    hour_filter = (
+        f"(EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) >= {SHOP_OPEN_TOT} "
+        f"AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) < {SHOP_CLOSE_TOT}"
+    )
+    capacity_per_slot = float(slot_minutes) / max(checkout_service_min, 0.5)
+
+    empty = pd.DataFrame(columns=[
+        "slot_label", "median_lanes", "lanes_source", "n_days_observed",
+        "snapshot_lanes", "n_days_snapshot",
+        "median_entrance_per_slot", "n_days_entrance",
+    ])
+
+    # ── Phase 1: service_events ───────────────────────────────────────────────
+    q1 = f"""
+        SELECT {slot_expr} AS slot_label,
+               DATE(timestamp) AS day,
+               COUNT(DISTINCT lane_id) FILTER (WHERE lane_id IS NOT NULL) AS distinct_lanes,
+               COUNT(*) FILTER (WHERE total_dwell_sec > {service_min_dwell_sec}) AS qualifying
+        FROM service_events
+        WHERE camera_id NOT LIKE 'SIM_%%'
+          AND {hour_filter}
+          AND timestamp >= '{since_str}'
+        GROUP BY 1, 2
+    """
+    try:
+        df1 = pd.read_sql(q1, conn)
+    except Exception:
+        df1 = pd.DataFrame()
+
+    if not df1.empty:
+        def _lane_est(row):
+            if row["distinct_lanes"] > 0:
+                return int(row["distinct_lanes"]), "lane_id"
+            if row["qualifying"] > 0:
+                return max(1, round(row["qualifying"] / capacity_per_slot)), "throughput"
+            return 0, "none"
+        df1[["lane_est", "source"]] = pd.DataFrame(
+            df1.apply(_lane_est, axis=1).tolist(), index=df1.index
+        )
+        df1 = df1[df1["lane_est"] > 0]
+        # Dominant source per slot
+        src_per_slot = (
+            df1.groupby("slot_label")["source"]
+            .agg(lambda s: s.value_counts().idxmax())
+            .reset_index()
+            .rename(columns={"source": "lanes_source"})
+        )
+        agg1 = (
+            df1.groupby("slot_label")["lane_est"]
+            .agg(median_lanes="median", n_days_observed="count")
+            .reset_index()
+            .merge(src_per_slot, on="slot_label")
+        )
+    else:
+        agg1 = pd.DataFrame(columns=["slot_label", "median_lanes", "n_days_observed", "lanes_source"])
+
+    # ── Phase 2: queue_state_snapshots ────────────────────────────────────────
+    q2 = f"""
+        SELECT {slot_expr.replace('timestamp', 'timestamp')} AS slot_label,
+               DATE(timestamp) AS day,
+               AVG(active_lanes) AS avg_lanes
+        FROM queue_state_snapshots
+        WHERE camera_id NOT LIKE 'SIM_%%'
+          AND {hour_filter}
+          AND timestamp >= '{since_str}'
+        GROUP BY 1, 2
+    """
+    try:
+        df2 = pd.read_sql(q2, conn)
+    except Exception:
+        df2 = pd.DataFrame()
+
+    if not df2.empty:
+        agg2 = (
+            df2.groupby("slot_label")["avg_lanes"]
+            .agg(snapshot_lanes="median", n_days_snapshot="count")
+            .reset_index()
+        )
+    else:
+        agg2 = pd.DataFrame(columns=["slot_label", "snapshot_lanes", "n_days_snapshot"])
+
+    # ── Phase 3: entrance_events arrival count ────────────────────────────────
+    q3 = f"""
+        SELECT {slot_expr} AS slot_label,
+               DATE(timestamp) AS day,
+               COUNT(*) AS arrivals
+        FROM entrance_events
+        WHERE camera_id = '{ENTRANCE_CAMERA_ID}'
+          AND {hour_filter}
+          AND timestamp >= '{since_str}'
+        GROUP BY 1, 2
+    """
+    try:
+        df3 = pd.read_sql(q3, conn)
+    except Exception:
+        df3 = pd.DataFrame()
+
+    if not df3.empty:
+        agg3 = (
+            df3.groupby("slot_label")["arrivals"]
+            .agg(median_entrance_per_slot="median", n_days_entrance="count")
+            .reset_index()
+        )
+    else:
+        agg3 = pd.DataFrame(columns=["slot_label", "median_entrance_per_slot", "n_days_entrance"])
+
+    # ── Build full slot index and merge all three phases ──────────────────────
+    all_slots = []
+    h = SHOP_OPEN
+    while h < SHOP_CLOSE:
+        for m in range(0, 60, slot_minutes):
+            if SHOP_OPEN_TOT <= h * 60 + m < SHOP_CLOSE_TOT:
+                all_slots.append(f"{h:02d}:{m:02d}")
+        h += 1
+    result = pd.DataFrame({"slot_label": all_slots})
+
+    for agg, defaults in [
+        (agg1, {"median_lanes": 0.0, "n_days_observed": 0, "lanes_source": "none"}),
+        (agg2, {"snapshot_lanes": 0.0, "n_days_snapshot": 0}),
+        (agg3, {"median_entrance_per_slot": 0.0, "n_days_entrance": 0}),
+    ]:
+        if not agg.empty:
+            result = result.merge(agg, on="slot_label", how="left")
+        else:
+            for col, val in defaults.items():
+                result[col] = val
+        result = result.fillna(defaults)
+
+    return result
 
 
 def bucketed_counts(df: pd.DataFrame,
@@ -378,8 +666,6 @@ def estimate_browsing_gap(
         avg_service_min  — mean service-counter dwell across loaded events
         est_total_min    — peak_lag + avg_entrance + avg_service (None if no signal)
     """
-    import numpy as np
-
     avg_entrance = float(df_dwell["dwell_min"].mean()) if not df_dwell.empty else 0.0
     avg_service  = float(df_service["service_min"].mean()) if not df_service.empty else 0.0
 
@@ -473,6 +759,362 @@ def latest_snapshot_for_wait(df_snapshots: pd.DataFrame, source: str):
     return df_snapshots.iloc[-1]
 
 
+def build_service_time_profile(df_service: pd.DataFrame) -> dict:
+    """Build a (day_of_week, hour) → median service_min lookup from service_events."""
+    if df_service.empty or "service_min" not in df_service.columns:
+        return {}
+    df = df_service.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["service_min"] = pd.to_numeric(df["service_min"], errors="coerce")
+    df = df.dropna(subset=["timestamp", "service_min"])
+    df = df[df["service_min"] >= DWELL_MIN_FLOOR]
+    if df.empty:
+        return {}
+    df["dow"]  = df["timestamp"].dt.dayofweek
+    df["hour"] = df["timestamp"].dt.hour
+    return (
+        df.groupby(["dow", "hour"])["service_min"]
+        .median()
+        .to_dict()
+    )
+
+
+def service_time_for_timestamp(
+    profile: dict,
+    ts: pd.Timestamp,
+    fallback: float,
+) -> float:
+    """Look up predicted service time for a timestamp; fall back gracefully."""
+    val = profile.get((ts.dayofweek, ts.hour))
+    if val is None:
+        same_hour = [v for (d, h), v in profile.items() if h == ts.hour]
+        val = float(np.median(same_hour)) if same_hour else fallback
+    return float(min(max(val, DWELL_MIN_FLOOR), DWELL_MAX_CAP))
+
+
+def _preferred_service_minutes(
+    df_service: pd.DataFrame,
+    snapshot_dwell_min: float | None,
+) -> tuple[float, str, float | None, float | None]:
+    """Choose the best per-customer service estimate for the wait model."""
+    service_mean_min = None
+    service_median_min = None
+
+    if not df_service.empty and "service_min" in df_service.columns:
+        service_vals = pd.to_numeric(df_service["service_min"], errors="coerce")
+        service_vals = service_vals[(service_vals >= DWELL_MIN_FLOOR) & service_vals.notna()]
+        if not service_vals.empty:
+            service_mean_min = float(service_vals.mean())
+            service_median_min = float(service_vals.median())
+
+    if service_median_min is not None:
+        return service_median_min, "service_events_median", service_median_min, service_mean_min
+    checkout_service = float(os.getenv("CHECKOUT_SERVICE_MIN", DEFAULT_DWELL_MIN))
+    return checkout_service, "config_default", service_median_min, service_mean_min
+
+
+def evaluate_service_correction_factor(
+    source: str = "REAL",
+    days: int = 20,
+) -> dict:
+    """Evaluate a historical correction factor for service time and queue wait.
+
+    Uses the last `days` of service_events and queue_state_snapshots to
+    compare observed checkout throughput against the current wait model
+    service-time assumption.
+    """
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        df_service = load_service_events(conn, days=days)
+        df_snapshots = load_snapshots(conn, source, days=days)
+    finally:
+        conn.close()
+
+    if df_service.empty:
+        return {
+            "source": source,
+            "days": days,
+            "service_time_factor_median": None,
+            "service_time_factor_mean": None,
+            "throughput_factor_median": None,
+            "throughput_factor_mean": None,
+            "throughput_factor_total": None,
+            "service_time_factor_total": None,
+            "model_service_min": None,
+            "observed_service_mean": None,
+            "observed_service_median": None,
+            "throughput_summary": pd.DataFrame(),
+        }
+
+    service_vals = pd.to_numeric(df_service["service_min"], errors="coerce")
+    service_vals = service_vals[(service_vals >= DWELL_MIN_FLOOR) & service_vals.notna()]
+    if service_vals.empty:
+        return {
+            "source": source,
+            "days": days,
+            "service_time_factor_median": None,
+            "service_time_factor_mean": None,
+            "throughput_factor_median": None,
+            "throughput_factor_mean": None,
+            "throughput_factor_total": None,
+            "service_time_factor_total": None,
+            "model_service_min": None,
+            "observed_service_mean": None,
+            "observed_service_median": None,
+            "throughput_summary": pd.DataFrame(),
+        }
+
+    observed_service_median = float(service_vals.median())
+    observed_service_mean = float(service_vals.mean())
+    preferred_min, _, _, _ = _preferred_service_minutes(df_service, None)
+    model_service_min = float(min(max(preferred_min, DWELL_MIN_FLOOR), DWELL_MAX_CAP))
+
+    service_time_factor_median = (
+        observed_service_median / model_service_min
+        if model_service_min and model_service_min > 0 else None
+    )
+    service_time_factor_mean = (
+        observed_service_mean / model_service_min
+        if model_service_min and model_service_min > 0 else None
+    )
+
+    throughput_df = pd.DataFrame()
+    throughput_factor_median = None
+    throughput_factor_mean = None
+    throughput_factor_total = None
+    service_time_factor_total = None
+
+    if not df_snapshots.empty:
+        snaps = df_snapshots.copy()
+        snaps["timestamp"] = pd.to_datetime(snaps["timestamp"], errors="coerce")
+        snaps["active_lanes"] = pd.to_numeric(snaps["active_lanes"], errors="coerce")
+        snaps = snaps.dropna(subset=["timestamp", "active_lanes"])
+        snaps = snaps[snaps["active_lanes"] > 0].copy()
+        if not snaps.empty:
+            snaps["bucket"] = snaps["timestamp"].dt.floor(f"{BUCKET_MINUTES}min")
+            lanes = snaps.groupby("bucket")["active_lanes"].mean().reset_index()
+            service_buckets = df_service.copy()
+            service_buckets["timestamp"] = pd.to_datetime(service_buckets["timestamp"], errors="coerce")
+            service_buckets = service_buckets.dropna(subset=["timestamp"])
+            if not service_buckets.empty:
+                service_buckets["bucket"] = service_buckets["timestamp"].dt.floor(f"{BUCKET_MINUTES}min")
+                served = (
+                    service_buckets.groupby("bucket")
+                    .size()
+                    .rename("served")
+                    .reset_index()
+                )
+                merged = pd.merge(lanes, served, on="bucket", how="inner")
+                merged["pred_capacity"] = (
+                    merged["active_lanes"] * BUCKET_MINUTES / model_service_min
+                )
+                merged["throughput_factor"] = np.where(
+                    merged["pred_capacity"] > 0,
+                    merged["served"] / merged["pred_capacity"],
+                    np.nan,
+                )
+                merged["service_time_factor"] = np.where(
+                    merged["throughput_factor"] > 0,
+                    1.0 / merged["throughput_factor"],
+                    np.nan,
+                )
+                throughput_df = merged
+                throughput_factor_median = float(throughput_df["throughput_factor"].median(skipna=True))
+                throughput_factor_mean = float(throughput_df["throughput_factor"].mean(skipna=True))
+                total_capacity = float(throughput_df["pred_capacity"].sum())
+                total_served = float(throughput_df["served"].sum())
+                throughput_factor_total = (
+                    total_served / total_capacity if total_capacity > 0 else None
+                )
+                service_time_factor_total = (
+                    1.0 / throughput_factor_total if throughput_factor_total and throughput_factor_total > 0 else None
+                )
+
+    return {
+        "source": source,
+        "days": days,
+        "model_service_min": model_service_min,
+        "observed_service_median": observed_service_median,
+        "observed_service_mean": observed_service_mean,
+        "service_time_factor_median": service_time_factor_median,
+        "service_time_factor_mean": service_time_factor_mean,
+        "throughput_factor_median": throughput_factor_median,
+        "throughput_factor_mean": throughput_factor_mean,
+        "throughput_factor_total": throughput_factor_total,
+        "service_time_factor_total": service_time_factor_total,
+        "throughput_summary": throughput_df,
+    }
+
+
+def _build_lane_schedule(
+    df_lane_history: pd.DataFrame,
+    fallback_lanes: int,
+    max_lanes: int = 4,
+    historical_checkout_fraction: "float | None" = None,
+    checkout_fraction: "float | None" = None,
+    checkout_service_min: float = 3.0,
+) -> dict:
+    """slot_label → integer lanes from historical observations.
+
+    Priority (most → least reliable):
+    Phase 1 — service_events WITH distinct lane_id (directly observed, most reliable).
+    Phase 2 — queue_state_snapshots active_lanes (directly observed ground truth,
+               time-of-day aware — same data Training-Period Wait Comparison uses).
+    Phase 3 — demand-implied from entrance arrivals × checkout fraction
+               (time-of-day aware but depends on checkout_fraction accuracy).
+    Phase 4 — service_events throughput inference (noisy: sensitive to service_min).
+    """
+    if df_lane_history.empty:
+        return {}
+    effective_cf = historical_checkout_fraction if historical_checkout_fraction is not None else checkout_fraction
+    capacity_per_30 = 30.0 / max(checkout_service_min, 0.5)
+    schedule = {}
+    for _, row in df_lane_history.iterrows():
+        slot = row["slot_label"]
+        observed = float(row.get("median_lanes", 0) or 0)
+        lanes_source = str(row.get("lanes_source", "none"))
+
+        # Phase 1 — distinct lane_id from service_events (directly observed)
+        if observed > 0 and lanes_source == "lane_id":
+            schedule[slot] = max(1, min(max_lanes, int(round(observed))))
+            continue
+
+        # Phase 2 — snapshot active_lanes (directly observed, time-of-day aware)
+        snap = float(row.get("snapshot_lanes", 0) or 0)
+        if snap > 0:
+            schedule[slot] = max(1, min(max_lanes, int(round(snap))))
+            continue
+
+        # Phase 3 — demand-implied from entrance arrivals × checkout fraction
+        if effective_cf is not None:
+            entrance_per_30 = float(row.get("median_entrance_per_30min", 0) or 0)
+            if entrance_per_30 > 0:
+                checkout_per_30 = entrance_per_30 * effective_cf
+                implied = checkout_per_30 / capacity_per_30
+                schedule[slot] = max(1, min(max_lanes, int(np.ceil(implied))))
+                continue
+
+        # Phase 4 — throughput inference from service_events (last resort)
+        if observed > 0:
+            schedule[slot] = max(1, min(max_lanes, int(round(observed))))
+    return schedule
+
+
+def _forecast_lanes_vector(
+    forecast_df: pd.DataFrame,
+    lane_schedule: dict,
+    fallback_lanes: int,
+) -> list:
+    """Map each forecast bucket timestamp to its lane count from the schedule."""
+    result = []
+    for ts in pd.to_datetime(forecast_df["ds"]):
+        minute_slot = (ts.minute // 30) * 30
+        slot_label = f"{ts.hour:02d}:{minute_slot:02d}"
+        result.append(lane_schedule.get(slot_label, fallback_lanes))
+    return result
+
+
+def _observed_checkout_rate(df_service: pd.DataFrame, bucket_minutes: int) -> "float | None":
+    """Compute median completed-checkout events per bucket from service_events.
+
+    Filters to rows with total_dwell_sec > SERVICE_MIN_DWELL_SEC to exclude
+    brief head-detector noise, then groups by bucket and returns the median
+    count.
+
+    Returns None when:
+    - fewer than MIN_DEMAND_BUCKETS non-empty buckets exist (sparse data), or
+    - qualifying events are < 20% of total events (dwell filter not meaningful
+      for this dataset — e.g. camera records brief pass-by detections only).
+    """
+    if df_service.empty or "total_dwell_sec" not in df_service.columns:
+        return None
+    if "timestamp" not in df_service.columns and "ds" not in df_service.columns:
+        return None
+
+    ts_col = "timestamp" if "timestamp" in df_service.columns else "ds"
+    dwell = pd.to_numeric(df_service["total_dwell_sec"], errors="coerce").fillna(0)
+    qualifying_mask = dwell > SERVICE_MIN_DWELL_SEC
+
+    # Quality gate: qualifying events must represent ≥ 20% of total data.
+    # When < 20% pass the filter the dwell distribution doesn't separate real
+    # checkouts from noise (e.g. camera records brief exit detections only).
+    if qualifying_mask.sum() < len(df_service) * 0.20:
+        return None
+
+    svc = df_service.loc[qualifying_mask].copy()
+    svc[ts_col] = pd.to_datetime(svc[ts_col])
+    svc["_bucket"] = svc[ts_col].dt.floor(f"{bucket_minutes}min")
+    counts = svc.groupby("_bucket").size()
+    non_empty = counts[counts > 0]
+    if len(non_empty) < MIN_DEMAND_BUCKETS:
+        return None
+    return float(non_empty.median())
+
+
+def _build_checkout_rate_profile(df_service: pd.DataFrame, bucket_minutes: int) -> dict:
+    """Return {(dayofweek, hour): median_checkouts_per_bucket} from service_events.
+
+    Uses service_events timestamps (= checkout time, not entrance time), so the
+    shopping lag is already embedded — no correction needed. Grouping by dow+hour
+    captures time-of-day demand patterns directly from real checkout activity.
+
+    Applies the same SERVICE_MIN_DWELL_SEC filter as _observed_checkout_rate to
+    exclude brief pass-by detections that would inflate the per-bucket rate.
+    """
+    if df_service.empty or "timestamp" not in df_service.columns:
+        return {}
+    svc = df_service.copy()
+    svc["timestamp"] = pd.to_datetime(svc["timestamp"], errors="coerce")
+    svc = svc.dropna(subset=["timestamp"])
+    svc["bucket"] = svc["timestamp"].dt.floor(f"{bucket_minutes}min")
+    svc["dow"]    = svc["bucket"].dt.dayofweek
+    svc["hour"]   = svc["bucket"].dt.hour
+    counts = svc.groupby(["dow", "hour", "bucket"]).size().reset_index(name="n")
+    return counts.groupby(["dow", "hour"])["n"].median().to_dict()
+
+
+def _lookup_checkout_rate(profile: dict, ts: "pd.Timestamp", fallback: float) -> float:
+    """Look up expected checkouts/bucket for a given timestamp from the profile."""
+    key = (ts.dayofweek, ts.hour)
+    if key in profile:
+        return float(profile[key])
+    # Hour-only fallback (any weekday)
+    hour_vals = [v for (d, h), v in profile.items() if h == ts.hour]
+    if hour_vals:
+        return float(np.median(hour_vals))
+    return fallback
+
+
+def _infer_active_lanes(
+    df_service_recent: pd.DataFrame,
+    est_service_min: float,
+    window_min: int,
+    max_lanes: int = 4,
+) -> "int | None":
+    """Infer currently active lane count from recent service_events.
+
+    If lane_id is populated, counts distinct lanes with qualifying events.
+    Otherwise estimates from throughput rate: events / (window_min / service_min).
+    Returns None when no qualifying events exist in the window.
+    """
+    if df_service_recent.empty:
+        return None
+    svc = df_service_recent.copy()
+    svc = svc[pd.to_numeric(svc.get("total_dwell_sec", pd.Series(dtype=float)), errors="coerce").fillna(0) > SERVICE_MIN_DWELL_SEC]
+    if svc.empty:
+        return None
+
+    if "lane_id" in svc.columns:
+        valid_lanes = svc["lane_id"].dropna()
+        if not valid_lanes.empty:
+            return int(min(valid_lanes.nunique(), max_lanes))
+
+    # Fall back to count-based inference
+    capacity_per_window = window_min / max(est_service_min, 0.5)
+    inferred = round(len(svc) / max(capacity_per_window, 1))
+    return int(min(max(inferred, 1), max_lanes))
+
+
 def run_prediction_pipeline(
     source: str = "REAL",
     days: int = 30,
@@ -529,11 +1171,36 @@ def run_prediction_pipeline(
     from prophet import Prophet  # noqa: PLC0415
 
     conn = psycopg2.connect(**DB_CONFIG)
-    df_arrivals  = load_arrivals(conn, source, days, data_since)
-    df_snapshots = load_snapshots(conn, source, days, data_since)
-    df_dwell     = load_dwell_events(conn, days=max(days, 7))
-    df_service   = load_service_events(conn, days=max(days, 7))
+    df_arrivals         = load_arrivals(conn, source, days, data_since)
+    df_snapshots        = load_snapshots(conn, source, days, data_since)
+    df_dwell            = load_dwell_events(conn, days=days)
+    df_service          = load_service_events(conn, days=days)
+    df_pred_history     = load_prediction_history(conn, days=1)
+    _checkout_svc_min = float(os.getenv("CHECKOUT_SERVICE_MIN", DEFAULT_DWELL_MIN))
+    _MAX_LANES = 4
+
+    # Use actual measured service time for capacity_per_30 in lane throughput inference.
+    # The env-var default (3.0 min) is often wrong — measured time drives a 2-3× different
+    # capacity_per_30, which directly multiplies into the inferred lane count.
+    _svc_for_lanes, _, _, _ = _preferred_service_minutes(df_service, None)
+    _svc_for_lanes = min(max(_svc_for_lanes, DWELL_MIN_FLOOR), DWELL_MAX_CAP)
+
+    df_lane_history = load_lane_history_agg(
+        conn, days=days,
+        shop_open=SHOP_OPEN, shop_close=SHOP_CLOSE,  # integer bounds for slot iteration
+        checkout_service_min=_svc_for_lanes,
+        service_min_dwell_sec=SERVICE_MIN_DWELL_SEC,
+    )
     conn.close()
+
+    # Cap lane columns at the hard maximum so both the chart and _build_lane_schedule
+    # see consistent values — throughput inference can exceed 4 before clamping.
+    if not df_lane_history.empty:
+        for _col in ("median_lanes", "snapshot_lanes"):
+            if _col in df_lane_history.columns:
+                df_lane_history[_col] = pd.to_numeric(
+                    df_lane_history[_col], errors="coerce"
+                ).clip(upper=_MAX_LANES).fillna(0.0)
 
     df_real_agg = (
         df_arrivals.groupby("bucket")["entry_count"].sum()
@@ -584,16 +1251,25 @@ def run_prediction_pipeline(
     model.fit(df_combined)
 
     now_floor = pd.Timestamp.now().floor(f"{BUCKET_MINUTES}min")
-    today_open = now_floor.replace(hour=SHOP_OPEN, minute=0, second=0, microsecond=0)
-    today_ts = pd.date_range(start=today_open, end=now_floor, freq=f"{BUCKET_MINUTES}min")
+    today_open = now_floor.replace(hour=SHOP_OPEN, minute=SHOP_OPEN_MINUTE, second=0, microsecond=0)
+    # When the current time is before shop open, clamp end to today_open so we
+    # always have at least one row for Prophet (empty DataFrames raise ValueError).
+    insample_end = max(now_floor, today_open)
+    today_ts = pd.date_range(start=today_open, end=insample_end, freq=f"{BUCKET_MINUTES}min")
     df_insample = model.predict(pd.DataFrame({"ds": today_ts}))
 
     future_ts = future_open_timestamps(interval_min=BUCKET_MINUTES)
     future_df = pd.DataFrame({"ds": future_ts})
-    forecast = model.predict(future_df)
-    forecast["yhat"] = forecast["yhat"].clip(lower=0).round(1)
-    forecast["yhat_lower"] = forecast["yhat_lower"].clip(lower=0).round(1)
-    forecast["yhat_upper"] = forecast["yhat_upper"].clip(lower=0).round(1)
+    if future_df.empty:
+        forecast = pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
+        forecast_wait = pd.DataFrame(columns=["ds", "yhat"])
+    else:
+        forecast = model.predict(future_df)
+        forecast_wait = forecast[["ds", "yhat"]].copy()
+        forecast_wait["yhat"] = forecast_wait["yhat"].clip(lower=0)
+        forecast["yhat"] = forecast["yhat"].clip(lower=0).round(1)
+        forecast["yhat_lower"] = forecast["yhat_lower"].clip(lower=0).round(1)
+        forecast["yhat_upper"] = forecast["yhat_upper"].clip(lower=0).round(1)
 
     comp_df = model.predict(
         pd.DataFrame(
@@ -606,6 +1282,27 @@ def run_prediction_pipeline(
             }
         )
     )
+    # Strip closed-hour rows so no non-zero seasonal components leak outside shop hours.
+    _comp_tot = comp_df["ds"].dt.hour * 60 + comp_df["ds"].dt.minute
+    comp_df = comp_df[
+        (_comp_tot >= SHOP_OPEN_TOT) & (_comp_tot < SHOP_CLOSE_TOT)
+    ].reset_index(drop=True)
+    for _col in ("yhat", "yhat_lower", "yhat_upper"):
+        if _col in comp_df.columns:
+            comp_df[_col] = comp_df[_col].clip(lower=0)
+
+    history_end = max(df_combined["ds"].max(), pd.Timestamp.now().floor(f"{BUCKET_MINUTES}min"))
+    history_ts  = pd.date_range(
+        start=df_combined["ds"].min(),
+        end=history_end,
+        freq=f"{BUCKET_MINUTES}min",
+    )
+    _hist_tot = history_ts.hour * 60 + history_ts.minute
+    history_ts = history_ts[(_hist_tot >= SHOP_OPEN_TOT) & (_hist_tot < SHOP_CLOSE_TOT)]
+    history_fit = model.predict(pd.DataFrame({"ds": history_ts}))
+    history_fit["yhat"]       = history_fit["yhat"].clip(lower=0)
+    history_fit["yhat_lower"] = history_fit["yhat_lower"].clip(lower=0)
+    history_fit["yhat_upper"] = history_fit["yhat_upper"].clip(lower=0)
 
     snap_latest = latest_snapshot_for_wait(df_snapshots, source)
     snap_age_min = None
@@ -615,10 +1312,15 @@ def run_prediction_pipeline(
             snap_ts = snap_ts.tz_localize(None)
         snap_age_min = (pd.Timestamp.now() - snap_ts).total_seconds() / 60
 
-    if snap_latest is not None and (snap_age_min is None or snap_age_min < SNAPSHOT_MAX_AGE_MIN):
-        current_queue = int(snap_latest["queue_count"])
-        avg_dwell_min = float(snap_latest["avg_dwell_sec"]) / 60
+    snapshot_avg_dwell_min = None
+    snapshot_valid = snap_latest is not None and (snap_age_min is None or snap_age_min < SNAPSHOT_MAX_AGE_MIN)
+    _raw_queue = 0
+    if snapshot_valid:
+        _raw_queue    = int(snap_latest["queue_count"])
         active_lanes  = int(snap_latest["active_lanes"])
+        current_queue = max(0, _raw_queue - active_lanes)
+        avg_dwell_min = float(snap_latest["avg_dwell_sec"]) / 60
+        snapshot_avg_dwell_min = avg_dwell_min
     else:
         # Snapshot stale/missing — derive current queue depth from recent entrance events
         # (max_lane_depth = max active heads in a single lane at exit time, last 3 buckets)
@@ -631,36 +1333,229 @@ def run_prediction_pipeline(
         active_lanes  = DEFAULT_LANES
     avg_dwell_min = max(avg_dwell_min, 0.5)
 
-    est_service_min  = min(max(avg_dwell_min, DWELL_MIN_FLOOR), DWELL_MAX_CAP)
+    preferred_service_min, service_time_source, service_median_min, service_mean_min = _preferred_service_minutes(
+        df_service,
+        snapshot_avg_dwell_min,
+    )
+    est_service_min  = min(max(preferred_service_min, DWELL_MIN_FLOOR), DWELL_MAX_CAP)
     browsing_est     = estimate_browsing_gap(df_dwell, df_service,
                                              max_lag_min=SHOP_TIME_MAX_LAG_MIN)
+
+    # ── Apply browsing gap: entrance → checkout arrival shift ─────────────────
+    # Customers entering the store at time T reach checkout at T + BROWSING_GAP_MIN.
+    # The first `browsing_lag_steps` forecast buckets are served by people already
+    # in the store (historical entrance counts); later buckets use the Prophet
+    # arrival forecast shifted back by the gap.
+    BROWSING_GAP_MIN   = int(os.getenv("BROWSING_GAP_MIN", 25))
+    browsing_lag_steps = max(1, round(BROWSING_GAP_MIN / BUCKET_MINUTES))
+
+    # Scale the prophet entrance-count forecast to checkout-arrival units.
+    #
+    # Primary: use observed checkout throughput from service_events (events per
+    # bucket with dwell > SERVICE_MIN_DWELL_SEC).  This is lane-count-agnostic —
+    # the rate reflects actual store demand regardless of how many lanes were open.
+    avg_prophet_yhat = float(forecast_wait["yhat"].mean()) if not forecast_wait.empty else 0.0
+
+    # Stable historical checkout fraction: (checkouts/bucket) / (arrivals/bucket).
+    # Computed from the full training dataset so it doesn't fluctuate with the current
+    # forecast window size or Prophet yhat magnitude.
+    hist_arrival_per_bucket = (
+        float(df_arrivals["entry_count"].mean())
+        if not df_arrivals.empty and "entry_count" in df_arrivals.columns
+        else 0.0
+    )
+    hist_checkout_rate = _observed_checkout_rate(df_service, BUCKET_MINUTES)
+    if hist_checkout_rate is not None and hist_arrival_per_bucket > 0:
+        historical_checkout_fraction: "float | None" = min(
+            max(hist_checkout_rate / hist_arrival_per_bucket, 0.01), 1.5
+        )
+    else:
+        historical_checkout_fraction = None
+
+    # Capacity-based demand: how many customers the historical lane count can serve per bucket.
+    # Always computed — used as a floor when service_events data gives an unrealistically
+    # low checkout rate (camera noise, sparse data).
+    if not df_snapshots.empty and "active_lanes" in df_snapshots.columns:
+        snap_lanes_series = pd.to_numeric(df_snapshots["active_lanes"], errors="coerce").dropna()
+        median_hist_lanes = float(snap_lanes_series.median()) if not snap_lanes_series.empty else float(active_lanes)
+    else:
+        median_hist_lanes = float(active_lanes)
+    _capacity_demand = median_hist_lanes * BUCKET_MINUTES / max(est_service_min, 0.5)
+
+    # checkout_fraction: scales Prophet entrance-arrival forecast → checkout-arrival forecast.
+    # Priority:
+    #   1. historical_checkout_fraction — stable ratio, immune to yhat denominator collapse
+    #   2. demand / mean(yhat) — volatile fallback, can hit 4.0 cap when mean(yhat) is small
+    if historical_checkout_fraction is not None:
+        checkout_fraction = historical_checkout_fraction
+        demand_per_bucket = hist_checkout_rate if hist_checkout_rate is not None else 0.0
+        demand_source = "service_events"
+    elif hist_checkout_rate is not None:
+        demand_per_bucket = hist_checkout_rate
+        demand_source = "service_events"
+        checkout_fraction = (
+            min(max(demand_per_bucket / avg_prophet_yhat, 0.01), 1.5)
+            if avg_prophet_yhat > 0 else 1.0
+        )
+    else:
+        demand_per_bucket = _capacity_demand
+        demand_source = "snapshot_fallback"
+        checkout_fraction = (
+            min(max(demand_per_bucket / avg_prophet_yhat, 0.01), 1.5)
+            if avg_prophet_yhat > 0 else 1.0
+        )
+
+    # Floor: if service_events demand is below 30% of lane capacity, the exit camera
+    # data is too noisy/sparse to trust — fall back to capacity-based estimate.
+    if demand_per_bucket < _capacity_demand * 0.3:
+        demand_per_bucket = _capacity_demand
+        demand_source = demand_source + "+capacity_floor"
+
+    # Infer currently active lanes from recent service_events (last SNAPSHOT_MAX_AGE_MIN).
+    # Used for in-service subtraction and the t=now anchor — keeps active_lanes in the
+    # result dict unchanged for dashboard compatibility.
+    cutoff = pd.Timestamp.now() - pd.Timedelta(minutes=SNAPSHOT_MAX_AGE_MIN)
+    if "timestamp" in df_service.columns and not df_service.empty:
+        df_service_recent = df_service[df_service["timestamp"] >= cutoff]
+    else:
+        df_service_recent = pd.DataFrame()
+    inferred_lanes = _infer_active_lanes(df_service_recent, est_service_min, SNAPSHOT_MAX_AGE_MIN)
+    # Apply inferred lanes to in-service subtraction only when the snapshot was valid.
+    # When stale, current_queue was already derived from entrance events (no subtraction needed).
+    snap_lanes_for_formula = inferred_lanes if inferred_lanes is not None else active_lanes
+    if snapshot_valid:
+        current_queue = max(0, int(snap_latest["queue_count"]) - snap_lanes_for_formula)
+
+    checkout_rate_profile = _build_checkout_rate_profile(df_service, BUCKET_MINUTES)
+
+    service_profile = build_service_time_profile(df_service)
+
+    # Build per-bucket lane schedule first — needed to anchor the demand floor to the
+    # actual lanes the simulation will use, not just the snapshot lane count.
+    # Strip any lane history rows outside shop hours (defence against stale DB data
+    # or module-cache returning old SHOP_OPEN/SHOP_CLOSE values).
+    if not df_lane_history.empty and "slot_label" in df_lane_history.columns:
+        df_lane_history = df_lane_history[
+            df_lane_history["slot_label"].apply(
+                lambda s: SHOP_OPEN_TOT <= int(s.split(":")[0]) * 60 + int(s.split(":")[1]) < SHOP_CLOSE_TOT
+            )
+        ].copy()
+
+    # Build per-bucket lane schedule from historical demand.
+    # Priority: Phase 1 (service_events) → Phase 3 (demand-implied) → Phase 2 (snapshots).
+    # historical_checkout_fraction is preferred (stable); checkout_fraction is secondary fallback
+    # so Phase 3 still runs when historical data is too sparse for _observed_checkout_rate.
+    lane_schedule = _build_lane_schedule(
+        df_lane_history,
+        fallback_lanes=active_lanes,
+        historical_checkout_fraction=historical_checkout_fraction,
+        checkout_fraction=checkout_fraction,
+        checkout_service_min=_checkout_svc_min,
+    )
+    forecast_wait = forecast_wait.copy()
+    per_bucket_lanes = _forecast_lanes_vector(forecast_wait, lane_schedule, fallback_lanes=active_lanes)
+
+    # ── Demand stack for the queue simulation ─────────────────────────────────
+    # All sources must be in CHECKOUT arrivals per bucket — NOT entrance arrivals.
+    # Entrance counts have a 15-45 min shopping lag before they become checkout demand,
+    # so using them directly inflates demand by 5-15×. ensemble_predict.py handles this
+    # via a BROWSING_GAP_MIN shift; here we use sources that already have lag baked in.
+
+    # Floor — anchored to average forecast lane throughput × 1.1 so the simulation
+    # always shows slight queue growth at the floor level regardless of lane schedule.
+    _avg_forecast_lanes = float(np.mean(per_bucket_lanes)) if per_bucket_lanes else float(active_lanes)
+    _capacity_floor = _avg_forecast_lanes * BUCKET_MINUTES / max(est_service_min, 0.5) * 1.1
+
+    _demand_source_label = "capacity_floor"
+    _demand = _capacity_floor
+
+    # Source 1 — hist_checkout_rate (median completions/bucket from service_events).
+    # Lag is already baked in: events are recorded when people LEAVE checkout, not when
+    # they enter the store. Most reliable when service data is sufficient.
+    if hist_checkout_rate is not None and hist_checkout_rate > 0:
+        _demand = float(hist_checkout_rate)
+        _demand_source_label = "hist_checkout_rate"
+
+    # Source 2 — Prophet yhat × historical_checkout_fraction (time-of-day aware).
+    # Converts entrance forecast to checkout scale using the observed ratio.
+    # Used when service_events are too sparse for hist_checkout_rate.
+    elif avg_prophet_yhat > 0:
+        _cf_for_demand = historical_checkout_fraction if historical_checkout_fraction is not None else checkout_fraction
+        _demand = float(avg_prophet_yhat) * float(_cf_for_demand)
+        _demand_source_label = "prophet_x_checkout_fraction"
+
+    # Apply capacity floor unconditionally
+    _demand = max(_demand, _capacity_floor)
+    demand_source = _demand_source_label
+
+    forecast_wait["yhat"] = _demand
+
+    per_bucket_service = (
+        [service_time_for_timestamp(service_profile, row.ds, fallback=est_service_min)
+         for row in forecast_wait.itertuples()]
+        if service_profile else est_service_min
+    )
+
+    # Clip forecast to the next FORECAST_HORIZON_MINUTES for the wait model.
+    # future_open_timestamps goes until shop close; the wait queue simulation becomes
+    # unreliable beyond ~60 min so we cap it here. The full forecast_wait stays in
+    # the result dict for the queue-evolution diagnostic chart.
+    _horizon_end = pd.Timestamp.now() + pd.Timedelta(minutes=FORECAST_HORIZON_MINUTES)
+    _fw_horizon = forecast_wait[forecast_wait["ds"] <= _horizon_end].copy()
+    _n = len(_fw_horizon)
+    _pb_lanes_horizon  = per_bucket_lanes[:_n]
+    _pb_service_horizon = (
+        per_bucket_service[:_n] if isinstance(per_bucket_service, list) else per_bucket_service
+    )
+
+    # Wait estimates use per_bucket_lanes — the same lane counts shown in the Active Lanes
+    # chart — so the wait forecast is always consistent with the estimated lane schedule.
     wait_estimates, wait_15m, wait_30m, _service_per_bucket = compute_wait_estimates(
-        forecast[["ds", "yhat"]].copy(),
+        _fw_horizon,
         current_queue=current_queue,
-        avg_dwell_min=est_service_min,
-        active_lanes=active_lanes,
+        avg_dwell_min=_pb_service_horizon,
+        active_lanes=_pb_lanes_horizon,
         max_queue_per_lane=MAX_QUEUE_PER_LANE,
         max_wait_min=MAX_WAIT_MIN,
     )
 
-    # ── Multi-lane scenarios (1–5 lanes) ──────────────────────────────────────
+    # Prepend a t=now anchor. Use the first scheduled lane count so the anchor is
+    # consistent with the per_bucket_lanes that drive the rest of the forecast.
+    _anchor_lanes = _pb_lanes_horizon[0] if _pb_lanes_horizon else snap_lanes_for_formula
+    _snapshot_wait_now = round(
+        min(current_queue * est_service_min / max(_anchor_lanes, 1), MAX_WAIT_MIN), 1
+    )
+    wait_estimates = [
+        {"ds": pd.Timestamp.now().floor(f"{BUCKET_MINUTES}min"), "wait_min": _snapshot_wait_now}
+    ] + wait_estimates
+
+    # ── Multi-lane scenarios (1–4 lanes) ──────────────────────────────────────
+    # For each scenario the starting queue depth depends on n: with more lanes open,
+    # more people are in service → fewer people waiting.
+    # Use _raw_queue (total head count) and subtract n so each scenario starts correctly.
+    _snap_raw = _raw_queue if snapshot_valid else current_queue
     lane_scenarios: dict[int, dict] = {}
-    for n in range(1, 6):
+    for n in range(1, 5):
+        _scenario_queue = max(0, _snap_raw - n)
         w_rows, w15, w30, _ = compute_wait_estimates(
-            forecast[["ds", "yhat"]].copy(),
-            current_queue=current_queue,
-            avg_dwell_min=est_service_min,
+            _fw_horizon.copy(),
+            current_queue=_scenario_queue,
+            avg_dwell_min=_pb_service_horizon,
             active_lanes=n,
             max_queue_per_lane=MAX_QUEUE_PER_LANE,
             max_wait_min=MAX_WAIT_MIN,
         )
+        _lane_snap_wait = round(
+            min(_scenario_queue * est_service_min / max(n, 1), MAX_WAIT_MIN), 1
+        )
+        w_rows = [{"ds": pd.Timestamp.now().floor(f"{BUCKET_MINUTES}min"), "wait_min": _lane_snap_wait}] + w_rows
         lane_scenarios[n] = {
             "wait_estimates": w_rows,
             "wait_15m": w15,
             "wait_30m": w30,
         }
 
-    return {
+    result = {
         "df_arrivals":     df_arrivals,
         "df_snapshots":    df_snapshots,
         "df_dwell":        df_dwell,
@@ -670,16 +1565,47 @@ def run_prediction_pipeline(
         "df_insample":     df_insample,
         "forecast":        forecast,
         "comp_df":         comp_df,
+        "history_fit":     history_fit,
         "wait_estimates":  wait_estimates,
         "wait_15m":        wait_15m,
         "wait_30m":        wait_30m,
         "current_queue":   current_queue,
         "active_lanes":    active_lanes,
         "avg_dwell_min":   avg_dwell_min,
+        "snapshot_avg_dwell_min": snapshot_avg_dwell_min,
         "est_service_min": est_service_min,
+        "per_bucket_service": per_bucket_service,
+        "service_time_source": service_time_source,
+        "service_median_min": service_median_min,
+        "service_mean_min": service_mean_min,
+        "checkout_service_min": _checkout_svc_min,
+        "df_lane_history": df_lane_history,
         "lane_scenarios":  lane_scenarios,
         "real_span_days":  real_span,
         "used_sim_history": used_sim,
         "source":          source,
         "days":            days,
+        "checkout_fraction": checkout_fraction,
+        "demand_source":   _demand_source_label,
+        "demand_per_bucket": demand_per_bucket,
+        "avg_prophet_yhat":  avg_prophet_yhat,
+        "hist_checkout_rate": hist_checkout_rate,
+        "snap_lanes_formula": snap_lanes_for_formula,
+        "forecast_wait":   forecast_wait,
+        "checkout_rate_profile": checkout_rate_profile,
+        "inferred_lanes":  inferred_lanes,
+        "lane_schedule":   lane_schedule,
+        "per_bucket_lanes": per_bucket_lanes,
+        "historical_checkout_fraction": historical_checkout_fraction,
+        "df_pred_history": df_pred_history,
+        "_demand":          _demand,
+        "_capacity_floor":  _capacity_floor,
+        "_avg_forecast_lanes": _avg_forecast_lanes,
     }
+
+    save_prediction(
+        wait_15m=float(result["wait_15m"]) if result["wait_15m"] is not None else 0.0,
+        wait_30m=float(result["wait_30m"]) if result["wait_30m"] is not None else 0.0,
+        prophet_yhat=avg_prophet_yhat,
+    )
+    return result

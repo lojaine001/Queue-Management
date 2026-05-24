@@ -21,10 +21,12 @@ The simulator stack currently includes:
 - scenario presets in `simulator/scenarios.py`
 - calibration from REAL DB data in `simulator/calibrate.py`
 - a Streamlit simulator + prediction dashboard in `simulator/app.py`
+- a separate hybrid wait dashboard in `simulator/app_hybrid_wait.py`
 - a WebSocket simulation engine server in `simulator/server.py`
 - an HTML5 Canvas 2D frontend in `simulator/frontend/index.html`
 - a shared prediction package in `prediction/`
 - a Plotly chart helper module in `simulator/predict_viz.py`
+- a Plotly chart helper for the hybrid dashboard in `simulator/hybrid_wait_viz.py`
 - a smoother local animated viewer in `simulator/pygame_viewer.py`
 - launcher commands in `run_simulator.py`
 
@@ -33,6 +35,8 @@ Current status note:
 - arrival-side calibration is working against real `entrance_events`
 - service and queue calibration fall back to defaults if `service_events` or `queue_state_snapshots` do not yet contain enough usable REAL rows
 - the prediction tab reads from the database through `prediction/pipeline.py`; it does not consume in-memory simulator state
+- the prediction tab now exposes wait-model diagnostics so forecasted wait can be traced back to backlog, lane-count, service-time, and checkout-demand assumptions
+- the hybrid wait dashboard is a separate REAL-only app that reuses the base forecast as one ingredient, but does not change the old dashboard flow
 - forecast bucket granularity: **3 minutes** (changed from 5 min, April 2026)
 - `entrance_events` inserts happen at **track death** with entry timestamp, not at first detection (live pipelines only; simulator still inserts at event time)
 
@@ -63,12 +67,15 @@ It does not simulate camera frames. Instead, it uses a discrete-event model so s
 | `simulator/frontend/index.html` | HTML5 Canvas 2D store-floor visualisation |
 | `prediction/core.py` | shared bucket constants and queue/wait rollforward math |
 | `prediction/pipeline.py` | shared DB reads + Prophet prediction pipeline used by apps |
+| `prediction/hybrid_wait.py` | separate REAL-only hybrid wait rollforward layer |
 | `prediction/quick.py` | quick forecast runner for stdout / scripting |
 | `run_prediction.py` | top-level shared prediction CLI |
 | `simulator/predict_viz.py` | Plotly chart builders for the Streamlit prediction tab |
+| `simulator/hybrid_wait_viz.py` | Plotly chart builders for the separate hybrid wait dashboard |
 | `simulator/run_batch.py` | Batch runner for generating a whole scenario quickly |
 | `simulator/test_run.py` | Smoke test runner |
 | `simulator/app.py` | Streamlit dashboard (spawns server.py + HTTP server, embeds canvas) |
+| `simulator/app_hybrid_wait.py` | separate Streamlit app for hybrid REAL-only wait forecasting |
 | `simulator/pygame_viewer.py` | Smooth local Pygame viewer for animated customer flow |
 | `run_simulator.py` | Unified launcher for batch, smoke test, and dashboard |
 | `run_simulator.bat` | Windows wrapper for `run_simulator.py` |
@@ -88,6 +95,90 @@ When the Streamlit dashboard runs, it spawns two background processes automatica
 `app.py` checks each port with `socket.bind()` before spawning to avoid duplicate processes.
 The Streamlit iframe embeds `http://localhost:8081/index.html`.
 The canvas connects to `ws://localhost:8080` for live updates.
+
+---
+
+## Prediction Tab Notes
+
+The `📈 Prediction Training` tab in `simulator/app.py` is now a full debugging cockpit for the queue-wait model, not just a Prophet forecast preview.
+
+### Current prediction-tab flow
+
+1. Load historical REAL/SIM/ALL data via `prediction/pipeline.py`
+2. Train Prophet on bucketed entrance arrivals
+3. Build a current waiting backlog from the newest queue snapshot
+4. Prefer measured checkout service time from `service_events`
+5. Convert entrance forecast into checkout-arrival demand via `checkout_fraction`
+6. Simulate queue wait forward for the selected lane count
+7. Render diagnostics showing how that wait number was produced
+
+### Current diagnostics shown in the tab
+
+- **Wait model inputs**
+  - current waiting backlog
+  - active lanes from snapshot or inferred from service activity
+  - service time used by the model and where it came from
+  - checkout scaling factor and demand source
+- **Training-Period Wait Comparison**
+  - historical comparison over the same window used to train Prophet
+  - overlays observed wait proxy and model-estimated wait
+  - helps spot factor mismatches
+- **Today's Forecast values**
+  - exact 15-minute aggregated values behind the forecast chart
+  - includes the aggregated wait forecast shown alongside arrivals
+
+### Important interpretation note
+
+The prediction tab still combines several heuristics:
+
+- snapshot backlog adjustment
+- inferred lanes from recent `service_events`
+- checkout-demand scaling from service throughput
+- optional per-bucket service-time profiles
+
+This makes the tab very informative, but also means a bad wait forecast can come from multiple interacting assumptions rather than from Prophet alone.
+
+## Separate Hybrid Wait Dashboard
+
+`simulator/app_hybrid_wait.py` is an additive dashboard for a second wait-model
+strategy. It is intentionally separate from `simulator/app.py`.
+
+### Purpose
+
+- keep the current simulator + prediction dashboard stable
+- test a REAL-only wait forecast that anchors on the current operational state
+- blend recent measured checkout behavior with historical/predicted inflow
+
+### Current hybrid dashboard flow
+
+1. Load a base REAL forecast through `prediction.pipeline.run_prediction_pipeline()`
+2. Read current waiting backlog, lane count, and service timing from REAL data
+3. Build recent operational signals from `service_events`
+4. Build historical checkout and lane profiles by time bucket
+   - sparse checkout history is zero-filled across the reference time buckets
+     so quiet periods are not dropped from the historical rate estimate
+5. Blend:
+   - recent REAL operational signal
+   - historical/predicted inflow pattern
+6. Roll the queue forward to produce:
+   - `Wait @ +15 min`
+   - `Wait @ +30 min`
+   - exact per-bucket inputs and outputs
+   - a training-period wait backtest
+
+### Important separation rule
+
+This app does **not** replace the old prediction tab and does **not** alter its
+behavior. It exists so the team can compare strategies side by side before
+deciding whether any ideas should migrate back into the main dashboard.
+
+### Current hybrid dashboard surfaces
+
+- top-level KPIs for hybrid wait, current backlog, lanes, service median, and recent checkout rate
+- a **Strategy Comparison** section showing old base-pipeline vs hybrid waits
+- model-input diagnostics including snapshot freshness and effective blend weights
+- a hybrid future wait chart plus exact per-bucket values
+- a training-period backtest with factor and absolute-error metrics
 
 ### WebSocket message protocol
 
@@ -353,6 +444,7 @@ run_simulator.bat viewer normal_day
 python -m simulator.calibrate
 streamlit run simulator/app.py
 streamlit run simulator/app.py -- --calibrate --days 30
+streamlit run simulator/app_hybrid_wait.py
 python simulator/pygame_viewer.py --calibrate
 ```
 
