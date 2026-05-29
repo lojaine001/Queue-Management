@@ -1,14 +1,15 @@
 """
 dwell_modifier.py — Fuzzy dwell-time modifier.
 
-Combines three signals into a single multiplier applied to the base
+Combines four signals into a single multiplier applied to the base
 service time estimate:
 
   - Equipment type   (trolley ↑↑ / basket baseline / personal bag ↓)
   - Customer age     (young ↓ / middle baseline / senior ↑)
+  - Gender           (female ↑ / male ↓ / unknown → neutral)
   - Group size       (co-present tracks in same lane → shared checkout ↓)
 
-All three factors are combined with a weighted geometric mean so no single
+All four factors are combined with a weighted geometric mean so no single
 signal dominates.  The result is a float near 1.0 — multiply it against
 the current service_minutes to get a demographically-adjusted estimate.
 
@@ -28,10 +29,20 @@ import pandas as pd
 # ── Combination weights (must sum to 1.0) ────────────────────────────────────
 # Equipment is the strongest signal (carries most item volume info).
 # Group is the second strongest (shared checkout halves time per person).
-# Age is a mild modifier.
-_W_EQUIPMENT: float = 0.55
-_W_GROUP:      float = 0.25
-_W_AGE:        float = 0.20
+# Age and gender are mild secondary modifiers.
+_W_EQUIPMENT: float = 0.50
+_W_GROUP:      float = 0.23
+_W_AGE:        float = 0.17
+_W_GENDER:     float = 0.10
+
+# ── Gender multipliers ────────────────────────────────────────────────────────
+# Based on Arnaud's observation: female customers tend to take slightly longer.
+# Kept mild — no strong statistical evidence yet, revisit once data improves.
+_GENDER_FACTOR: dict[str, float] = {
+    "female":  1.10,
+    "male":    0.92,
+    "unknown": 1.00,
+}
 
 # ── Equipment multipliers ────────────────────────────────────────────────────
 # Trolley → large shop → much longer checkout.
@@ -88,6 +99,11 @@ def equipment_factor(equipment_type: Optional[str]) -> float:
     return _EQUIPMENT_FACTOR.get(equipment_type or "none", 1.0)
 
 
+def gender_factor(gender: Optional[str]) -> float:
+    """Direct lookup — female slightly longer, male slightly shorter, unknown neutral."""
+    return _GENDER_FACTOR.get((gender or "unknown").lower().strip(), 1.0)
+
+
 def group_factor(active_heads_in_lane: int) -> float:
     """Fuzzy group discount.
 
@@ -106,14 +122,14 @@ def group_factor(active_heads_in_lane: int) -> float:
     return p * _GROUP_TOGETHER_FACTOR + (1.0 - p) * 1.0
 
 
-def combine_factors(af: float, ef: float, gf: float) -> float:
-    """Weighted geometric mean of the three factors.
+def combine_factors(af: float, ef: float, gf: float, genf: float = 1.0) -> float:
+    """Weighted geometric mean of the four factors.
 
     Geometric mean dampens compounding extremes: a trolley-pushing senior
     couple won't produce an absurd multiplier the way simple multiplication
     would.  Each factor contributes proportionally to its weight.
     """
-    return (ef ** _W_EQUIPMENT) * (gf ** _W_GROUP) * (af ** _W_AGE)
+    return (ef ** _W_EQUIPMENT) * (gf ** _W_GROUP) * (af ** _W_AGE) * (genf ** _W_GENDER)
 
 
 # ── Queue-level modifier (queries DB) ─────────────────────────────────────────
@@ -122,7 +138,7 @@ def compute_dwell_modifier_from_recent(conn, lookback_min: int = 20) -> float:
     """Return a dwell time multiplier based on the current queue's demographics.
 
     Queries the last `lookback_min` minutes of entrance_events to get age,
-    equipment type, and group size for people most likely still in the queue.
+    gender, equipment type, and group size for people most likely still in the queue.
     Returns the median combined factor across all matched records.
 
     Returns 1.0 (neutral — no adjustment) on any DB error or empty result.
@@ -140,6 +156,7 @@ def compute_dwell_modifier_from_recent(conn, lookback_min: int = 20) -> float:
         df = pd.read_sql(
             f"""
             SELECT age_estimate,
+                   gender,
                    equipment_type,
                    active_head_tracks_in_lane
             FROM entrance_events
@@ -158,10 +175,11 @@ def compute_dwell_modifier_from_recent(conn, lookback_min: int = 20) -> float:
 
     factors: list[float] = []
     for _, row in df.iterrows():
-        af = age_factor(row.get("age_estimate"))
-        ef = equipment_factor(row.get("equipment_type"))
-        gf = group_factor(int(row.get("active_head_tracks_in_lane") or 1))
-        factors.append(combine_factors(af, ef, gf))
+        af   = age_factor(row.get("age_estimate"))
+        ef   = equipment_factor(row.get("equipment_type"))
+        gf   = group_factor(int(row.get("active_head_tracks_in_lane") or 1))
+        genf = gender_factor(row.get("gender"))
+        factors.append(combine_factors(af, ef, gf, genf))
 
     if not factors:
         return 1.0
