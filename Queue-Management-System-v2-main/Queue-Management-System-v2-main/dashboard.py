@@ -1,4 +1,5 @@
 import os
+import time as _time
 import subprocess
 import sys
 import warnings
@@ -1058,6 +1059,7 @@ def load_service_history(days: int):
                     COUNT(*) AS n_events
                 FROM service_events
                 WHERE total_dwell_sec >= {int(DWELL_MIN_FLOOR * 60)}
+                  AND total_dwell_sec <= 1800
                   AND timestamp >= NOW() - INTERVAL '{days} days'
                 GROUP BY ds
                 ORDER BY ds
@@ -1170,14 +1172,15 @@ def load_full_model_predictions(days: int = 30):
 
 st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout="wide")
 
-st.markdown(
-    f"""
-<script>
-  setTimeout(function() {{ window.location.reload(); }}, {REFRESH_SEC * 1000});
-</script>
-""",
-    unsafe_allow_html=True,
-)
+if "_page_load_time" not in st.session_state:
+    st.session_state["_page_load_time"] = _time.time()
+
+@st.fragment(run_every=REFRESH_SEC)
+def _auto_refresh():
+    if _time.time() - st.session_state.get("_page_load_time", _time.time()) >= REFRESH_SEC * 0.8:
+        st.session_state["_page_load_time"] = _time.time()
+        st.rerun()
+_auto_refresh()
 
 st.markdown(
     """
@@ -1566,6 +1569,7 @@ pred_future = pd.DataFrame(columns=["ds", "arrivals"])
 _arrivals_capped = False
 _pred_mean = _pred_min = _pred_max = float("nan")
 _dwell_per_slot = None
+_dwell_per_slot_base = None
 _dwell_pred_by_model: dict[str, list[float]] = {}
 if not pred_df.empty:
     _model_col_map = {"ensemble": "ensemble_yhat", "prophet": "prophet_yhat",
@@ -1591,8 +1595,8 @@ if not pred_df.empty:
     else:
         pred_future["arrivals"] = 0.0
     _actual_rate = (entries_delta[0] if entries_delta else 0) / max(1.0, 60.0 / BUCKET_MIN)
-    if _actual_rate > 0 and pred_future["arrivals"].mean() > _actual_rate * 2.5:
-        pred_future["arrivals"] = pred_future["arrivals"].clip(upper=_actual_rate * 2)
+    if _actual_rate > 0 and pred_future["arrivals"].mean() > _actual_rate * 5:
+        pred_future["arrivals"] = pred_future["arrivals"].clip(upper=_actual_rate * 5)
         _arrivals_capped = True
     _smooth_win = max(1, round(int(st.session_state.get("pred_smooth_min", PRED_SMOOTH_MIN)) / BUCKET_MIN))
     pred_future["arrivals"] = (
@@ -1819,7 +1823,7 @@ if _lane_rec:
 
 if _arrivals_capped:
     st.warning(
-        "Arrival forecast capped: model predicted arrivals were more than 4x the actual recent entry rate. "
+        "Arrival forecast capped: model predicted arrivals were more than 5x the actual recent entry rate. "
         "Wait times are based on a capped estimate. This may indicate a training data issue — run prediction after cleaning historical data."
     )
 

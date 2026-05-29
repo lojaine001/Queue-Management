@@ -1341,14 +1341,18 @@ def run_prediction_pipeline(
         df_arrivals = df_arrivals.copy()
         df_arrivals["entry_count"] = df_arrivals["entry_count"].clip(upper=cap_value)
 
-    train_days = max(days, 7)
+    train_days = days
     df_combined = add_closed_zeros(df_combined, train_days)
+
+    # Shorter windows need more changepoint flexibility so recent shifts are captured;
+    # longer windows can afford a tighter prior since more data anchors the trend.
+    _cps = 0.30 if train_days <= 10 else (0.15 if train_days <= 20 else 0.05)
 
     model = Prophet(
         daily_seasonality=True,
-        weekly_seasonality=True,
+        weekly_seasonality=(train_days >= 7),
         yearly_seasonality=False,
-        changepoint_prior_scale=0.05,
+        changepoint_prior_scale=_cps,
         seasonality_prior_scale=10.0,
         interval_width=0.80,
     )
