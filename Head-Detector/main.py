@@ -68,6 +68,7 @@ from utils.queue_utils import get_config, create_logger, plot_one_box, iou, writ
 from utils.queue_utils import get_datetime_str, PersonDetectionLogger
 from utils.db_logger import DBLogger
 from utils.equipment_classifier import EquipmentClassifier, EQUIPMENT_COLOURS, EQUIPMENT_NONE
+from utils.owlv2_detector import OWLv2Detector
 
 from utils.yolo import Color, is_package_installed, YOLOv9
 
@@ -483,6 +484,11 @@ def main():
         heuristic_mode=equipment_heuristic,
     )
 
+    owlv2 = OWLv2Detector(score_thresh=owlv2_score_thresh) if owlv2_enabled else None
+    if owlv2_enabled:
+        print(Color.CYAN(f'[OWLv2] Enabled — running every {owlv2_interval_frames} frames'))
+    _owlv2_frame_count = 0
+
 
     # set video stream link
     if len(username) > 0 and len(password) > 0 and len(ip_address) > 0:
@@ -749,6 +755,19 @@ def main():
                 }
                 frame_equip = equip_clf.classify_tracks(img, frame_bboxes)
                 track_equipment.update(frame_equip)
+
+            # ── OWLv2 zero-shot caddy detection (low frame rate) ─────────────
+            _owlv2_frame_count += 1
+            if owlv2 is not None and confirmed_visual_tracks and _owlv2_frame_count % owlv2_interval_frames == 0:
+                frame_bboxes = {
+                    t["track_id"]: t["bbox"]
+                    for t in confirmed_visual_tracks
+                }
+                owlv2_equip = owlv2.classify_tracks(im0, frame_bboxes)
+                # OWLv2 overrides the heuristic only when it finds something
+                for tid, label in owlv2_equip.items():
+                    if label != EQUIPMENT_NONE:
+                        track_equipment[tid] = label
 
             best_track_by_lane = {}
             for track_info in confirmed_visual_tracks:

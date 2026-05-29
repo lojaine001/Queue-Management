@@ -51,10 +51,20 @@ equipment_score_thresh: 0.40
 
 # Set to true to use the colour-heuristic fallback (no model needed).
 # Thresholds are approximate — tune for your specific camera/lighting.
-equipment_heuristic: false
+equipment_heuristic: true
 
 # Show equipment label below dwell time on the video overlay
 show_equipment_labels: true
+
+# ── OWLv2 zero-shot caddy/basket detection ───────────────────────────────────
+# Runs alongside the main YOLO loop at very low frame rate to detect
+# trolleys and baskets without any training data.
+# Set owlv2_enabled to false to disable entirely.
+# owlv2_interval_frames: run OWLv2 every N frames (3fps × 30 = every 10s).
+# owlv2_score_thresh: minimum confidence (0–1); 0.15 is a safe default.
+owlv2_enabled:         true
+owlv2_interval_frames: 30
+owlv2_score_thresh:    0.15
 
 # ── Queue quality filter ──────────────────────────────────────────────────────
 # Tracks shorter than this (seconds) are passer-by noise; excluded from
