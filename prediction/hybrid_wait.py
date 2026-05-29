@@ -1,30 +1,48 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from . import pipeline as pred_pipeline
-from .core import (
-    BUCKET_MINUTES,
-    DEFAULT_DWELL_MIN,
-    DEFAULT_LANES,
-    DWELL_MAX_CAP,
-    DWELL_MIN_FLOOR,
-    MAX_QUEUE_PER_LANE,
-    MAX_WAIT_MIN,
-    SHOP_CLOSE,
-    SHOP_OPEN,
-    SNAPSHOT_MAX_AGE_MIN,
-    SERVICE_MIN_DWELL_SEC,
-    WAIT_15M_INDEX,
-    WAIT_30M_INDEX,
-    is_open,
-)
+try:
+    from . import pipeline as pred_pipeline
+    from .core import (
+        BUCKET_MINUTES,
+        DEFAULT_DWELL_MIN,
+        DEFAULT_LANES,
+        DWELL_MAX_CAP,
+        DWELL_MIN_FLOOR,
+        MAX_QUEUE_PER_LANE,
+        MAX_WAIT_MIN,
+        SHOP_CLOSE_TOT,
+        SHOP_OPEN_TOT,
+        SNAPSHOT_MAX_AGE_MIN,
+        SERVICE_MIN_DWELL_SEC,
+        WAIT_15M_INDEX,
+        WAIT_30M_INDEX,
+        is_open,
+    )
+except ImportError:
+    import pipeline as pred_pipeline
+    from core import (
+        BUCKET_MINUTES,
+        DEFAULT_DWELL_MIN,
+        DEFAULT_LANES,
+        DWELL_MAX_CAP,
+        DWELL_MIN_FLOOR,
+        MAX_QUEUE_PER_LANE,
+        MAX_WAIT_MIN,
+        SHOP_CLOSE_TOT,
+        SHOP_OPEN_TOT,
+        SNAPSHOT_MAX_AGE_MIN,
+        SERVICE_MIN_DWELL_SEC,
+        WAIT_15M_INDEX,
+        WAIT_30M_INDEX,
+        is_open,
+    )
 
-HYBRID_OPEN_HOUR = 9
-HYBRID_CLOSE_HOUR = 20
+AUTO_SHIFT_STEP = 0.15
 
 
 @dataclass(frozen=True)
@@ -34,7 +52,7 @@ class HybridWeights:
 
 
 def _local_now_ts() -> pd.Timestamp:
-    return pd.Timestamp(datetime.now().astimezone()).tz_localize(None)
+    return pd.Timestamp(datetime.now())
 
 
 def _localize_ts(ts: pd.Timestamp | datetime | None) -> pd.Timestamp | None:
@@ -43,7 +61,7 @@ def _localize_ts(ts: pd.Timestamp | datetime | None) -> pd.Timestamp | None:
     stamp = pd.Timestamp(ts)
     if stamp.tzinfo is not None:
         local_tz = datetime.now().astimezone().tzinfo
-        stamp = stamp.tz_convert(local_tz).tz_localize(None)
+        stamp = pd.Timestamp(stamp.tz_convert(local_tz).to_pydatetime().replace(tzinfo=None))
     return stamp
 
 
@@ -60,19 +78,12 @@ def _series_median(values: pd.Series, default: float | None = None) -> float | N
     return float(numeric.median())
 
 
-def _series_mean(values: pd.Series, default: float | None = None) -> float | None:
-    numeric = pd.to_numeric(values, errors="coerce").dropna()
-    if numeric.empty:
-        return default
-    return float(numeric.mean())
-
-
 def _is_hybrid_open(ts: pd.Timestamp | datetime | None) -> bool:
     stamp = _localize_ts(ts)
     if stamp is None or pd.isna(stamp):
         return False
     tot = stamp.hour * 60 + stamp.minute
-    return (HYBRID_OPEN_HOUR * 60) <= tot < (HYBRID_CLOSE_HOUR * 60)
+    return SHOP_OPEN_TOT <= tot < SHOP_CLOSE_TOT
 
 
 def _qualifying_service_events(df_service: pd.DataFrame) -> pd.DataFrame:
@@ -93,8 +104,9 @@ def _recent_checkout_rate_per_bucket(
     *,
     window_min: int,
     as_of: pd.Timestamp | None = None,
+    _svc_qualified: pd.DataFrame | None = None,
 ) -> float | None:
-    svc = _qualifying_service_events(df_service)
+    svc = _svc_qualified.copy() if _svc_qualified is not None else _qualifying_service_events(df_service)
     if svc.empty:
         return None
     anchor = _localize_ts(as_of) if as_of is not None else _local_now_ts()
@@ -121,8 +133,9 @@ def _recent_service_minutes(
     *,
     window_min: int,
     as_of: pd.Timestamp | None = None,
+    _svc_qualified: pd.DataFrame | None = None,
 ) -> tuple[float | None, float | None]:
-    svc = _qualifying_service_events(df_service)
+    svc = _svc_qualified.copy() if _svc_qualified is not None else _qualifying_service_events(df_service)
     if svc.empty or "service_min" not in svc.columns:
         return None, None
     anchor = _localize_ts(as_of) if as_of is not None else _local_now_ts()
@@ -199,7 +212,12 @@ def _lookup_profile_value(profile: dict[str, float], ts: pd.Timestamp, fallback:
     return float(pd.Series(list(profile.values())).median()) if profile else float(fallback)
 
 
-def _lane_bounds(df_snapshots: pd.DataFrame, df_service: pd.DataFrame) -> tuple[int, int]:
+def _lane_bounds(
+    df_snapshots: pd.DataFrame,
+    df_service: pd.DataFrame,
+    *,
+    _svc_qualified: pd.DataFrame | None = None,
+) -> tuple[int, int]:
     max_candidates = [DEFAULT_LANES, 1]
 
     if not df_snapshots.empty and "active_lanes" in df_snapshots.columns:
@@ -215,7 +233,7 @@ def _lane_bounds(df_snapshots: pd.DataFrame, df_service: pd.DataFrame) -> tuple[
         if not snaps.empty:
             max_candidates.append(int(snaps["active_lanes"].max()))
 
-    service_open = _qualifying_service_events(df_service)
+    service_open = _svc_qualified.copy() if _svc_qualified is not None else _qualifying_service_events(df_service)
     if not service_open.empty and "lane_id" in service_open.columns:
         lane_count = int(service_open["lane_id"].dropna().nunique())
         if lane_count > 0:
@@ -286,7 +304,7 @@ def _effective_weights(
         return []
 
     if auto_shift_history:
-        end_current = max(0.0, start_current - 0.15)
+        end_current = max(0.0, start_current - AUTO_SHIFT_STEP)
     else:
         end_current = start_current
 
@@ -318,7 +336,12 @@ def _current_state(
     manual_active_lanes: int | None = None,
 ) -> dict:
     df_snapshots = base_result.get("df_snapshots", pd.DataFrame())
-    _min_lanes, max_lanes_cap = _lane_bounds(df_snapshots, df_service)
+    svc_qualified = _qualifying_service_events(df_service)
+    _min_lanes, max_lanes_cap = _lane_bounds(
+        df_snapshots,
+        df_service,
+        _svc_qualified=svc_qualified,
+    )
     snapshot_lanes = int(base_result.get("active_lanes", DEFAULT_LANES) or DEFAULT_LANES)
     current_waiting_backlog = int(max(0, base_result.get("current_queue", 0) or 0))
     snapshot_queue_count = current_waiting_backlog + snapshot_lanes
@@ -341,7 +364,7 @@ def _current_state(
     anchor_is_open = _is_hybrid_open(current_clock_ts)
     snapshot_lanes = _normalize_lane_value(snapshot_lanes, ts=current_clock_ts, max_lanes=max_lanes_cap)
 
-    recent_service = _qualifying_service_events(df_service)
+    recent_service = svc_qualified.copy()
     if not recent_service.empty:
         recent_cutoff = pd.Timestamp(rate_anchor_ts) - pd.Timedelta(minutes=recent_window_min)
         recent_service = recent_service[
@@ -417,11 +440,13 @@ def _current_state(
         df_service,
         window_min=recent_window_min,
         as_of=rate_anchor_ts,
+        _svc_qualified=svc_qualified,
     )
     recent_service_median, recent_service_mean = _recent_service_minutes(
         df_service,
         window_min=max(recent_window_min, 60),
         as_of=rate_anchor_ts,
+        _svc_qualified=svc_qualified,
     )
 
     if not anchor_is_open:
@@ -620,10 +645,11 @@ def _hybrid_wait_curve(
     service_multiplier: float = 1.0,
     lane_multiplier: float = 1.0,
     calibration_profiles: dict[str, object] | None = None,
+    _precomputed_state: dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     df_service = base_result.get("df_service", pd.DataFrame()).copy()
     df_snapshots = base_result.get("df_snapshots", pd.DataFrame()).copy()
-    state = _current_state(
+    state = _precomputed_state or _current_state(
         base_result,
         df_service,
         recent_window_min=recent_window_min,
@@ -654,6 +680,11 @@ def _hybrid_wait_curve(
     )
 
     recent_checkout_rate = float(state["recent_checkout_rate"] or 0.0)
+    mean_forecast_rate = (
+        float(pd.to_numeric(forecast_checkout["checkout_pred"], errors="coerce").fillna(0.0).mean())
+        if not forecast_checkout.empty
+        else 0.0
+    )
     running_queue = float(state["current_waiting_backlog"])
     base_active_lanes_now = int(state["active_lanes_now"] or DEFAULT_LANES)
     active_lanes_now = _normalize_lane_value(
@@ -718,7 +749,11 @@ def _hybrid_wait_curve(
         historical_checkout = max(0.0, _lookup_profile_value(checkout_profile, ts, forecast_rate))
         historical_pred = (forecast_rate + historical_checkout) / 2.0
         inflow_correction = _lookup_profile_value(inflow_cal_profile, ts, global_inflow_factor)
-        blended_inflow = ((weight.current * recent_checkout_rate) + (weight.history * historical_pred)) * inflow_multiplier * inflow_correction
+        if mean_forecast_rate > 0:
+            current_shaped_rate = recent_checkout_rate * (forecast_rate / mean_forecast_rate)
+        else:
+            current_shaped_rate = recent_checkout_rate
+        blended_inflow = ((weight.current * current_shaped_rate) + (weight.history * historical_pred)) * inflow_multiplier * inflow_correction
 
         historical_service = pred_pipeline.service_time_for_timestamp(service_profile, ts, fallback=current_service_min)
         service_correction = _lookup_profile_value(service_cal_profile, ts, global_service_factor)
@@ -751,7 +786,7 @@ def _hybrid_wait_curve(
                 "net_queue_change": round(net_queue_change, 2),
                 "current_weight": round(weight.current, 4),
                 "history_weight": round(weight.history, 4),
-                "recent_real_checkout_rate": round(recent_checkout_rate, 2),
+                "recent_real_checkout_rate": round(current_shaped_rate, 2),
                 "forecast_checkout_pred": round(forecast_rate, 2),
                 "historical_checkout_rate": round(historical_checkout, 2),
                 "historical_pred_checkout_rate": round(historical_pred, 2),
@@ -838,7 +873,7 @@ def _training_wait_comparison(
     current_weight = min(max(current_weight_pct / 100.0, 0.0), 1.0)
     history_weight = 1.0 - current_weight
     if auto_shift_history:
-        history_weight = min(1.0, history_weight + 0.10)
+        history_weight = min(1.0, history_weight + (AUTO_SHIFT_STEP * (2.0 / 3.0)))
         current_weight = 1.0 - history_weight
 
     rows: list[dict[str, object]] = []
@@ -952,6 +987,106 @@ def load_base_real_prediction(
         return _fallback_base_result(days=days, data_since=data_since, root_error=str(exc))
 
 
+def _sql_literal(value: object) -> str:
+    return pred_pipeline.psycopg2.extensions.adapt(value).getquoted().decode()
+
+
+def _fallback_load_arrivals(conn, days: int, data_since: datetime | None) -> pd.DataFrame:
+    since = data_since.astimezone(timezone.utc) if data_since else (datetime.now(timezone.utc) - timedelta(days=days))
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    query = f"""
+        SELECT
+            time_bucket('{BUCKET_MINUTES} minutes', timestamp) AS bucket,
+            COUNT(*) AS entry_count,
+            COUNT(*) FILTER (WHERE gender = 'male') AS male_count,
+            COUNT(*) FILTER (WHERE gender = 'female') AS female_count,
+            ROUND(AVG(age_estimate)::numeric, 1) AS avg_age,
+            ROUND(AVG(dwell_seconds) FILTER (WHERE dwell_seconds > 0)::numeric, 1) AS avg_dwell_sec,
+            MAX(active_head_tracks_in_lane) AS max_lane_depth,
+            ROUND(AVG(active_head_tracks_in_lane)::numeric, 1) AS avg_lane_depth,
+            camera_id
+        FROM entrance_events
+        WHERE camera_id NOT LIKE 'SIM_%%'
+          AND timestamp >= {_sql_literal(since)}
+          AND (camera_id LIKE 'SIM_%%' OR camera_id = {_sql_literal(pred_pipeline.ENTRANCE_CAMERA_ID)})
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) < {SHOP_CLOSE_TOT}
+        GROUP BY bucket, camera_id
+        ORDER BY bucket
+    """
+    df = pd.read_sql(query, conn)
+    if df.empty:
+        return df
+    df["bucket"] = pred_pipeline.to_local(df["bucket"])
+    df["source"] = df["camera_id"].apply(lambda c: "SIM" if str(c).startswith("SIM_") else "REAL")
+    return df
+
+
+def _fallback_load_snapshots(conn, days: int, data_since: datetime | None) -> pd.DataFrame:
+    since = data_since.astimezone(timezone.utc) if data_since else (datetime.now(timezone.utc) - timedelta(days=days))
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    query = f"""
+        SELECT timestamp, queue_count, avg_dwell_sec, active_lanes, camera_id
+        FROM queue_state_snapshots
+        WHERE camera_id NOT LIKE 'SIM_%%'
+          AND timestamp >= {_sql_literal(since)}
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) < {SHOP_CLOSE_TOT}
+        ORDER BY timestamp
+    """
+    df = pd.read_sql(query, conn)
+    if df.empty:
+        return df
+    df["timestamp"] = pred_pipeline.to_local(df["timestamp"])
+    df["source"] = df["camera_id"].apply(lambda c: "SIM" if str(c).startswith("SIM_") else "REAL")
+    return df
+
+
+def _fallback_load_dwell_events(conn, days: int) -> pd.DataFrame:
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    query = f"""
+        SELECT timestamp, dwell_seconds / 60.0 AS dwell_min
+        FROM entrance_events
+        WHERE camera_id = {_sql_literal(pred_pipeline.ENTRANCE_CAMERA_ID)}
+          AND dwell_seconds > 0
+          AND timestamp >= {_sql_literal(since)}
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) < {SHOP_CLOSE_TOT}
+        ORDER BY timestamp
+    """
+    df = pd.read_sql(query, conn)
+    if df.empty:
+        return df
+    df["timestamp"] = pred_pipeline.to_local(df["timestamp"])
+    return df
+
+
+def _fallback_load_service_events(conn, days: int) -> pd.DataFrame:
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    query = f"""
+        SELECT timestamp, total_dwell_sec / 60.0 AS service_min,
+               total_dwell_sec, lane_id, camera_id
+        FROM service_events
+        WHERE camera_id NOT LIKE 'SIM_%%'
+          AND total_dwell_sec > 0
+          AND timestamp >= {_sql_literal(since)}
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {local_ts}) * 60 + EXTRACT(MINUTE FROM {local_ts})) < {SHOP_CLOSE_TOT}
+        ORDER BY timestamp
+    """
+    df = pd.read_sql(query, conn)
+    if df.empty:
+        return df
+    df["timestamp"] = pred_pipeline.to_local(df["timestamp"])
+    return df
+
+
 def _fallback_base_result(
     *,
     days: int,
@@ -960,10 +1095,10 @@ def _fallback_base_result(
 ) -> dict:
     conn = pred_pipeline.psycopg2.connect(**pred_pipeline.DB_CONFIG)
     try:
-        df_arrivals = pred_pipeline.load_arrivals(conn, "REAL", days, data_since)
-        df_snapshots = pred_pipeline.load_snapshots(conn, "REAL", days, data_since)
-        df_dwell = pred_pipeline.load_dwell_events(conn, days=days)
-        df_service = pred_pipeline.load_service_events(conn, days=days)
+        df_arrivals = _fallback_load_arrivals(conn, days, data_since)
+        df_snapshots = _fallback_load_snapshots(conn, days, data_since)
+        df_dwell = _fallback_load_dwell_events(conn, days=days)
+        df_service = _fallback_load_service_events(conn, days=days)
     finally:
         conn.close()
 
@@ -987,8 +1122,6 @@ def _fallback_base_result(
     snapshot_avg_dwell_min = None
     if snap_latest is not None and "timestamp" in snap_latest:
         snap_ts = _localize_ts(pd.Timestamp(snap_latest["timestamp"]))
-        if snap_ts.tzinfo is not None:
-            snap_ts = snap_ts.tz_localize(None)
         snap_age_min = (_local_now_ts() - snap_ts).total_seconds() / 60
     snapshot_valid = snap_latest is not None and (snap_age_min is None or snap_age_min < SNAPSHOT_MAX_AGE_MIN)
 
@@ -1125,6 +1258,7 @@ def build_hybrid_wait_view(
         service_multiplier=service_multiplier,
         lane_multiplier=lane_multiplier,
         calibration_profiles=calibration_profiles,
+        _precomputed_state=state,
     )
     comparison = _training_wait_comparison(
         base_result,
@@ -1142,7 +1276,7 @@ def build_hybrid_wait_view(
     wait_30m = float(future_only.iloc[WAIT_30M_INDEX]["wait_min"]) if len(future_only) > WAIT_30M_INDEX else None
 
     current_weight_15 = min(max(current_weight_pct / 100.0, 0.0), 1.0)
-    current_weight_30 = max(0.0, current_weight_15 - 0.15) if auto_shift_history else current_weight_15
+    current_weight_30 = max(0.0, current_weight_15 - AUTO_SHIFT_STEP) if auto_shift_history else current_weight_15
 
     warnings: list[str] = []
     if base_result.get("forecast", pd.DataFrame()).empty:
@@ -1168,6 +1302,7 @@ def build_hybrid_wait_view(
         "training_wait_comparison": comparison,
         "wait_15m": wait_15m,
         "wait_30m": wait_30m,
+        "anchor_is_open": state["anchor_is_open"],
         "current_clock_ts": state.get("current_clock_ts"),
         "snapshot_ts": state["snapshot_ts"],
         "current_waiting_backlog": state["current_waiting_backlog"],

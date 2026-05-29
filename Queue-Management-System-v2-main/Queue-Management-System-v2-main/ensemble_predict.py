@@ -85,6 +85,7 @@ LSTM_PATH         = _resolve_model_path(f'lstm_queue_{BUCKET_MINUTES}m.keras')
 SCALER_PATH       = _resolve_model_path(f'lstm_scaler_{BUCKET_MINUTES}m.pkl')
 XGB_PATH          = _resolve_model_path(f'xgb_queue_{BUCKET_MINUTES}m.json')
 PROPHET_PATH      = _resolve_model_path(f'prophet_queue_{BUCKET_MINUTES}m.pkl')
+PROPHET_META_PATH = _resolve_model_path(f'prophet_queue_{BUCKET_MINUTES}m_meta.json')
 DWELL_MODEL_PATH  = _resolve_model_path(f'xgb_dwell_{BUCKET_MINUTES}m.json')
 
 DWELL_FEATURE_COLS = ["hour", "minute_of_hour", "day_of_week", "is_weekend"]
@@ -174,7 +175,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
 
     # ── 1. Load data ─────────────────────────────────────────────────────────
     conn = psycopg2.connect(**DB_CONFIG)
-    print(f"[Ensemble] Connected to PostgreSQL (Source: {source}, span: {data_span_days}d) ✓")
+    print(f"[Ensemble] Connected to PostgreSQL (Source: {source}, span: {data_span_days}d) [ok]")
 
     clean_filter = f"timestamp >= NOW() - INTERVAL '{data_span_days} days' AND dwell_seconds >= 10"
     if where_clause:
@@ -247,7 +248,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     print(f"[Ensemble] Applied 15-min rolling median smooth to training data")
 
     # ── 4. Closed-hour zeros ─────────────────────────────────────────────────
-    df = add_closed_zeros(df[["ds", "y"]].copy(), days=30)
+    df = add_closed_zeros(df[["ds", "y"]].copy(), days=data_span_days)
 
     print(f"[Ensemble] DataFrame shape: {df.shape}")
 
@@ -256,25 +257,44 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     n_steps = len(future_timestamps)
 
     # ── MODEL 1 — PROPHET ────────────────────────────────────────────────────
-    if _models_are_fresh():
+    _prophet_meta = {}
+    if os.path.exists(PROPHET_META_PATH):
+        try:
+            import json as _json
+            with open(PROPHET_META_PATH) as _mf:
+                _prophet_meta = _json.load(_mf)
+        except Exception:
+            _prophet_meta = {}
+    _prophet_days_changed = _prophet_meta.get("data_span_days") != data_span_days
+
+    if _models_are_fresh() and not _prophet_days_changed:
         print("\n[Prophet] Loading saved model...")
         with open(PROPHET_PATH, "rb") as _f:
             prophet_model = pickle.load(_f)
-        print("[Prophet] Loaded ✓")
+        print("[Prophet] Loaded [ok]")
     else:
-        print("\n[Prophet] Training...")
+        _reason = "days changed" if _prophet_days_changed else "model stale"
+        print(f"\n[Prophet] Training ({_reason}, span={data_span_days}d)...")
+        _cps = 0.30 if data_span_days <= 10 else (0.15 if data_span_days <= 20 else 0.1)
         prophet_model = Prophet(
-            daily_seasonality=True,
-            weekly_seasonality=True,
+            daily_seasonality=False,   # replaced by custom higher-order below
+            weekly_seasonality=(data_span_days >= 7),
             yearly_seasonality=False,
-            changepoint_prior_scale=0.05,
+            changepoint_prior_scale=_cps,
             seasonality_prior_scale=10.0,
             interval_width=0.80,
         )
+        # Higher Fourier order → captures sharp morning/lunch/evening transitions
+        prophet_model.add_seasonality(name='daily',  period=1,   fourier_order=10)
+        if data_span_days >= 7:
+            prophet_model.add_seasonality(name='weekly', period=7, fourier_order=5)
         prophet_model.fit(df)
         with open(PROPHET_PATH, "wb") as _f:
             pickle.dump(prophet_model, _f)
-        print("[Prophet] Trained and saved ✓")
+        import json as _json
+        with open(PROPHET_META_PATH, "w") as _mf:
+            _json.dump({"data_span_days": data_span_days}, _mf)
+        print("[Prophet] Trained and saved [ok]")
     forecast       = prophet_model.predict(future_df)
     prophet_preds  = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].reset_index(drop=True)
     prophet_vals   = prophet_preds["yhat"].clip(lower=0).values
@@ -304,7 +324,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         with open(SCALER_PATH, "rb") as _f:
             scaler = pickle.load(_f)
         y_open_scaled = scaler.transform(y_open_values.reshape(-1, 1))
-        print("[LSTM] Loaded ✓")
+        print("[LSTM] Loaded [ok]")
     else:
         scaler = MinMaxScaler(feature_range=(0, 1))
         if len(df_real_r) > 0:
@@ -330,7 +350,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         lstm_model.save(LSTM_PATH)
         with open(SCALER_PATH, "wb") as _f:
             pickle.dump(scaler, _f)
-        print("[LSTM] Trained and saved ✓")
+        print("[LSTM] Trained and saved [ok]")
 
     opening_profile_source = df_real_r if len(df_real_r) > 0 else df[["ds", "y"]]
     opening_profile_scaled = _build_lstm_opening_profile(opening_profile_source, scaler)
@@ -394,7 +414,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         print("[XGBoost] Loading saved model...")
         xgb_model = xgb.XGBRegressor()
         xgb_model.load_model(XGB_PATH)
-        print("[XGBoost] Loaded ✓")
+        print("[XGBoost] Loaded [ok]")
     else:
         xgb_model = xgb.XGBRegressor(
             n_estimators=200, max_depth=4, learning_rate=0.05,
@@ -402,9 +422,13 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         )
         xgb_model.fit(df_feat[FEATURE_COLS], df_feat["y"])
         xgb_model.save_model(XGB_PATH)
-        print("[XGBoost] Trained and saved ✓")
+        print("[XGBoost] Trained and saved [ok]")
 
-    recent_y = df["y"].tolist()
+    # Seed from real observed data only — df["y"] ends with add_closed_zeros synthetic
+    # zeros for overnight/post-close gaps, which poison lag_1/lag_2/lag_3 and
+    # rolling_mean at the opening of each day and cause near-zero predictions.
+    _real_seed = df_real_r.sort_values("ds").reset_index(drop=True)
+    recent_y = _real_seed["y"].tolist() if len(_real_seed) > 0 else df["y"].tolist()
     xgb_vals = []
     for ts in future_timestamps:
         ts_dt = pd.Timestamp(ts)
@@ -414,8 +438,8 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
             "day_of_week":    ts_dt.dayofweek,
             "is_weekend":     int(ts_dt.dayofweek >= 5),
             "lag_1":          recent_y[-1],
-            "lag_2":          recent_y[-2],
-            "lag_3":          recent_y[-3],
+            "lag_2":          recent_y[-2] if len(recent_y) >= 2 else recent_y[-1],
+            "lag_3":          recent_y[-3] if len(recent_y) >= 3 else recent_y[-1],
             "lag_12":         recent_y[-LAG_HOUR_STEPS] if len(recent_y) >= LAG_HOUR_STEPS else recent_y[0],
             "rolling_mean_6": np.mean(recent_y[-ROLLING_WINDOW_STEPS:]) if len(recent_y) >= ROLLING_WINDOW_STEPS else np.mean(recent_y),
         }
@@ -436,8 +460,13 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         floor_share = LSTM_OPENING_FLOOR_SHARE_MAX + (
             (LSTM_OPENING_FLOOR_SHARE_MIN - LSTM_OPENING_FLOOR_SHARE_MAX) * progress
         )
-        model_baseline = max(float(prophet_vals[i]), float(xgb_vals[i]))
         opening_hist = float(opening_profile_raw.get(minute_of_day, 0.0))
+        # XGBoost floor: use Prophet as baseline (XGBoost may still be low from stale lags)
+        xgb_baseline = max(opening_hist, 0.6 * float(prophet_vals[i]))
+        xgb_floor = max(0.0, floor_share * xgb_baseline)
+        xgb_vals[i] = max(float(xgb_vals[i]), xgb_floor)
+        # LSTM floor: use the now-corrected XGBoost alongside Prophet
+        model_baseline = max(float(prophet_vals[i]), float(xgb_vals[i]))
         opening_baseline = max(opening_hist, 0.6 * model_baseline)
         morning_floor = max(0.0, floor_share * opening_baseline)
         lstm_vals[i] = max(float(lstm_vals[i]), morning_floor)
@@ -495,7 +524,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         print("[Dwell] Loading saved dwell model...")
         dwell_model = xgb.XGBRegressor()
         dwell_model.load_model(DWELL_MODEL_PATH)
-        print("[Dwell] Loaded ✓")
+        print("[Dwell] Loaded [ok]")
     elif not df_svc.empty and len(df_svc) >= 30:
         print(f"[Dwell] Training dwell model on {len(df_svc)} service events...")
         _ds = df_svc.copy()
@@ -511,7 +540,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         )
         dwell_model.fit(_ds[DWELL_FEATURE_COLS], _ds["service_min"])
         dwell_model.save_model(DWELL_MODEL_PATH)
-        print(f"[Dwell] Trained and saved ✓  (median={avg_dwell_min:.2f} min)")
+        print(f"[Dwell] Trained and saved [ok]  (median={avg_dwell_min:.2f} min)")
     else:
         print(f"[Dwell] Not enough data ({len(df_svc)} events) — using flat median fallback ({avg_dwell_min:.2f} min)")
 
@@ -741,6 +770,17 @@ def _save_to_db(result: dict) -> None:
         END $$;
     """)
     cur.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'queue_predictions' AND column_name = 'source'
+            ) THEN
+                ALTER TABLE queue_predictions
+                    ADD COLUMN source VARCHAR(20) DEFAULT 'ensemble';
+            END IF;
+        END $$;
+    """)
+    cur.execute("""
         SELECT create_hypertable('queue_predictions', 'prediction_for',
             if_not_exists => TRUE, migrate_data => TRUE);
     """)
@@ -788,8 +828,8 @@ def _save_to_db(result: dict) -> None:
                 (predicted_at, prediction_for, prophet_yhat, lstm_yhat,
                  xgb_yhat, ensemble_yhat, est_wait_minutes,
                  wait_15m, wait_30m, wait_45m,
-                 wait_1lane_15m, wait_2lane_15m, wait_3lane_15m, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 wait_1lane_15m, wait_2lane_15m, wait_3lane_15m, status, source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (prediction_for) DO UPDATE SET
                 predicted_at    = EXCLUDED.predicted_at,
                 prophet_yhat    = EXCLUDED.prophet_yhat,
@@ -803,7 +843,8 @@ def _save_to_db(result: dict) -> None:
                 wait_1lane_15m  = EXCLUDED.wait_1lane_15m,
                 wait_2lane_15m  = EXCLUDED.wait_2lane_15m,
                 wait_3lane_15m  = EXCLUDED.wait_3lane_15m,
-                status          = EXCLUDED.status
+                status          = EXCLUDED.status,
+                source          = EXCLUDED.source
         """, (
             predicted_at,
             row["ds"].to_pydatetime(),
@@ -815,12 +856,13 @@ def _save_to_db(result: dict) -> None:
             _w15, _w30, _w45,
             _lw1, _lw2, _lw3,
             status,
+            'ensemble',
         ))
 
     conn.commit()
     cur.close()
     conn.close()
-    print(f"[DB] Saved {FORECAST_STEPS} rows to queue_predictions ✓")
+    print(f"[DB] Saved {FORECAST_STEPS} rows to queue_predictions [ok]")
 
 
 if __name__ == "__main__":

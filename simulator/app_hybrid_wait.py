@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import inspect
+from time import perf_counter
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -17,7 +18,9 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import simulator.hybrid_wait_viz as hybrid_viz
 import simulator.predict_viz as predict_viz
@@ -26,6 +29,16 @@ from prediction import hybrid_wait
 
 
 st.set_page_config(layout="wide", page_title="Hybrid Wait Forecast")
+
+
+def _phase_log(message: str, *, started_at: float | None = None, status_box=None) -> None:
+    now_txt = datetime.now().strftime("%H:%M:%S")
+    if started_at is not None:
+        elapsed = perf_counter() - started_at
+        message = f"{message} ({elapsed:.2f}s)"
+    print(f"[HYBRID APP {now_txt}] {message}", flush=True)
+    if status_box is not None:
+        status_box.info(message)
 
 
 def _hybrid_supports_calibration() -> bool:
@@ -357,6 +370,7 @@ def _best_scenario_reason(best_row: pd.Series, current_row: pd.Series | None) ->
     return ", ".join(reasons)
 
 
+@st.cache_data(show_spinner=False, ttl=300)
 def _validation_window_row(
     *,
     window_days: int,
@@ -498,6 +512,7 @@ def _validation_stability_summary(frame: pd.DataFrame) -> dict[str, object]:
     }
 
 
+@st.cache_data(show_spinner=False, ttl=300)
 def _profile_mode_window_row(
     *,
     window_days: int,
@@ -845,12 +860,12 @@ def _boundary_debug_frame(anchor_ts: object) -> pd.DataFrame:
                 "Time": label,
                 "Timestamp": ts.strftime("%Y-%m-%d %H:%M"),
                 "Open?": "OPEN" if is_open_now else "CLOSED",
-                "Forced lanes": 1 if is_open_now else 0,
-                "Forced inflow": "modeled" if is_open_now else 0,
-                "Forced wait": "modeled" if is_open_now else 0,
+                "Forced lanes": "1" if is_open_now else "0",
+                "Forced inflow": "modeled" if is_open_now else "0",
+                "Forced wait": "modeled" if is_open_now else "0",
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).astype(str)
 
 
 def _closed_hours_summary_frame(result: dict) -> pd.DataFrame:
@@ -858,12 +873,12 @@ def _closed_hours_summary_frame(result: dict) -> pd.DataFrame:
         [
             {
                 "Component": "Active lanes now",
-                "Current value": result.get("active_lanes_now", "—"),
+                "Current value": str(result.get("active_lanes_now", "—")),
                 "Closed-hours rule": "Forced to 0 outside 09:00-20:00",
             },
             {
                 "Component": "Waiting backlog now",
-                "Current value": result.get("current_waiting_backlog", "—"),
+                "Current value": str(result.get("current_waiting_backlog", "—")),
                 "Closed-hours rule": "Forced to 0 outside 09:00-20:00",
             },
             {
@@ -897,9 +912,10 @@ def _closed_hours_summary_frame(result: dict) -> pd.DataFrame:
                 "Closed-hours rule": "Forced to 0/empty outside 09:00-20:00",
             },
         ]
-    )
+    ).astype(str)
 
 
+@st.cache_data(show_spinner=False, ttl=300)
 def _build_strategy_view(
     base_result: dict,
     *,
@@ -1026,6 +1042,12 @@ st.caption(
     "Separate REAL-only dashboard for future wait prediction. This app does not replace or change the existing simulator/prediction dashboard."
 )
 st.caption("Open hours enforced in this hybrid app: 09:00-20:00. Outside those hours, lanes, queue, inflow, and wait are forced to 0.")
+st.caption(
+    f"Runtime paths: app={__file__} | hybrid_wait={getattr(hybrid_wait, '__file__', 'unknown')}"
+)
+status_box = st.empty()
+run_started_at = perf_counter()
+_phase_log("App run started", status_box=status_box)
 
 supports_calibration = _hybrid_supports_calibration()
 
@@ -1074,10 +1096,41 @@ if calibration_preset != "Custom":
     st.sidebar.caption(
         f"Preset applied: inflow {applied_inflow_multiplier:.2f}x · service {applied_service_multiplier:.2f}x · lanes {applied_lane_multiplier:.2f}x"
     )
+
+if st.session_state.get("_last_calibration_preset") != calibration_preset:
+    st.session_state["run_deep_validation"] = False
+    st.session_state["run_lane_strategy_comparison"] = False
+    st.session_state["run_calibration_analysis"] = False
+    st.session_state["_last_calibration_preset"] = calibration_preset
+
 use_profile_calibration = st.sidebar.checkbox(
     "Use backtest profile calibration",
     value=True,
     help="When enabled, the separate hybrid app applies mild time-of-day service/lane/inflow corrections derived from the training backtest.",
+)
+run_deep_validation = st.sidebar.checkbox(
+    "Run deep validation sections",
+    value=bool(st.session_state.get("run_deep_validation", False)),
+    key="run_deep_validation",
+    help="Enables the heaviest scenario/window validation blocks. Turn this on only when you want to inspect calibration stability in detail.",
+)
+run_lane_strategy_comparison = st.sidebar.checkbox(
+    "Run lane strategy comparison",
+    value=bool(st.session_state.get("run_lane_strategy_comparison", False)),
+    key="run_lane_strategy_comparison",
+    help="Builds extra strategy views for auto/snapshot/inferred/manual comparison. Turn this on only when you want to inspect lane policy behavior.",
+)
+run_calibration_analysis = st.sidebar.checkbox(
+    "Run calibration analysis sections",
+    value=bool(st.session_state.get("run_calibration_analysis", False)),
+    key="run_calibration_analysis",
+    help="Builds neutral/profile-off/suggested/single-factor scenario comparisons. This is one of the heaviest rerun paths.",
+)
+render_extended_sections = st.sidebar.checkbox(
+    "Render extended diagnostics sections",
+    value=bool(st.session_state.get("render_extended_sections", False)),
+    key="render_extended_sections",
+    help="Shows the large backtest, root-cause, guidance, scenario, and operating recommendation sections. Leave this off for faster page loads.",
 )
 profile_strength_pct = st.sidebar.slider(
     "Profile calibration strength",
@@ -1102,7 +1155,14 @@ if st.sidebar.button("Refresh base data"):
 data_since_iso = datetime.combine(data_since_date, datetime.min.time()).isoformat() if use_data_since else None
 
 try:
+    phase_started_at = perf_counter()
+    _phase_log(
+        f"Loading base result: days={days}, bootstrap={use_bootstrap}, preset={calibration_preset}, lane_strategy={lane_strategy}, "
+        f"lane_compare={run_lane_strategy_comparison}, calibration_analysis={run_calibration_analysis}, deep_validation={run_deep_validation}",
+        status_box=status_box,
+    )
     base_result = _load_base_result(days=days, use_bootstrap=use_bootstrap, data_since_iso=data_since_iso)
+    _phase_log("Base result loaded", started_at=phase_started_at, status_box=status_box)
 except Exception as exc:
     st.error(f"Could not load the hybrid base result: {exc}")
     st.stop()
@@ -1117,6 +1177,8 @@ if lane_strategy == "manual":
             cap = max(cap, int(snap_max.max()))
     manual_active_lanes = st.sidebar.slider("Manual active lanes", 1, max(cap, 1), min(max(cap, 1), max(1, int(base_result.get("active_lanes", 1) or 1))))
 
+phase_started_at = perf_counter()
+_phase_log("Building main strategy view", status_box=status_box)
 result = _build_strategy_view(
     base_result,
     current_weight_pct=current_weight_pct,
@@ -1130,63 +1192,73 @@ result = _build_strategy_view(
     use_profile_calibration=use_profile_calibration,
     profile_strength=profile_strength,
 )
+_phase_log("Main strategy view ready", started_at=phase_started_at, status_box=status_box)
 
-strategy_views = {
-    "auto": _build_strategy_view(
-        base_result,
-        current_weight_pct=current_weight_pct,
-        auto_shift_history=auto_shift_history,
-        recent_window_min=recent_window_min,
-        lane_strategy="auto",
-        inflow_multiplier=applied_inflow_multiplier,
-        service_multiplier=applied_service_multiplier,
-        lane_multiplier=applied_lane_multiplier,
-        use_profile_calibration=use_profile_calibration,
-        profile_strength=profile_strength,
-    ),
-    "snapshot": _build_strategy_view(
-        base_result,
-        current_weight_pct=current_weight_pct,
-        auto_shift_history=auto_shift_history,
-        recent_window_min=recent_window_min,
-        lane_strategy="snapshot",
-        inflow_multiplier=applied_inflow_multiplier,
-        service_multiplier=applied_service_multiplier,
-        lane_multiplier=applied_lane_multiplier,
-        use_profile_calibration=use_profile_calibration,
-        profile_strength=profile_strength,
-    ),
-    "inferred": _build_strategy_view(
-        base_result,
-        current_weight_pct=current_weight_pct,
-        auto_shift_history=auto_shift_history,
-        recent_window_min=recent_window_min,
-        lane_strategy="inferred",
-        inflow_multiplier=applied_inflow_multiplier,
-        service_multiplier=applied_service_multiplier,
-        lane_multiplier=applied_lane_multiplier,
-        use_profile_calibration=use_profile_calibration,
-        profile_strength=profile_strength,
-    ),
-}
-if lane_strategy == "manual" and manual_active_lanes is not None:
-    strategy_views["manual"] = _build_strategy_view(
-        base_result,
-        current_weight_pct=current_weight_pct,
-        auto_shift_history=auto_shift_history,
-        recent_window_min=recent_window_min,
-        lane_strategy="manual",
-        manual_active_lanes=manual_active_lanes,
-        inflow_multiplier=applied_inflow_multiplier,
-        service_multiplier=applied_service_multiplier,
-        lane_multiplier=applied_lane_multiplier,
-        use_profile_calibration=use_profile_calibration,
-        profile_strength=profile_strength,
-    )
+strategy_views = {}
+if run_lane_strategy_comparison:
+    phase_started_at = perf_counter()
+    _phase_log("Building lane strategy comparison views", status_box=status_box)
+    strategy_views = {
+        "auto": _build_strategy_view(
+            base_result,
+            current_weight_pct=current_weight_pct,
+            auto_shift_history=auto_shift_history,
+            recent_window_min=recent_window_min,
+            lane_strategy="auto",
+            inflow_multiplier=applied_inflow_multiplier,
+            service_multiplier=applied_service_multiplier,
+            lane_multiplier=applied_lane_multiplier,
+            use_profile_calibration=use_profile_calibration,
+            profile_strength=profile_strength,
+        ),
+        "snapshot": _build_strategy_view(
+            base_result,
+            current_weight_pct=current_weight_pct,
+            auto_shift_history=auto_shift_history,
+            recent_window_min=recent_window_min,
+            lane_strategy="snapshot",
+            inflow_multiplier=applied_inflow_multiplier,
+            service_multiplier=applied_service_multiplier,
+            lane_multiplier=applied_lane_multiplier,
+            use_profile_calibration=use_profile_calibration,
+            profile_strength=profile_strength,
+        ),
+        "inferred": _build_strategy_view(
+            base_result,
+            current_weight_pct=current_weight_pct,
+            auto_shift_history=auto_shift_history,
+            recent_window_min=recent_window_min,
+            lane_strategy="inferred",
+            inflow_multiplier=applied_inflow_multiplier,
+            service_multiplier=applied_service_multiplier,
+            lane_multiplier=applied_lane_multiplier,
+            use_profile_calibration=use_profile_calibration,
+            profile_strength=profile_strength,
+        ),
+    }
+    if lane_strategy == "manual" and manual_active_lanes is not None:
+        strategy_views["manual"] = _build_strategy_view(
+            base_result,
+            current_weight_pct=current_weight_pct,
+            auto_shift_history=auto_shift_history,
+            recent_window_min=recent_window_min,
+            lane_strategy="manual",
+            manual_active_lanes=manual_active_lanes,
+            inflow_multiplier=applied_inflow_multiplier,
+            service_multiplier=applied_service_multiplier,
+            lane_multiplier=applied_lane_multiplier,
+            use_profile_calibration=use_profile_calibration,
+            profile_strength=profile_strength,
+        )
+    _phase_log("Lane strategy comparison views ready", started_at=phase_started_at, status_box=status_box)
+else:
+    _phase_log("Lane strategy comparison skipped", status_box=status_box)
 
 calibration_active = any(abs(val - 1.0) > 1e-9 for val in [applied_inflow_multiplier, applied_service_multiplier, applied_lane_multiplier])
 neutral_result = None
-if calibration_active:
+if calibration_active and run_calibration_analysis:
+    phase_started_at = perf_counter()
+    _phase_log("Building neutral calibration comparison view", status_box=status_box)
     neutral_result = _build_strategy_view(
         base_result,
         current_weight_pct=current_weight_pct,
@@ -1200,9 +1272,12 @@ if calibration_active:
         use_profile_calibration=use_profile_calibration,
         profile_strength=profile_strength,
     )
+    _phase_log("Neutral calibration comparison view ready", started_at=phase_started_at, status_box=status_box)
 
 profile_off_result = None
-if use_profile_calibration:
+if use_profile_calibration and run_calibration_analysis:
+    phase_started_at = perf_counter()
+    _phase_log("Building profile-off comparison view", status_box=status_box)
     profile_off_result = _build_strategy_view(
         base_result,
         current_weight_pct=current_weight_pct,
@@ -1216,6 +1291,9 @@ if use_profile_calibration:
         use_profile_calibration=False,
         profile_strength=0.0,
     )
+    _phase_log("Profile-off comparison view ready", started_at=phase_started_at, status_box=status_box)
+elif not run_calibration_analysis:
+    _phase_log("Calibration comparison views skipped", status_box=status_box)
 
 if base_result.get("forecast", pd.DataFrame()).empty:
     st.info(
@@ -1291,63 +1369,66 @@ if not driver_attribution.empty:
         st.dataframe(driver_table, width="stretch")
 
 st.subheader("Lane Strategy Comparison")
-comparison_rows = []
-for strategy_name in ["auto", "snapshot", "inferred", "manual"]:
-    view = strategy_views.get(strategy_name)
-    if view is None:
-        continue
-    comparison_rows.append(
-        {
-            "Strategy": strategy_name,
-            "Lane source": view.get("active_lane_source"),
-            "Active lanes now": view.get("active_lanes_now"),
-            "Wait @ +15 min": view.get("wait_15m"),
-            "Wait @ +30 min": view.get("wait_30m"),
-            "Inferred lanes": view.get("inferred_lanes"),
-            "Snapshot lanes": view.get("snapshot_lanes"),
-        }
-    )
+if run_lane_strategy_comparison:
+    comparison_rows = []
+    for strategy_name in ["auto", "snapshot", "inferred", "manual"]:
+        view = strategy_views.get(strategy_name)
+        if view is None:
+            continue
+        comparison_rows.append(
+            {
+                "Strategy": strategy_name,
+                "Lane source": view.get("active_lane_source"),
+                "Active lanes now": view.get("active_lanes_now"),
+                "Wait @ +15 min": view.get("wait_15m"),
+                "Wait @ +30 min": view.get("wait_30m"),
+                "Inferred lanes": view.get("inferred_lanes"),
+                "Snapshot lanes": view.get("snapshot_lanes"),
+            }
+        )
 
-strategy_frame = pd.DataFrame(comparison_rows)
-if not strategy_frame.empty:
-    cols = st.columns(len(strategy_frame))
-    for idx, (_, row) in enumerate(strategy_frame.iterrows()):
-        with cols[idx]:
-            st.metric(f"{row['Strategy']} lanes", str(row["Active lanes now"]))
-            st.caption(f"source: {row['Lane source']}")
-            st.caption(f"+15: {_fmt_wait(row['Wait @ +15 min'])}")
-            st.caption(f"+30: {_fmt_wait(row['Wait @ +30 min'])}")
-    strategy_table = strategy_frame.copy()
-    strategy_table["Wait @ +15 min"] = pd.to_numeric(strategy_table["Wait @ +15 min"], errors="coerce").round(2)
-    strategy_table["Wait @ +30 min"] = pd.to_numeric(strategy_table["Wait @ +30 min"], errors="coerce").round(2)
-    st.plotly_chart(
-        hybrid_viz.fig_lane_strategy_comparison(strategy_views),
-        width="stretch",
-        key="fig_lane_strategy_comparison",
-    )
-    st.dataframe(strategy_table, width="stretch")
-    with st.expander("Lane strategy driver details", expanded=False):
-        driver_frame = _strategy_driver_rows(strategy_views)
-        if not driver_frame.empty:
-            driver_table = driver_frame.copy()
-            numeric_cols = [
-                "Wait @ +15 min",
-                "Lanes @ +15",
-                "Service @ +15",
-                "Inflow @ +15",
-                "Queue @ +15",
-                "Wait @ +30 min",
-                "Lanes @ +30",
-                "Service @ +30",
-                "Inflow @ +30",
-                "Queue @ +30",
-            ]
-            for col in numeric_cols:
-                if col in driver_table.columns:
-                    driver_table[col] = pd.to_numeric(driver_table[col], errors="coerce").round(2)
-            st.dataframe(driver_table, width="stretch")
-        else:
-            st.info("No lane strategy driver rows are available for the current horizon.")
+    strategy_frame = pd.DataFrame(comparison_rows)
+    if not strategy_frame.empty:
+        cols = st.columns(len(strategy_frame))
+        for idx, (_, row) in enumerate(strategy_frame.iterrows()):
+            with cols[idx]:
+                st.metric(f"{row['Strategy']} lanes", str(row["Active lanes now"]))
+                st.caption(f"source: {row['Lane source']}")
+                st.caption(f"+15: {_fmt_wait(row['Wait @ +15 min'])}")
+                st.caption(f"+30: {_fmt_wait(row['Wait @ +30 min'])}")
+        strategy_table = strategy_frame.copy()
+        strategy_table["Wait @ +15 min"] = pd.to_numeric(strategy_table["Wait @ +15 min"], errors="coerce").round(2)
+        strategy_table["Wait @ +30 min"] = pd.to_numeric(strategy_table["Wait @ +30 min"], errors="coerce").round(2)
+        st.plotly_chart(
+            hybrid_viz.fig_lane_strategy_comparison(strategy_views),
+            width="stretch",
+            key="fig_lane_strategy_comparison",
+        )
+        st.dataframe(strategy_table, width="stretch")
+        with st.expander("Lane strategy driver details", expanded=False):
+            driver_frame = _strategy_driver_rows(strategy_views)
+            if not driver_frame.empty:
+                driver_table = driver_frame.copy()
+                numeric_cols = [
+                    "Wait @ +15 min",
+                    "Lanes @ +15",
+                    "Service @ +15",
+                    "Inflow @ +15",
+                    "Queue @ +15",
+                    "Wait @ +30 min",
+                    "Lanes @ +30",
+                    "Service @ +30",
+                    "Inflow @ +30",
+                    "Queue @ +30",
+                ]
+                for col in numeric_cols:
+                    if col in driver_table.columns:
+                        driver_table[col] = pd.to_numeric(driver_table[col], errors="coerce").round(2)
+                st.dataframe(driver_table, width="stretch")
+            else:
+                st.info("No lane strategy driver rows are available for the current horizon.")
+else:
+    st.info("Lane strategy comparison is paused for faster reruns. Enable `Run lane strategy comparison` in the sidebar to build those extra views.")
 
 st.subheader("Strategy Comparison")
 c_old1, c_old2, c_new1, c_new2 = st.columns(4)
@@ -1371,7 +1452,7 @@ st.caption(
     "The base pipeline is the existing arrival-to-wait path from the old dashboard. The hybrid path keeps that forecast as an ingredient, but anchors more heavily on current REAL queue and service behavior."
 )
 
-if calibration_active and neutral_result is not None:
+if run_calibration_analysis and calibration_active and neutral_result is not None:
     st.subheader("Calibration Impact")
     cc1, cc2, cc3, cc4 = st.columns(4)
     neutral_wait_15 = neutral_result.get("wait_15m")
@@ -1402,7 +1483,7 @@ if calibration_active and neutral_result is not None:
         "This compares the current hybrid sandbox levers against the same hybrid strategy with neutral multipliers at 1.00x."
     )
 
-if profile_off_result is not None:
+if run_calibration_analysis and profile_off_result is not None:
     st.subheader("Profile Calibration Impact")
     pc1, pc2, pc3, pc4 = st.columns(4)
     profile_off_training = hybrid_viz.training_values_frame(profile_off_result)
@@ -1549,6 +1630,16 @@ st.plotly_chart(
     key="fig_hybrid_inflow_components",
 )
 
+if not render_extended_sections:
+    st.info(
+        "Extended diagnostics sections are paused for faster page loads. "
+        "Enable `Render extended diagnostics sections` in the sidebar when you want the full backtest, guidance, and scenario analysis."
+    )
+    _phase_log("Extended diagnostics skipped", status_box=status_box)
+    _phase_log("Render complete", started_at=run_started_at, status_box=status_box)
+    status_box.success("Hybrid app render complete")
+    st.stop()
+
 st.subheader("Training-Period Wait Backtest")
 st.caption(
     "This comparison stays on the same historical training window so you can inspect whether the hybrid wait estimate is still inflated. The observed line is a snapshot-derived wait proxy, not a direct completed-customer wait measurement."
@@ -1559,76 +1650,83 @@ driver_summary = _backtest_driver_summary(training_vals)
 root_summary = _root_cause_summary(result)
 suggested_calibration = _suggested_calibration(metrics, driver_summary, root_summary)
 suggested_result = None
-suggested_is_non_neutral = any(
-    abs(float(suggested_calibration[key]) - 1.0) > 1e-9
-    for key in [
-        "suggested_inflow_multiplier",
-        "suggested_service_multiplier",
-        "suggested_lane_multiplier",
+calibration_scenarios: list[tuple[str, float, float, float, dict | None]] = []
+calibration_scenario_views: dict[str, dict] = {}
+
+if run_calibration_analysis:
+    suggested_is_non_neutral = any(
+        abs(float(suggested_calibration[key]) - 1.0) > 1e-9
+        for key in [
+            "suggested_inflow_multiplier",
+            "suggested_service_multiplier",
+            "suggested_lane_multiplier",
+        ]
+    )
+    if suggested_is_non_neutral:
+        phase_started_at = perf_counter()
+        _phase_log("Building suggested calibration preview view", status_box=status_box)
+        suggested_result = _build_strategy_view(
+            base_result,
+            current_weight_pct=current_weight_pct,
+            auto_shift_history=auto_shift_history,
+            recent_window_min=recent_window_min,
+            lane_strategy=lane_strategy,
+            manual_active_lanes=manual_active_lanes,
+            inflow_multiplier=float(suggested_calibration["suggested_inflow_multiplier"]),
+            service_multiplier=float(suggested_calibration["suggested_service_multiplier"]),
+            lane_multiplier=float(suggested_calibration["suggested_lane_multiplier"]),
+            use_profile_calibration=use_profile_calibration,
+            profile_strength=profile_strength,
+        )
+        _phase_log("Suggested calibration preview view ready", started_at=phase_started_at, status_box=status_box)
+    calibration_scenarios = [
+        ("Neutral baseline", 1.0, 1.0, 1.0, neutral_result if neutral_result is not None else result),
+        ("Current sandbox", applied_inflow_multiplier, applied_service_multiplier, applied_lane_multiplier, result),
     ]
-)
-if suggested_is_non_neutral:
-    suggested_result = _build_strategy_view(
-        base_result,
-        current_weight_pct=current_weight_pct,
-        auto_shift_history=auto_shift_history,
-        recent_window_min=recent_window_min,
-        lane_strategy=lane_strategy,
-        manual_active_lanes=manual_active_lanes,
-        inflow_multiplier=float(suggested_calibration["suggested_inflow_multiplier"]),
-        service_multiplier=float(suggested_calibration["suggested_service_multiplier"]),
-        lane_multiplier=float(suggested_calibration["suggested_lane_multiplier"]),
-        use_profile_calibration=use_profile_calibration,
-        profile_strength=profile_strength,
-    )
-calibration_scenarios: list[tuple[str, float, float, float, dict | None]] = [
-    ("Neutral baseline", 1.0, 1.0, 1.0, neutral_result if neutral_result is not None else result),
-    ("Current sandbox", applied_inflow_multiplier, applied_service_multiplier, applied_lane_multiplier, result),
-]
-if suggested_result is not None:
-    calibration_scenarios.append(
-        (
-            "Suggested target",
-            float(suggested_calibration["suggested_inflow_multiplier"]),
-            float(suggested_calibration["suggested_service_multiplier"]),
-            float(suggested_calibration["suggested_lane_multiplier"]),
-            suggested_result,
+    if suggested_result is not None:
+        calibration_scenarios.append(
+            (
+                "Suggested target",
+                float(suggested_calibration["suggested_inflow_multiplier"]),
+                float(suggested_calibration["suggested_service_multiplier"]),
+                float(suggested_calibration["suggested_lane_multiplier"]),
+                suggested_result,
+            )
         )
-    )
-single_axis_specs = [
-    ("Service-only correction", 1.0, float(suggested_calibration["suggested_service_multiplier"]), 1.0),
-    ("Lane-only correction", 1.0, 1.0, float(suggested_calibration["suggested_lane_multiplier"])),
-    ("Inflow-only correction", float(suggested_calibration["suggested_inflow_multiplier"]), 1.0, 1.0),
-]
-for scenario_name, scenario_inflow, scenario_service, scenario_lanes in single_axis_specs:
-    if abs(scenario_inflow - 1.0) < 1e-9 and abs(scenario_service - 1.0) < 1e-9 and abs(scenario_lanes - 1.0) < 1e-9:
-        continue
-    calibration_scenarios.append(
-        (
-            scenario_name,
-            scenario_inflow,
-            scenario_service,
-            scenario_lanes,
-            _build_strategy_view(
-                base_result,
-                current_weight_pct=current_weight_pct,
-                auto_shift_history=auto_shift_history,
-                recent_window_min=recent_window_min,
-                lane_strategy=lane_strategy,
-                manual_active_lanes=manual_active_lanes,
-                inflow_multiplier=scenario_inflow,
-                service_multiplier=scenario_service,
-                lane_multiplier=scenario_lanes,
-                use_profile_calibration=use_profile_calibration,
-                profile_strength=profile_strength,
-            ),
+    single_axis_specs = [
+        ("Service-only correction", 1.0, float(suggested_calibration["suggested_service_multiplier"]), 1.0),
+        ("Lane-only correction", 1.0, 1.0, float(suggested_calibration["suggested_lane_multiplier"])),
+        ("Inflow-only correction", float(suggested_calibration["suggested_inflow_multiplier"]), 1.0, 1.0),
+    ]
+    for scenario_name, scenario_inflow, scenario_service, scenario_lanes in single_axis_specs:
+        if abs(scenario_inflow - 1.0) < 1e-9 and abs(scenario_service - 1.0) < 1e-9 and abs(scenario_lanes - 1.0) < 1e-9:
+            continue
+        calibration_scenarios.append(
+            (
+                scenario_name,
+                scenario_inflow,
+                scenario_service,
+                scenario_lanes,
+                _build_strategy_view(
+                    base_result,
+                    current_weight_pct=current_weight_pct,
+                    auto_shift_history=auto_shift_history,
+                    recent_window_min=recent_window_min,
+                    lane_strategy=lane_strategy,
+                    manual_active_lanes=manual_active_lanes,
+                    inflow_multiplier=scenario_inflow,
+                    service_multiplier=scenario_service,
+                    lane_multiplier=scenario_lanes,
+                    use_profile_calibration=use_profile_calibration,
+                    profile_strength=profile_strength,
+                ),
+            )
         )
-    )
-calibration_scenario_views = {
-    scenario_name: scenario_view
-    for scenario_name, _scenario_inflow, _scenario_service, _scenario_lanes, scenario_view in calibration_scenarios
-    if scenario_view is not None
-}
+    calibration_scenario_views = {
+        scenario_name: scenario_view
+        for scenario_name, _scenario_inflow, _scenario_service, _scenario_lanes, scenario_view in calibration_scenarios
+        if scenario_view is not None
+    }
 m1, m2, m3 = st.columns(3)
 m1.metric("Median factor", _fmt_num(metrics["median_factor"], "x"))
 m2.metric("Mean abs error", _fmt_num(metrics["mae"], " min"))
@@ -1692,7 +1790,7 @@ if guidance_rows:
         st.dataframe(pd.DataFrame(guidance_rows), width="stretch")
     with st.expander("Suggested calibration target", expanded=False):
         st.dataframe(pd.DataFrame([suggested_calibration]), width="stretch")
-    if suggested_result is not None:
+    if run_calibration_analysis and suggested_result is not None:
         st.subheader("Suggested Calibration Preview")
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric("Current @ +15", _fmt_wait(result.get("wait_15m")))
@@ -1750,24 +1848,29 @@ if guidance_rows:
             ]:
                 preview_table[col] = pd.to_numeric(preview_table[col], errors="coerce").round(2)
             st.dataframe(preview_table, width="stretch")
+    elif not run_calibration_analysis:
+        st.info("Suggested calibration preview is paused for faster reruns. Enable `Run calibration analysis sections` in the sidebar to build it.")
 st.subheader("Calibration Scenario Comparison")
+if not run_calibration_analysis:
+    st.info("Calibration scenario comparison is paused for faster reruns. Enable `Run calibration analysis sections` in the sidebar to build neutral/profile-off/suggested scenario boards.")
 scenario_rows: list[dict[str, object]] = []
 best_row: pd.Series | None = None
 current_row: pd.Series | None = None
-for scenario_name, scenario_inflow, scenario_service, scenario_lanes, scenario_view in calibration_scenarios:
-    if scenario_view is None:
-        continue
-    scenario_rows.append(
-        _scenario_summary_row(
-            scenario_name,
-            scenario_view,
-            inflow=scenario_inflow,
-            service=scenario_service,
-            lanes=scenario_lanes,
+if run_calibration_analysis:
+    for scenario_name, scenario_inflow, scenario_service, scenario_lanes, scenario_view in calibration_scenarios:
+        if scenario_view is None:
+            continue
+        scenario_rows.append(
+            _scenario_summary_row(
+                scenario_name,
+                scenario_view,
+                inflow=scenario_inflow,
+                service=scenario_service,
+                lanes=scenario_lanes,
+            )
         )
-    )
 scenario_frame = pd.DataFrame(scenario_rows)
-if not scenario_frame.empty:
+if run_calibration_analysis and not scenario_frame.empty:
     sortable = _rank_scenarios(scenario_frame)
     delta_frame = _scenario_delta_frame(sortable)
     best_row = sortable.iloc[0]
@@ -1866,84 +1969,17 @@ if not scenario_frame.empty:
             )
 st.subheader("Recent Window Validation")
 validation_windows = sorted({7, 14, 30, int(days)})
-validation_rows: list[dict[str, object]] = []
 stability: dict[str, object] | None = None
 readiness: dict[str, object] | None = None
-for window_days in validation_windows:
-    validation_rows.append(
-        _validation_window_row(
-            window_days=window_days,
-            use_bootstrap=use_bootstrap,
-            data_since_iso=data_since_iso,
-            current_weight_pct=current_weight_pct,
-            auto_shift_history=auto_shift_history,
-            recent_window_min=recent_window_min,
-            lane_strategy=lane_strategy,
-            manual_active_lanes=manual_active_lanes,
-            applied_inflow_multiplier=applied_inflow_multiplier,
-            applied_service_multiplier=applied_service_multiplier,
-            applied_lane_multiplier=applied_lane_multiplier,
-            use_profile_calibration=use_profile_calibration,
-            profile_strength=profile_strength,
-        )
-    )
-validation_frame = pd.DataFrame(validation_rows)
-if not validation_frame.empty:
-    stability = _validation_stability_summary(validation_frame)
-    readiness = _deployment_readiness(stability, validation_frame)
-    vv1, vv2, vv3 = st.columns(3)
-    best_counts = validation_frame["Best scenario"].value_counts()
-    vv1.metric("Windows tested", str(len(validation_frame)))
-    vv2.metric("Suggested wins", str(int(best_counts.get("Suggested target", 0))))
-    vv3.metric("Current wins", str(int(best_counts.get("Current sandbox", 0))))
-    sv1, sv2, sv3 = st.columns(3)
-    sv1.metric("Validation verdict", str(stability["verdict"]))
-    sv2.metric("Suggested win rate", _fmt_num(stability["suggested_win_rate"], "%"))
-    sv3.metric("Avg MAE gain", _fmt_num(stability["avg_mae_gain"], " min"))
-    st.caption(
-        "This re-runs the hybrid setup across several recent REAL history windows to check whether the recommendation is stable or only local to one training slice."
-    )
-    st.caption(stability["summary"])
-    rv1, rv2 = st.columns(2)
-    rv1.metric("Deployment readiness", str(readiness["verdict"]))
-    rv2.metric("Readiness checks", f"{readiness['checks_passed']}/{readiness['checks_total']}")
-    st.caption(readiness["summary"])
-    validation_frame["Delta factor (current-suggested)"] = (
-        pd.to_numeric(validation_frame["Current factor"], errors="coerce")
-        - pd.to_numeric(validation_frame["Suggested factor"], errors="coerce")
-    )
-    validation_frame["Delta MAE (current-suggested)"] = (
-        pd.to_numeric(validation_frame["Current MAE"], errors="coerce")
-        - pd.to_numeric(validation_frame["Suggested MAE"], errors="coerce")
-    )
-    st.plotly_chart(
-        hybrid_viz.fig_recent_window_validation(validation_frame),
-        width="stretch",
-        key="fig_recent_window_validation",
-    )
-    for col in [
-        "Current @ +15",
-        "Current factor",
-        "Current MAE",
-        "Suggested @ +15",
-        "Suggested factor",
-        "Suggested MAE",
-        "Best @ +15",
-        "Best factor",
-        "Best MAE",
-        "Delta factor (current-suggested)",
-        "Delta MAE (current-suggested)",
-    ]:
-        validation_frame[col] = pd.to_numeric(validation_frame[col], errors="coerce").round(2)
-    st.dataframe(validation_frame, width="stretch")
-
 profile_mode_summary: dict[str, object] | None = None
-if supports_calibration:
-    st.subheader("Profile Mode Validation")
-    profile_mode_rows: list[dict[str, object]] = []
+
+if run_deep_validation:
+    phase_started_at = perf_counter()
+    _phase_log("Running recent-window validation", status_box=status_box)
+    validation_rows: list[dict[str, object]] = []
     for window_days in validation_windows:
-        profile_mode_rows.append(
-            _profile_mode_window_row(
+        validation_rows.append(
+            _validation_window_row(
                 window_days=window_days,
                 use_bootstrap=use_bootstrap,
                 data_since_iso=data_since_iso,
@@ -1955,27 +1991,107 @@ if supports_calibration:
                 applied_inflow_multiplier=applied_inflow_multiplier,
                 applied_service_multiplier=applied_service_multiplier,
                 applied_lane_multiplier=applied_lane_multiplier,
+                use_profile_calibration=use_profile_calibration,
                 profile_strength=profile_strength,
             )
         )
-    profile_mode_frame = pd.DataFrame(profile_mode_rows)
-    if not profile_mode_frame.empty:
-        profile_mode_summary = _profile_mode_summary(profile_mode_frame)
-        pm1, pm2, pm3 = st.columns(3)
-        pm1.metric("Profile verdict", str(profile_mode_summary["verdict"]))
-        pm2.metric("Profile-on win rate", _fmt_num(profile_mode_summary["profile_on_win_rate"], "%"))
-        pm3.metric("Avg MAE gain", _fmt_num(profile_mode_summary["avg_mae_gain"], " min"))
-        st.caption(profile_mode_summary["summary"])
+    validation_frame = pd.DataFrame(validation_rows)
+    if not validation_frame.empty:
+        stability = _validation_stability_summary(validation_frame)
+        readiness = _deployment_readiness(stability, validation_frame)
+        vv1, vv2, vv3 = st.columns(3)
+        best_counts = validation_frame["Best scenario"].value_counts()
+        vv1.metric("Windows tested", str(len(validation_frame)))
+        vv2.metric("Suggested wins", str(int(best_counts.get("Suggested target", 0))))
+        vv3.metric("Current wins", str(int(best_counts.get("Current sandbox", 0))))
+        sv1, sv2, sv3 = st.columns(3)
+        sv1.metric("Validation verdict", str(stability["verdict"]))
+        sv2.metric("Suggested win rate", _fmt_num(stability["suggested_win_rate"], "%"))
+        sv3.metric("Avg MAE gain", _fmt_num(stability["avg_mae_gain"], " min"))
+        st.caption(
+            "This re-runs the hybrid setup across several recent REAL history windows to check whether the recommendation is stable or only local to one training slice."
+        )
+        st.caption(stability["summary"])
+        rv1, rv2 = st.columns(2)
+        rv1.metric("Deployment readiness", str(readiness["verdict"]))
+        rv2.metric("Readiness checks", f"{readiness['checks_passed']}/{readiness['checks_total']}")
+        st.caption(readiness["summary"])
+        validation_frame["Delta factor (current-suggested)"] = (
+            pd.to_numeric(validation_frame["Current factor"], errors="coerce")
+            - pd.to_numeric(validation_frame["Suggested factor"], errors="coerce")
+        )
+        validation_frame["Delta MAE (current-suggested)"] = (
+            pd.to_numeric(validation_frame["Current MAE"], errors="coerce")
+            - pd.to_numeric(validation_frame["Suggested MAE"], errors="coerce")
+        )
+        st.plotly_chart(
+            hybrid_viz.fig_recent_window_validation(validation_frame),
+            width="stretch",
+            key="fig_recent_window_validation",
+        )
         for col in [
-            "Profile on @ +15",
-            "Profile on factor",
-            "Profile on MAE",
-            "Profile off @ +15",
-            "Profile off factor",
-            "Profile off MAE",
+            "Current @ +15",
+            "Current factor",
+            "Current MAE",
+            "Suggested @ +15",
+            "Suggested factor",
+            "Suggested MAE",
+            "Best @ +15",
+            "Best factor",
+            "Best MAE",
+            "Delta factor (current-suggested)",
+            "Delta MAE (current-suggested)",
         ]:
-            profile_mode_frame[col] = pd.to_numeric(profile_mode_frame[col], errors="coerce").round(2)
-        st.dataframe(profile_mode_frame, width="stretch")
+            validation_frame[col] = pd.to_numeric(validation_frame[col], errors="coerce").round(2)
+        st.dataframe(validation_frame, width="stretch")
+
+    if supports_calibration:
+        profile_phase_started_at = perf_counter()
+        _phase_log("Running profile-mode validation", status_box=status_box)
+        st.subheader("Profile Mode Validation")
+        profile_mode_rows: list[dict[str, object]] = []
+        for window_days in validation_windows:
+            profile_mode_rows.append(
+                _profile_mode_window_row(
+                    window_days=window_days,
+                    use_bootstrap=use_bootstrap,
+                    data_since_iso=data_since_iso,
+                    current_weight_pct=current_weight_pct,
+                    auto_shift_history=auto_shift_history,
+                    recent_window_min=recent_window_min,
+                    lane_strategy=lane_strategy,
+                    manual_active_lanes=manual_active_lanes,
+                    applied_inflow_multiplier=applied_inflow_multiplier,
+                    applied_service_multiplier=applied_service_multiplier,
+                    applied_lane_multiplier=applied_lane_multiplier,
+                    profile_strength=profile_strength,
+                )
+            )
+        profile_mode_frame = pd.DataFrame(profile_mode_rows)
+        if not profile_mode_frame.empty:
+            profile_mode_summary = _profile_mode_summary(profile_mode_frame)
+            pm1, pm2, pm3 = st.columns(3)
+            pm1.metric("Profile verdict", str(profile_mode_summary["verdict"]))
+            pm2.metric("Profile-on win rate", _fmt_num(profile_mode_summary["profile_on_win_rate"], "%"))
+            pm3.metric("Avg MAE gain", _fmt_num(profile_mode_summary["avg_mae_gain"], " min"))
+            st.caption(profile_mode_summary["summary"])
+            for col in [
+                "Profile on @ +15",
+                "Profile on factor",
+                "Profile on MAE",
+                "Profile off @ +15",
+                "Profile off factor",
+                "Profile off MAE",
+            ]:
+                profile_mode_frame[col] = pd.to_numeric(profile_mode_frame[col], errors="coerce").round(2)
+            st.dataframe(profile_mode_frame, width="stretch")
+        _phase_log("Profile-mode validation ready", started_at=profile_phase_started_at, status_box=status_box)
+    _phase_log("Recent-window validation ready", started_at=phase_started_at, status_box=status_box)
+else:
+    _phase_log("Deep validation skipped", status_box=status_box)
+    st.info(
+        "Deep validation is paused for faster preset changes. Enable `Run deep validation sections` in the sidebar when you want the multi-window stability and profile-mode checks."
+    )
 
 operating_recommendation = _operating_recommendation(
     best_row=best_row,
@@ -2051,3 +2167,6 @@ else:
         width="stretch",
         key="fig_hybrid_base_forecast",
     )
+
+_phase_log("Render complete", started_at=run_started_at, status_box=status_box)
+status_box.success("Hybrid app render complete")

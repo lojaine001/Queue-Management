@@ -1,4 +1,5 @@
 import os
+import time as _time
 import subprocess
 import sys
 import warnings
@@ -866,6 +867,62 @@ def load_yesterday_entries():
 
 
 @st.cache_data(ttl=REFRESH_SEC)
+def load_demographics_today():
+    """Load today's gender and age distribution from entrance_events."""
+    with _conn() as conn:
+        gender_df = pd.read_sql(
+            """
+            SELECT gender, COUNT(*) AS count
+            FROM entrance_events
+            WHERE camera_id = %s
+              AND timestamp >= CURRENT_DATE
+              AND gender IS NOT NULL
+              AND gender != 'unknown'
+            GROUP BY gender
+            """,
+            conn,
+            params=(CAMERA_ID,),
+        )
+        age_df = pd.read_sql(
+            """
+            SELECT
+                CASE
+                    WHEN age_estimate < 30 THEN '18-30'
+                    WHEN age_estimate < 50 THEN '30-50'
+                    ELSE '50+'
+                END AS age_group,
+                COUNT(*) AS count
+            FROM entrance_events
+            WHERE camera_id = %s
+              AND timestamp >= CURRENT_DATE
+              AND age_estimate IS NOT NULL
+            GROUP BY 1
+            ORDER BY MIN(age_estimate)
+            """,
+            conn,
+            params=(CAMERA_ID,),
+        )
+        hourly_df = pd.read_sql(
+            """
+            SELECT
+                EXTRACT(HOUR FROM timestamp)::int   AS hour,
+                COUNT(*)                             AS total,
+                COUNT(*) FILTER (WHERE gender = 'female') AS female_count,
+                COUNT(*) FILTER (WHERE gender = 'male')   AS male_count,
+                ROUND(AVG(age_estimate)::numeric, 1)      AS avg_age
+            FROM entrance_events
+            WHERE camera_id = %s
+              AND timestamp >= CURRENT_DATE
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            conn,
+            params=(CAMERA_ID,),
+        )
+    return gender_df, age_df, hourly_df
+
+
+@st.cache_data(ttl=REFRESH_SEC)
 def load_today_traffic():
     with _conn() as conn:
         df = pd.read_sql(
@@ -1002,6 +1059,7 @@ def load_service_history(days: int):
                     COUNT(*) AS n_events
                 FROM service_events
                 WHERE total_dwell_sec >= {int(DWELL_MIN_FLOOR * 60)}
+                  AND total_dwell_sec <= 1800
                   AND timestamp >= NOW() - INTERVAL '{days} days'
                 GROUP BY ds
                 ORDER BY ds
@@ -1114,14 +1172,15 @@ def load_full_model_predictions(days: int = 30):
 
 st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout="wide")
 
-st.markdown(
-    f"""
-<script>
-  setTimeout(function() {{ window.location.reload(); }}, {REFRESH_SEC * 1000});
-</script>
-""",
-    unsafe_allow_html=True,
-)
+if "_page_load_time" not in st.session_state:
+    st.session_state["_page_load_time"] = _time.time()
+
+@st.fragment(run_every=REFRESH_SEC)
+def _auto_refresh():
+    if _time.time() - st.session_state.get("_page_load_time", _time.time()) >= REFRESH_SEC * 0.8:
+        st.session_state["_page_load_time"] = _time.time()
+        st.rerun()
+_auto_refresh()
 
 st.markdown(
     """
@@ -1426,6 +1485,7 @@ try:
     entries_delta = load_entries_delta()
     full_day_queue = load_full_day_queue()
     status_breakdown = load_status_breakdown()
+    demo_gender, demo_age, demo_hourly = load_demographics_today()
     model_breakdown = load_model_breakdown()
     training_stats = load_training_stats()
     _span = int(st.session_state["training_span_days"])
@@ -1509,6 +1569,7 @@ pred_future = pd.DataFrame(columns=["ds", "arrivals"])
 _arrivals_capped = False
 _pred_mean = _pred_min = _pred_max = float("nan")
 _dwell_per_slot = None
+_dwell_per_slot_base = None
 _dwell_pred_by_model: dict[str, list[float]] = {}
 if not pred_df.empty:
     _model_col_map = {"ensemble": "ensemble_yhat", "prophet": "prophet_yhat",
@@ -1534,8 +1595,8 @@ if not pred_df.empty:
     else:
         pred_future["arrivals"] = 0.0
     _actual_rate = (entries_delta[0] if entries_delta else 0) / max(1.0, 60.0 / BUCKET_MIN)
-    if _actual_rate > 0 and pred_future["arrivals"].mean() > _actual_rate * 2.5:
-        pred_future["arrivals"] = pred_future["arrivals"].clip(upper=_actual_rate * 2)
+    if _actual_rate > 0 and pred_future["arrivals"].mean() > _actual_rate * 5:
+        pred_future["arrivals"] = pred_future["arrivals"].clip(upper=_actual_rate * 5)
         _arrivals_capped = True
     _smooth_win = max(1, round(int(st.session_state.get("pred_smooth_min", PRED_SMOOTH_MIN)) / BUCKET_MIN))
     pred_future["arrivals"] = (
@@ -1762,7 +1823,7 @@ if _lane_rec:
 
 if _arrivals_capped:
     st.warning(
-        "Arrival forecast capped: model predicted arrivals were more than 4x the actual recent entry rate. "
+        "Arrival forecast capped: model predicted arrivals were more than 5x the actual recent entry rate. "
         "Wait times are based on a capped estimate. This may indicate a training data issue — run prediction after cleaning historical data."
     )
 
@@ -3367,6 +3428,146 @@ with col_right:
         st.plotly_chart(fig_donut, width='stretch')
     else:
         st.info("No prediction history is available for today yet.")
+
+
+# ── Demographics ──────────────────────────────────────────────────────────────
+
+st.markdown('<hr class="tracker-divider">', unsafe_allow_html=True)
+_section_title("Customer Demographics Today", "gender and age profile of today's visitors")
+
+_has_gender = not demo_gender.empty and demo_gender["count"].sum() > 0
+_has_age    = not demo_age.empty    and demo_age["count"].sum() > 0
+_has_hourly = not demo_hourly.empty
+
+if not _has_gender and not _has_age:
+    st.info("No demographic data recorded today yet. Check that the entrance camera is writing age and gender to entrance_events.")
+else:
+    dem_c1, dem_c2, dem_c3 = st.columns([1.2, 1.8, 1.0])
+
+    # ── Gender donut ──────────────────────────────────────────────────────────
+    with dem_c1:
+        st.markdown('<div class="section-subtitle">Gender split</div>', unsafe_allow_html=True)
+        if _has_gender:
+            _gender_colors = {"male": "#2563eb", "female": "#db2777", "unknown": "#94a3b8"}
+            _gdf = demo_gender.copy()
+            _gdf["gender"] = _gdf["gender"].str.lower()
+            _total_g = int(_gdf["count"].sum())
+            fig_gender = go.Figure(go.Pie(
+                labels=_gdf["gender"].str.capitalize(),
+                values=_gdf["count"],
+                hole=0.58,
+                marker_colors=[_gender_colors.get(g, "#94a3b8") for g in _gdf["gender"]],
+                textinfo="label+percent",
+                textfont=dict(size=12),
+                hovertemplate="%{label}: %{value} people<extra></extra>",
+            ))
+            fig_gender.update_layout(
+                height=240,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="white",
+                showlegend=False,
+                font=dict(color="#0f172a"),
+                annotations=[dict(
+                    text=f"<b>{_total_g}<br>total</b>",
+                    x=0.5, y=0.5, showarrow=False,
+                    font=dict(size=14, color="#0f172a"),
+                )],
+            )
+            st.plotly_chart(fig_gender, width='stretch')
+        else:
+            st.info("No gender data today.")
+
+    # ── Age group bar ─────────────────────────────────────────────────────────
+    with dem_c2:
+        st.markdown('<div class="section-subtitle">Age group distribution</div>', unsafe_allow_html=True)
+        if _has_age:
+            _adf = demo_age.copy()
+            _age_order = ["18-30", "30-50", "50+"]
+            _adf["age_group"] = pd.Categorical(_adf["age_group"], categories=_age_order, ordered=True)
+            _adf = _adf.sort_values("age_group")
+            _age_colors = {"18-30": "#0ea5e9", "30-50": "#6366f1", "50+": "#f59e0b"}
+            _total_a = int(_adf["count"].sum())
+            fig_age = go.Figure(go.Bar(
+                x=_adf["age_group"],
+                y=_adf["count"],
+                marker_color=[_age_colors.get(g, "#94a3b8") for g in _adf["age_group"]],
+                text=_adf["count"],
+                textposition="outside",
+                hovertemplate="%{x}: %{y} people<extra></extra>",
+            ))
+            _apply_chart_layout(fig_age, height=240)
+            st.plotly_chart(fig_age, width='stretch')
+        else:
+            st.info("No age data today.")
+
+    # ── Summary metrics ───────────────────────────────────────────────────────
+    with dem_c3:
+        st.markdown('<div class="section-subtitle">Summary</div>', unsafe_allow_html=True)
+        if _has_gender:
+            _gdf2 = demo_gender.copy()
+            _gdf2["gender"] = _gdf2["gender"].str.lower()
+            _female_n = int(_gdf2.loc[_gdf2["gender"] == "female", "count"].sum())
+            _male_n   = int(_gdf2.loc[_gdf2["gender"] == "male",   "count"].sum())
+            _total_n  = _female_n + _male_n
+            _female_pct = round(_female_n / _total_n * 100) if _total_n > 0 else 0
+            st.metric("Female", f"{_female_pct}%", f"{_female_n} visitors")
+            st.metric("Male",   f"{100 - _female_pct}%", f"{_male_n} visitors")
+        if _has_age and not demo_hourly.empty:
+            _avg_age_today = demo_hourly["avg_age"].mean()
+            if pd.notna(_avg_age_today):
+                st.metric("Avg age", f"{_avg_age_today:.0f} yrs")
+
+    # ── Hourly demographics chart ─────────────────────────────────────────────
+    if _has_hourly and _has_gender:
+        with st.expander("Demographics by hour of day", expanded=False):
+            _hdf = demo_hourly.copy()
+            _hdf = _hdf[_hdf["total"] > 0].copy()
+            _hdf["hour_label"] = _hdf["hour"].apply(lambda h: f"{int(h):02d}:00")
+            _hdf["female_pct"] = (_hdf["female_count"] / _hdf["total"].clip(lower=1) * 100).round(1)
+            _hdf["avg_age"]    = pd.to_numeric(_hdf["avg_age"], errors="coerce")
+
+            fig_hourly = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                row_heights=[0.55, 0.45],
+                vertical_spacing=0.08,
+                subplot_titles=["Female % by hour", "Average age by hour"],
+            )
+            fig_hourly.add_trace(go.Bar(
+                x=_hdf["hour_label"],
+                y=_hdf["female_pct"],
+                name="Female %",
+                marker_color="#db2777",
+                hovertemplate="%{x}: %{y:.1f}%<extra></extra>",
+            ), row=1, col=1)
+            fig_hourly.add_hline(
+                y=50, line_dash="dot", line_color="#94a3b8", row=1, col=1,
+                annotation_text="50%", annotation_position="right",
+            )
+            fig_hourly.add_trace(go.Scatter(
+                x=_hdf["hour_label"],
+                y=_hdf["avg_age"],
+                name="Avg age",
+                mode="lines+markers",
+                line=dict(color="#f59e0b", width=2),
+                marker=dict(size=6),
+                hovertemplate="%{x}: %{y:.1f} yrs<extra></extra>",
+            ), row=2, col=1)
+            fig_hourly.update_layout(
+                height=360,
+                margin=dict(l=0, r=20, t=30, b=0),
+                paper_bgcolor="white",
+                plot_bgcolor="white",
+                showlegend=False,
+                font=dict(color="#0f172a", size=11),
+            )
+            fig_hourly.update_yaxes(showgrid=True, gridcolor="#f1f5f9")
+            fig_hourly.update_xaxes(showgrid=False, row=2, col=1)
+            st.plotly_chart(fig_hourly, width='stretch')
+            st.caption(
+                "Female % above 50% = more women than men in that hour. "
+                "Average age shows whether the morning vs afternoon crowd is older or younger."
+            )
 
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
