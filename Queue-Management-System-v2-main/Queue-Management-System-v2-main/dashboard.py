@@ -52,6 +52,7 @@ from prediction.core import (  # noqa: E402
     is_open,
 )
 from prediction.pipeline import load_lane_history_agg  # noqa: E402
+from prediction.dwell_modifier import compute_dwell_modifier_from_recent  # noqa: E402
 
 CAMERA_ID = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
 
@@ -1546,6 +1547,15 @@ queue_count = int(snap["queue_count"]) if snap is not None and pd.notna(snap["qu
 snapshot_ts_local, snapshot_age_min = _snapshot_age_minutes(snap["timestamp"] if snap is not None else None)
 service_minutes = _estimated_service_minutes(snap)
 
+# Apply fuzzy dwell modifier: adjusts service_minutes based on current
+# queue demographics (age, equipment type, group size).
+try:
+    with _conn() as _dm_conn:
+        _dwell_mod = compute_dwell_modifier_from_recent(_dm_conn)
+except Exception:
+    _dwell_mod = 1.0
+service_minutes = service_minutes * _dwell_mod
+
 if "forecast_active_lanes" not in st.session_state:
     _qp_lanes = st.query_params.get("lanes", None)
     if _qp_lanes is not None and str(_qp_lanes).isdigit() and int(_qp_lanes) in range(1, 6):
@@ -2115,10 +2125,12 @@ with st.expander("How was this predicted? (model inputs & simulation trace)"):
 
         st.markdown("**Simulation inputs**")
         _svc_source = "service_events median (7d)" if service_minutes != DEFAULT_DWELL_MIN else "config fallback"
+        _mod_label = f"{_dwell_mod:.2f}×  (age + equipment + group)" if abs(_dwell_mod - 1.0) > 0.01 else "1.00×  (no adjustment — no recent data)"
         inputs_df = pd.DataFrame([
             {"Input": "Current queue (backlog)", "Value": str(_waiting_backlog if not pred_df.empty else queue_count)},
             {"Input": "Active lanes", "Value": str(selected_lanes)},
             {"Input": "Avg service time", "Value": f"{service_minutes:.1f} min/customer  ({_svc_source})"},
+            {"Input": "Demographic modifier", "Value": _mod_label},
             {"Input": "Service capacity", "Value": f"{selected_lanes * BUCKET_MIN / service_minutes:.1f} customers per {BUCKET_MIN}-min bucket"},
             {"Input": "Browsing gap", "Value": f"{BROWSING_GAP_MIN} min  (entrance → checkout shift)"},
             {"Input": "Bucket size", "Value": f"{BUCKET_MIN} min"},
