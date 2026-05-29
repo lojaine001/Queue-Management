@@ -439,6 +439,110 @@ def load_service_events(conn, days: int = 30) -> pd.DataFrame:
     return df
 
 
+def load_service_events_with_demographics(conn, days: int = 30, browsing_gap_min: int = 25, window_min: int = 10) -> pd.DataFrame:
+    """Load service events joined with entrance demographics from the browsing-gap window.
+
+    For each checkout event, looks up entrance_events that occurred
+    (browsing_gap_min ± window_min) minutes earlier — the customers most
+    likely heading to that checkout — and computes avg_age and female_ratio.
+
+    Parameters
+    ----------
+    conn              : psycopg2 connection
+    days              : lookback window in days (default 30)
+    browsing_gap_min  : expected store dwell before checkout (default 25)
+    window_min        : half-width of the join window in minutes (default 10)
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: timestamp (local), dwell_min, lane_id, avg_age, female_ratio.
+        avg_age and female_ratio are NaN when no entrance match was found.
+        Returns an empty DataFrame with correct columns on any DB error.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(se.timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    low  = browsing_gap_min + window_min
+    high = browsing_gap_min - window_min
+    query = f"""
+        SELECT
+            se.timestamp,
+            se.total_dwell_sec / 60.0                              AS dwell_min,
+            se.lane_id,
+            AVG(ee.age_estimate)                                   AS avg_age,
+            COUNT(*) FILTER (WHERE ee.gender = 'female')::float
+                / NULLIF(COUNT(*), 0)                              AS female_ratio
+        FROM service_events se
+        LEFT JOIN entrance_events ee
+            ON ee.timestamp BETWEEN se.timestamp - INTERVAL '{low} minutes'
+                                AND se.timestamp - INTERVAL '{high} minutes'
+           AND ee.camera_id NOT LIKE 'SIM_%%'
+           AND ee.age_estimate IS NOT NULL
+        WHERE se.total_dwell_sec > 0
+          AND se.camera_id NOT LIKE 'SIM_%%'
+          AND se.timestamp >= '{since.isoformat()}'
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) >= {SHOP_OPEN_TOT}
+          AND (EXTRACT(HOUR FROM {_local_ts}) * 60 + EXTRACT(MINUTE FROM {_local_ts})) < {SHOP_CLOSE_TOT}
+        GROUP BY se.timestamp, se.total_dwell_sec, se.lane_id
+        ORDER BY se.timestamp
+    """
+    try:
+        df = pd.read_sql(query, conn)
+    except Exception:
+        return pd.DataFrame(columns=["timestamp", "dwell_min", "lane_id", "avg_age", "female_ratio"])
+    if df.empty:
+        return df
+    df["timestamp"] = to_local(df["timestamp"])
+    return df
+
+
+def load_demographic_profile_by_hour(conn, days: int = 20) -> pd.DataFrame:
+    """Historical avg_age and female_ratio by hour of day from entrance_events.
+
+    Used at inference time to supply demographic features for future time slots
+    when we cannot know actual arriving customers in advance.
+
+    Parameters
+    ----------
+    conn : psycopg2 connection
+    days : lookback window in days (default 20)
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: hour (0-23), avg_age, female_ratio.
+        One row per hour. Missing hours filled with global mean.
+    """
+    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
+    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    query = f"""
+        SELECT
+            EXTRACT(HOUR FROM {_local_ts})::int          AS hour,
+            AVG(age_estimate)                            AS avg_age,
+            COUNT(*) FILTER (WHERE gender = 'female')::float
+                / NULLIF(COUNT(*), 0)                    AS female_ratio
+        FROM entrance_events
+        WHERE timestamp >= NOW() - INTERVAL '{days} days'
+          AND camera_id NOT LIKE 'SIM_%%'
+          AND age_estimate IS NOT NULL
+        GROUP BY hour
+        ORDER BY hour
+    """
+    try:
+        df = pd.read_sql(query, conn)
+    except Exception:
+        return pd.DataFrame(columns=["hour", "avg_age", "female_ratio"])
+    if df.empty:
+        return df
+    # Fill any missing hours with the global mean so inference never gets NaN
+    all_hours = pd.DataFrame({"hour": range(24)})
+    df = all_hours.merge(df, on="hour", how="left")
+    df["avg_age"]      = df["avg_age"].fillna(df["avg_age"].mean())
+    df["female_ratio"] = df["female_ratio"].fillna(df["female_ratio"].mean())
+    return df
+
+
 def load_lane_history_agg(
     conn,
     days: int,

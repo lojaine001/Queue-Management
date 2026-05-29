@@ -517,6 +517,9 @@ def main():
     captured_dataset_folder = 'captured_dataset'
     os.makedirs(captured_dataset_folder, exist_ok=True)
 
+    caddy_frames_path = 'caddy_frames'
+    os.makedirs(caddy_frames_path, exist_ok=True)
+
     thread = get_capture_thread(cap_url=link, cap_loop=True)
     thread.start()
 
@@ -544,9 +547,17 @@ def main():
     lane_last_insert: dict[str, tuple[int, float, int]] = {}  # roi_name → (track_id, dwell_seconds, active_heads_in_lane)
     recent_track_outcomes = {}  # track_id -> visual outcome overlay for 1 second after death
     last_snapshot_time = 0.0
+    last_caddy_frame_time = 0.0
     last_summary_time = time.time()
     SUMMARY_INTERVAL_MIN = 15
     TRACK_RETENTION_SEC = 15 * 60  # keep dead tracks in memory for 15 min
+    # Minimum seconds a track must persist to count as "in queue" vs passer-by noise.
+    # Tracks shorter than this are still written to entrance_events (for counting)
+    # but are excluded from service_events (wait time estimation) and the queue snapshot.
+    QUEUE_MIN_DWELL_SEC = float(config2.get('queue_min_dwell_sec', 3.0))
+    # Caddy/basket image collection. Set interval to 0 to disable.
+    CADDY_COLLECT_INTERVAL_SEC = float(config2.get('caddy_collect_interval_sec', 30.0))
+    CADDY_COLLECT_MAX_GB       = float(config2.get('caddy_collect_max_gb', 2.0))
 
     try:
         while True:
@@ -898,7 +909,11 @@ def main():
                                    dwell_seconds=final_dwell, entry_time=entry_time,
                                    active_head_tracks_in_lane=confirmed_lane_active_count,
                                    equipment_type=equip_type)
-                db.log_service_event(camID, tid, final_dwell, lane_id=dead_roi)
+                # Only log as a real wait event if the person stood long enough.
+                # Short tracks (< QUEUE_MIN_DWELL_SEC) are passers-by — counting them
+                # in service_events inflates the dwell average and distorts wait estimates.
+                if final_dwell >= QUEUE_MIN_DWELL_SEC:
+                    db.log_service_event(camID, tid, final_dwell, lane_id=dead_roi, equipment_type=equip_type)
                 lane_last_insert[lane_name] = (tid, final_dwell, confirmed_lane_active_count)
                 systems_logger.info(
                     f"[DB] Inserted id={tid} | lane={lane_name} | dwell={final_dwell:.1f}s "
@@ -949,13 +964,33 @@ def main():
             # ── Periodic queue-state snapshot ────────────────────────────────
             if current_time - last_snapshot_time >= SNAPSHOT_INTERVAL:
                 active_ids = [obj.global_id for obj in tracked_objects]
-                queue_count = len(active_ids)
+                # Only count people who have been standing for >= QUEUE_MIN_DWELL_SEC.
+                # Tracks shorter than this are passers-by and would inflate the queue count.
                 dwells = [current_time - track_start_times[tid]
                           for tid in active_ids if tid in track_start_times]
-                avg_dwell = float(sum(dwells) / len(dwells)) if dwells else 0.0
-                max_dwell = float(max(dwells)) if dwells else 0.0
+                long_dwells = [d for d in dwells if d >= QUEUE_MIN_DWELL_SEC]
+                queue_count = len(long_dwells)
+                avg_dwell = float(sum(long_dwells) / len(long_dwells)) if long_dwells else 0.0
+                max_dwell = float(max(long_dwells)) if long_dwells else 0.0
                 db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell)
                 last_snapshot_time = current_time
+
+            # ── Caddy dataset collection (raw frame, low framerate) ───────────
+            if (CADDY_COLLECT_INTERVAL_SEC > 0
+                    and current_time - last_caddy_frame_time >= CADDY_COLLECT_INTERVAL_SEC):
+                folder_size_gb = sum(
+                    os.path.getsize(os.path.join(caddy_frames_path, f))
+                    for f in os.listdir(caddy_frames_path)
+                    if os.path.isfile(os.path.join(caddy_frames_path, f))
+                ) / 1e9
+                if folder_size_gb < CADDY_COLLECT_MAX_GB:
+                    ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    cv2.imwrite(
+                        os.path.join(caddy_frames_path, f'{camID}_{ts_str}.jpg'),
+                        im0,
+                        [cv2.IMWRITE_JPEG_QUALITY, 85],
+                    )
+                last_caddy_frame_time = current_time
 
             # Control loop timing to match desired FPS
             elapsed_time = time.time() - start_time

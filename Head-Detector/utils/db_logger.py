@@ -178,6 +178,19 @@ class DBLogger:
         """)
 
         self.cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'service_events'
+                    AND column_name = 'equipment_type'
+                ) THEN
+                    ALTER TABLE service_events
+                    ADD COLUMN equipment_type VARCHAR(30) DEFAULT 'none';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
             SELECT create_hypertable('service_events', 'timestamp',
                 if_not_exists => TRUE,
                 migrate_data  => TRUE);
@@ -243,16 +256,16 @@ class DBLogger:
         except Exception as e:
             print(f"[DB] Snapshot error: {e}")
 
-    def log_service_event(self, camera_id, track_id, total_dwell_sec, lane_id=None):
+    def log_service_event(self, camera_id, track_id, total_dwell_sec, lane_id=None, equipment_type="none"):
         """Record a service completion (customer leaves)."""
         if not self.enabled:
             return
         try:
             self.cursor.execute("""
                 INSERT INTO service_events
-                    (camera_id, track_id, total_dwell_sec, lane_id)
-                VALUES (%s, %s, %s, %s)
-            """, (camera_id, track_id, total_dwell_sec, lane_id))
+                    (camera_id, track_id, total_dwell_sec, lane_id, equipment_type)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (camera_id, track_id, total_dwell_sec, lane_id, equipment_type))
         except Exception as e:
             print(f"[DB] Service event error: {e}")
 
