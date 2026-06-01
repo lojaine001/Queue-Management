@@ -75,7 +75,7 @@ queue_min_dwell_sec: 3.0
 # Save one raw frame every N seconds to caddy_frames/ for future training.
 # Set caddy_collect_interval_sec to 0 to disable collection entirely.
 # Collection stops automatically when the folder reaches caddy_collect_max_gb GB.
-caddy_collect_interval_sec: 30.0
+caddy_collect_interval_sec: 0
 caddy_collect_max_gb: 2.0
 
 

@@ -341,13 +341,16 @@ def main():
     openvino_device     = config2.get('openvino_device', 'CPU').upper()     # CPU / GPU / MYRIAD
     openvino_precision  = config2.get('openvino_precision', 'FP32').upper() # FP32 / FP16
     save_one = config2.get('save_one', True)
-    save_snapshots = config2.get('save_snapshots', True)
+    save_snapshots = config2.get('save_snapshots', False)
     show_rejected_track_overlay = config2.get('show_rejected_track_overlay', False)
     SNAPSHOT_INTERVAL = config2.get('snapshot_interval', 10)
     equipment_model_path  = config2.get('equipment_model', '')
     equipment_score_thresh = float(config2.get('equipment_score_thresh', 0.40))
     equipment_heuristic   = bool(config2.get('equipment_heuristic', False))
     show_equipment_labels = bool(config2.get('show_equipment_labels', True))
+    owlv2_enabled         = bool(config2.get('owlv2_enabled', False))
+    owlv2_interval_frames = int(config2.get('owlv2_interval_frames', 30))
+    owlv2_score_thresh    = float(config2.get('owlv2_score_thresh', 0.15))
     disable_HI = stored_config.get('disable_headpose_identification_mode', False)
     tracker_backend = config2.get('tracker', 'norfair').lower()
 
