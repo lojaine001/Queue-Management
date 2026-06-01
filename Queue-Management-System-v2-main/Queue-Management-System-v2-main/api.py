@@ -72,6 +72,7 @@ def queue_status():
                         timestamp
                     FROM queue_state_snapshots
                     WHERE camera_id NOT LIKE 'SIM_%%'
+                      AND timestamp >= NOW() - INTERVAL '24 hours'
                     ORDER BY camera_id, timestamp DESC
                 """)
                 rows = cur.fetchall()
