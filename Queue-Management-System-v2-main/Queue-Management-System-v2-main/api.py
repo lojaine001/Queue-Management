@@ -157,6 +157,60 @@ def get_alerts():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/day-recap")
+def day_recap():
+    """
+    Returns a simple summary of today's activity:
+    total customers, peak hour, and average wait time.
+    """
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Total customers today
+                cur.execute("""
+                    SELECT COUNT(*) AS total
+                    FROM entrance_events
+                    WHERE timestamp >= CURRENT_DATE
+                      AND camera_id NOT LIKE 'SIM_%%'
+                """)
+                total = int((cur.fetchone() or {}).get("total") or 0)
+
+                # Peak hour today
+                cur.execute("""
+                    SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS cnt
+                    FROM entrance_events
+                    WHERE timestamp >= CURRENT_DATE
+                      AND camera_id NOT LIKE 'SIM_%%'
+                    GROUP BY 1
+                    ORDER BY 2 DESC
+                    LIMIT 1
+                """)
+                peak_row = cur.fetchone()
+                peak_hour  = peak_row["hour"].strftime("%H:%M") if peak_row and peak_row["hour"] else None
+                peak_count = int(peak_row["cnt"]) if peak_row else 0
+
+                # Average wait today (from service_events)
+                cur.execute("""
+                    SELECT ROUND(AVG(total_dwell_sec) / 60.0, 1) AS avg_min
+                    FROM service_events
+                    WHERE timestamp >= CURRENT_DATE
+                      AND camera_id NOT LIKE 'SIM_%%'
+                """)
+                avg_row = cur.fetchone()
+                avg_wait_min = float(avg_row["avg_min"]) if avg_row and avg_row["avg_min"] else 0.0
+
+        return {
+            "total_customers": total,
+            "peak_hour":       peak_hour,
+            "peak_count":      peak_count,
+            "avg_wait_min":    avg_wait_min,
+            "date":            datetime.now().strftime("%d %b %Y"),
+        }
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/alert-response")
 def post_alert_response(body: AlertResponse):
     """
