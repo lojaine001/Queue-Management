@@ -78,7 +78,7 @@ def live_lanes():
                     SELECT
                         lane_id,
                         COUNT(*)                                    AS recent_checkouts,
-                        ROUND(AVG(total_dwell_sec) / 60.0, 1)      AS avg_wait_min
+                        ROUND(AVG(total_dwell_sec)::numeric / 60.0, 1)      AS avg_wait_min
                     FROM service_events
                     WHERE timestamp >= NOW() - INTERVAL '2 hours'
                       AND camera_id NOT LIKE 'SIM_%%'
@@ -203,11 +203,15 @@ def forecast():
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Get the most recent prediction batch (latest predicted_at)
+                # Get the most recent batch that has non-zero predictions
                 cur.execute("""
                     SELECT est_wait_minutes, prediction_for, predicted_at
                     FROM queue_predictions
-                    WHERE predicted_at = (SELECT MAX(predicted_at) FROM queue_predictions)
+                    WHERE predicted_at = (
+                        SELECT predicted_at FROM queue_predictions
+                        WHERE est_wait_minutes > 0
+                        ORDER BY predicted_at DESC LIMIT 1
+                    )
                     ORDER BY prediction_for ASC
                 """)
                 predictions = cur.fetchall()
@@ -309,7 +313,7 @@ def day_recap():
                 peak_count = int(peak_row["cnt"]) if peak_row else 0
 
                 cur.execute(f"""
-                    SELECT ROUND(AVG(total_dwell_sec) / 60.0, 1) AS avg_min
+                    SELECT ROUND(AVG(total_dwell_sec)::numeric / 60.0, 1) AS avg_min
                     FROM service_events
                     WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
