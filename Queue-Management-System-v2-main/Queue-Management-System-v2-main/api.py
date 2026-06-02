@@ -256,14 +256,20 @@ def forecast():
         live_avg_dwell = float((live_snap or {}).get("avg_dwell_sec") or 0)
         wait_now_live  = round(live_avg_dwell / 60, 1)
 
-        # Use the prediction_for timestamps relative to when they were generated
-        base_time = predictions[0]["predicted_at"] if predictions else datetime.now(timezone.utc)
+        # Use NOW as the reference so +5/+10/+15 look at future prediction slots,
+        # not slots relative to when the batch was generated (which may be in the past).
+        now_utc = datetime.now(timezone.utc)
 
         def closest_wait(target_min: int) -> Optional[float]:
             if not predictions:
                 return None
-            target_time = base_time + timedelta(minutes=target_min)
-            closest = min(predictions, key=lambda r: abs((r["prediction_for"] - target_time).total_seconds()))
+            target_time = now_utc + timedelta(minutes=target_min)
+            def _delta(r):
+                pf = r["prediction_for"]
+                if pf.tzinfo is None:
+                    pf = pf.replace(tzinfo=timezone.utc)
+                return abs((pf - target_time).total_seconds())
+            closest = min(predictions, key=_delta)
             return round(float(closest["est_wait_minutes"] or 0), 1)
 
         wait_now = wait_now_live if live_avg_dwell > 0 else (closest_wait(0) or 0.0)
