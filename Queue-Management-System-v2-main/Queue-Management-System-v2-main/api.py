@@ -228,14 +228,14 @@ def forecast():
             closest = min(predictions, key=lambda r: abs((r["prediction_for"] - target_time).total_seconds()))
             return round(float(closest["est_wait_minutes"] or 0), 1)
 
-        wait_now    = closest_wait(0)  or 0.0
-        wait_15     = closest_wait(15)
-        wait_30     = closest_wait(30)
+        wait_now = closest_wait(0)  or 0.0
+        wait_5   = closest_wait(5)
+        wait_10  = closest_wait(10)
+        wait_15  = closest_wait(15)
 
-        # Lane scenarios: wait scales inversely with lane count
-        # Approximation: wait_N = wait_now * (current_lanes / N)
+        # Lane scenarios capped at 4 (max lanes available)
         scenarios = []
-        for n in range(1, 6):
+        for n in range(1, 5):
             estimated = round(wait_now * (current_lanes / n), 1) if wait_now > 0 else 0.0
             if estimated > 10:
                 color = "red"
@@ -246,18 +246,19 @@ def forecast():
             else:
                 color = "green"
             scenarios.append({
-                "lanes":         n,
-                "est_wait_min":  estimated,
-                "color":         color,
-                "is_current":    n == current_lanes,
+                "lanes":        n,
+                "est_wait_min": estimated,
+                "color":        color,
+                "is_current":   n == current_lanes,
             })
 
         return {
-            "wait_now_min":    round(wait_now, 1),
-            "wait_15_min":     wait_15,
-            "wait_30_min":     wait_30,
-            "current_lanes":   current_lanes,
-            "lane_scenarios":  scenarios,
+            "wait_now_min":   round(wait_now, 1),
+            "wait_5_min":     wait_5,
+            "wait_10_min":    wait_10,
+            "wait_15_min":    wait_15,
+            "current_lanes":  current_lanes,
+            "lane_scenarios": scenarios,
         }
 
     except Exception as exc:
