@@ -266,22 +266,34 @@ def forecast():
 
 @app.get("/day-recap")
 def day_recap():
-    """Returns today's summary including equipment mix."""
+    """Returns today's summary (falls back to most recent day with data)."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Find the most recent day that has data
                 cur.execute("""
+                    SELECT DATE(timestamp) AS day
+                    FROM entrance_events
+                    WHERE camera_id NOT LIKE 'SIM_%%'
+                    ORDER BY timestamp DESC LIMIT 1
+                """)
+                day_row = cur.fetchone()
+                ref_date = day_row["day"] if day_row else None
+                date_filter = f"DATE(timestamp) = '{ref_date}'" if ref_date else "timestamp >= CURRENT_DATE"
+                display_date = ref_date.strftime("%d %b %Y") if ref_date else datetime.now().strftime("%d %b %Y")
+
+                cur.execute(f"""
                     SELECT COUNT(*) AS total
                     FROM entrance_events
-                    WHERE timestamp >= CURRENT_DATE
+                    WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
                 """)
                 total = int((cur.fetchone() or {}).get("total") or 0)
 
-                cur.execute("""
+                cur.execute(f"""
                     SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS cnt
                     FROM entrance_events
-                    WHERE timestamp >= CURRENT_DATE
+                    WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
                     GROUP BY 1 ORDER BY 2 DESC LIMIT 1
                 """)
@@ -290,20 +302,20 @@ def day_recap():
                 peak_end   = (peak_row["hour"] + timedelta(hours=1)).strftime("%H:%M") if peak_row and peak_row["hour"] else None
                 peak_count = int(peak_row["cnt"]) if peak_row else 0
 
-                cur.execute("""
+                cur.execute(f"""
                     SELECT ROUND(AVG(total_dwell_sec) / 60.0, 1) AS avg_min
                     FROM service_events
-                    WHERE timestamp >= CURRENT_DATE
+                    WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
                 """)
                 avg_row      = cur.fetchone()
                 avg_wait_min = float(avg_row["avg_min"]) if avg_row and avg_row["avg_min"] else 0.0
 
                 # Equipment mix
-                cur.execute("""
+                cur.execute(f"""
                     SELECT equipment_type, COUNT(*) AS cnt
                     FROM entrance_events
-                    WHERE timestamp >= CURRENT_DATE
+                    WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
                       AND equipment_type IS NOT NULL
                       AND equipment_type != 'none'
@@ -328,7 +340,7 @@ def day_recap():
             })
 
         return {
-            "date":            datetime.now().strftime("%d %b %Y"),
+            "date":            display_date,
             "total_customers": total,
             "avg_wait_min":    avg_wait_min,
             "peak_hour":       peak_hour,
