@@ -157,10 +157,17 @@ def get_alerts():
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Use DISTINCT ON to get the best (most recently generated) prediction
+                # for the next upcoming slot. Avoids the pipeline.py single-row problem:
+                # pipeline.py writes one row per call with a very fresh predicted_at,
+                # so ORDER BY predicted_at DESC LIMIT 1 always returned that one row
+                # whose est_wait_minutes = wait_15m (a far-future peak value ≈ 25 min).
                 cur.execute("""
-                    SELECT est_wait_minutes, prediction_for, predicted_at
+                    SELECT DISTINCT ON (prediction_for)
+                        est_wait_minutes, wait_15m, prediction_for, predicted_at
                     FROM queue_predictions
-                    ORDER BY predicted_at DESC
+                    WHERE prediction_for >= NOW()
+                    ORDER BY prediction_for ASC, predicted_at DESC
                     LIMIT 1
                 """)
                 row = cur.fetchone()
@@ -168,25 +175,17 @@ def get_alerts():
         if not row:
             return {"level": None, "message": "No prediction data yet.", "predicted_wait_min": None, "horizon_min": None}
 
-        # If prediction is older than 2 hours treat as stale — don't alert
-        age_hours = (datetime.now(timezone.utc) - row["predicted_at"]).total_seconds() / 3600
-        if age_hours > 2:
-            wait = float(row["est_wait_minutes"] or 0)
-            return {"level": None, "message": f"Last prediction: {wait:.1f} min (data from {int(age_hours)}h ago)",
-                    "predicted_wait_min": round(wait, 1), "horizon_min": None}
-
-        wait = float(row["est_wait_minutes"] or 0)
-        horizon_min = None
-        if row["prediction_for"] and row["predicted_at"]:
-            delta = row["prediction_for"] - row["predicted_at"]
-            horizon_min = max(0, int(delta.total_seconds() / 60))
+        # Use wait_15m (15-min lookahead) for the alert threshold — same as dashboard.
+        # est_wait_minutes is the predicted wait for this slot; wait_15m is the
+        # 15-minute horizon from this slot, which is what the manager needs to act on.
+        wait = float(row["wait_15m"] or row["est_wait_minutes"] or 0)
 
         if wait > 10:
             level, message = "red",    f"Queue exceeding {wait:.0f} min — open a lane immediately."
         elif wait > 7:
-            level, message = "orange", f"Predicted {wait:.0f} min wait in {horizon_min or '?'} min. Open a lane soon."
+            level, message = "orange", f"Queue building to {wait:.0f} min in 15 min. Open a lane soon."
         elif wait > 5:
-            level, message = "yellow", f"Queue building: {wait:.0f} min predicted. Consider opening a lane."
+            level, message = "yellow", f"Queue may reach {wait:.0f} min. Consider opening a lane."
         else:
             level, message = None, f"Queue normal. Predicted wait: {wait:.1f} min."
 
@@ -194,7 +193,7 @@ def get_alerts():
             "level":              level,
             "message":            message,
             "predicted_wait_min": round(wait, 1),
-            "horizon_min":        horizon_min,
+            "horizon_min":        15,
         }
 
     except Exception as exc:
@@ -210,17 +209,23 @@ def forecast():
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Pull wait values for NOW/+5/+10/+15 directly in SQL using
-                # the DB's own NOW() — avoids Python/server timezone drift.
-                # Mirrors the same logic the Streamlit dashboard uses.
+                # Use DISTINCT ON (prediction_for) — same as the dashboard.
+                # MAX(predicted_at) was broken because pipeline.py writes single rows
+                # with a fresh predicted_at every run, so MAX always returned that one
+                # row instead of the full ensemble batch. DISTINCT ON picks the most
+                # recently generated prediction per slot, regardless of source.
                 cur.execute("""
-                    WITH latest AS (
-                        SELECT MAX(predicted_at) AS max_pa FROM queue_predictions
-                    ),
-                    preds AS (
-                        SELECT prediction_for, est_wait_minutes
-                        FROM queue_predictions, latest
-                        WHERE predicted_at = latest.max_pa
+                    WITH preds AS (
+                        SELECT DISTINCT ON (prediction_for)
+                            prediction_for,
+                            est_wait_minutes,
+                            wait_1lane_15m,
+                            wait_2lane_15m,
+                            wait_3lane_15m
+                        FROM queue_predictions
+                        WHERE prediction_for >= NOW() - INTERVAL '5 minutes'
+                          AND prediction_for <= NOW() + INTERVAL '20 minutes'
+                        ORDER BY prediction_for ASC, predicted_at DESC
                     )
                     SELECT
                         (SELECT est_wait_minutes FROM preds
@@ -234,7 +239,16 @@ def forecast():
                          LIMIT 1) AS wait_10,
                         (SELECT est_wait_minutes FROM preds
                          ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - (NOW() + INTERVAL '15 minutes'))))
-                         LIMIT 1) AS wait_15
+                         LIMIT 1) AS wait_15,
+                        (SELECT wait_1lane_15m FROM preds
+                         ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - NOW())))
+                         LIMIT 1) AS lane1_wait,
+                        (SELECT wait_2lane_15m FROM preds
+                         ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - NOW())))
+                         LIMIT 1) AS lane2_wait,
+                        (SELECT wait_3lane_15m FROM preds
+                         ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - NOW())))
+                         LIMIT 1) AS lane3_wait
                 """)
                 pred_row = cur.fetchone()
 
@@ -273,10 +287,19 @@ def forecast():
         wait_10  = _w(pred_row["wait_10"]  if pred_row else None)
         wait_15  = _w(pred_row["wait_15"]  if pred_row else None)
 
-        # Lane scenarios capped at 4 (max lanes available)
+        # Lane scenarios — use precomputed columns from ensemble_predict
+        # (wait_1lane_15m / wait_2lane_15m / wait_3lane_15m) which are produced
+        # by the same queue simulation the dashboard uses. For 4 lanes, scale from
+        # 3-lane value since ensemble only computes up to 3.
+        w1 = float(pred_row["lane1_wait"] or 0) if pred_row else 0.0
+        w2 = float(pred_row["lane2_wait"] or 0) if pred_row else 0.0
+        w3 = float(pred_row["lane3_wait"] or 0) if pred_row else 0.0
+        w4 = round(w3 * 0.75, 1) if w3 > 0 else 0.0
+        lane_waits = {1: w1, 2: w2, 3: w3, 4: w4}
+
         scenarios = []
         for n in range(1, 5):
-            estimated = round(wait_now * (current_lanes / n), 1) if wait_now > 0 else 0.0
+            estimated = lane_waits[n]
             if estimated > 10:
                 color = "red"
             elif estimated > 7:
