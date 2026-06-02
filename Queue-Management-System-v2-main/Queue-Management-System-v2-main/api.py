@@ -88,14 +88,21 @@ def live_lanes():
                 """)
                 lane_rows = cur.fetchall()
 
-                # Current total queue snapshot — use most recent regardless of age
+                # Aggregate latest snapshot across all real cameras.
+                # Previously used DISTINCT ON + LIMIT 1 which always picked the
+                # alphabetically-first camera (Bosch_Camera_Entrance) instead of
+                # the checkout/Head-Detector camera (Bosch_Camera_exit).
                 cur.execute("""
-                    SELECT DISTINCT ON (camera_id)
-                        queue_count, avg_dwell_sec
-                    FROM queue_state_snapshots
-                    WHERE camera_id NOT LIKE 'SIM_%%'
-                    ORDER BY camera_id, timestamp DESC
-                    LIMIT 1
+                    SELECT
+                        COALESCE(SUM(queue_count), 0)  AS queue_count,
+                        MAX(avg_dwell_sec)             AS avg_dwell_sec
+                    FROM (
+                        SELECT DISTINCT ON (camera_id)
+                            queue_count, avg_dwell_sec
+                        FROM queue_state_snapshots
+                        WHERE camera_id NOT LIKE 'SIM_%%'
+                        ORDER BY camera_id, timestamp DESC
+                    ) latest_per_camera
                 """)
                 snap = cur.fetchone()
                 total_queue = int(snap["queue_count"] or 0) if snap else 0
@@ -203,13 +210,15 @@ def forecast():
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Get the most recent batch that has non-zero predictions
+                # Get the most recent prediction batch unconditionally.
+                # Previously filtered WHERE est_wait_minutes > 0, which meant
+                # a legitimately-quiet queue (all-zero predictions) caused the
+                # API to fall back to an old non-zero batch from hours ago.
                 cur.execute("""
                     SELECT est_wait_minutes, prediction_for, predicted_at
                     FROM queue_predictions
                     WHERE predicted_at = (
                         SELECT predicted_at FROM queue_predictions
-                        WHERE est_wait_minutes > 0
                         ORDER BY predicted_at DESC LIMIT 1
                     )
                     ORDER BY prediction_for ASC
@@ -227,6 +236,26 @@ def forecast():
                 lane_row = cur.fetchone()
                 current_lanes = max(int(lane_row["active_lanes"] or 1), 1) if lane_row else 1
 
+                # Live snapshot for the NOW tile — same multi-camera fix as /live-lanes
+                cur.execute("""
+                    SELECT
+                        COALESCE(SUM(queue_count), 0)  AS queue_count,
+                        MAX(avg_dwell_sec)             AS avg_dwell_sec
+                    FROM (
+                        SELECT DISTINCT ON (camera_id)
+                            queue_count, avg_dwell_sec
+                        FROM queue_state_snapshots
+                        WHERE camera_id NOT LIKE 'SIM_%%'
+                        ORDER BY camera_id, timestamp DESC
+                    ) latest_per_camera
+                """)
+                live_snap = cur.fetchone()
+
+        # Use live snapshot avg_dwell for the NOW wait (current actual wait);
+        # fall back to prediction batch if snapshot is unavailable.
+        live_avg_dwell = float((live_snap or {}).get("avg_dwell_sec") or 0)
+        wait_now_live  = round(live_avg_dwell / 60, 1)
+
         # Use the prediction_for timestamps relative to when they were generated
         base_time = predictions[0]["predicted_at"] if predictions else datetime.now(timezone.utc)
 
@@ -237,7 +266,7 @@ def forecast():
             closest = min(predictions, key=lambda r: abs((r["prediction_for"] - target_time).total_seconds()))
             return round(float(closest["est_wait_minutes"] or 0), 1)
 
-        wait_now = closest_wait(0) or 0.0
+        wait_now = wait_now_live if live_avg_dwell > 0 else (closest_wait(0) or 0.0)
         wait_5   = closest_wait(5)
         wait_10  = closest_wait(10)
         wait_15  = closest_wait(15)

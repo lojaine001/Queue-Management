@@ -480,9 +480,16 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     _conn_snap = psycopg2.connect(**DB_CONFIG)
     try:
         snap_latest = pd.read_sql("""
-            SELECT timestamp, queue_count, active_lanes
-            FROM queue_state_snapshots
-            ORDER BY timestamp DESC LIMIT 1
+            SELECT NOW() AS timestamp,
+                   COALESCE(SUM(queue_count), 0) AS queue_count,
+                   MAX(active_lanes)             AS active_lanes
+            FROM (
+                SELECT DISTINCT ON (camera_id)
+                    queue_count, active_lanes
+                FROM queue_state_snapshots
+                WHERE camera_id NOT LIKE 'SIM_%%'
+                ORDER BY camera_id, timestamp DESC
+            ) latest_per_camera
         """, _conn_snap)
     finally:
         _conn_snap.close()
