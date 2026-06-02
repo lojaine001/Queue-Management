@@ -73,14 +73,14 @@ def live_lanes():
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Recent activity per lane (last 20 min)
+                # Recent activity per lane — use last 2 hours as fallback
                 cur.execute("""
                     SELECT
                         lane_id,
                         COUNT(*)                                    AS recent_checkouts,
                         ROUND(AVG(total_dwell_sec) / 60.0, 1)      AS avg_wait_min
                     FROM service_events
-                    WHERE timestamp >= NOW() - INTERVAL '20 minutes'
+                    WHERE timestamp >= NOW() - INTERVAL '2 hours'
                       AND camera_id NOT LIKE 'SIM_%%'
                       AND lane_id IS NOT NULL
                     GROUP BY lane_id
@@ -88,13 +88,12 @@ def live_lanes():
                 """)
                 lane_rows = cur.fetchall()
 
-                # Current total queue snapshot
+                # Current total queue snapshot — use most recent regardless of age
                 cur.execute("""
                     SELECT DISTINCT ON (camera_id)
                         queue_count, avg_dwell_sec
                     FROM queue_state_snapshots
                     WHERE camera_id NOT LIKE 'SIM_%%'
-                      AND timestamp >= NOW() - INTERVAL '5 minutes'
                     ORDER BY camera_id, timestamp DESC
                     LIMIT 1
                 """)
@@ -162,6 +161,13 @@ def get_alerts():
         if not row:
             return {"level": None, "message": "No prediction data yet.", "predicted_wait_min": None, "horizon_min": None}
 
+        # If prediction is older than 2 hours treat as stale — don't alert
+        age_hours = (datetime.now(timezone.utc) - row["predicted_at"]).total_seconds() / 3600
+        if age_hours > 2:
+            wait = float(row["est_wait_minutes"] or 0)
+            return {"level": None, "message": f"Last prediction: {wait:.1f} min (data from {int(age_hours)}h ago)",
+                    "predicted_wait_min": round(wait, 1), "horizon_min": None}
+
         wait = float(row["est_wait_minutes"] or 0)
         horizon_min = None
         if row["prediction_for"] and row["predicted_at"]:
@@ -191,44 +197,43 @@ def get_alerts():
 @app.get("/forecast")
 def forecast():
     """
-    Returns predicted wait at +15 and +30 min, plus lane scenarios.
+    Returns predicted wait at +5/+10/+15 min, plus lane scenarios.
+    Uses the most recent prediction batch regardless of age.
     """
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                now = datetime.now(timezone.utc)
-
-                # Get predictions for the next 60 min
+                # Get the most recent prediction batch (latest predicted_at)
                 cur.execute("""
-                    SELECT DISTINCT ON (DATE_TRUNC('minute', prediction_for))
-                        prediction_for,
-                        est_wait_minutes,
-                        predicted_at
+                    SELECT est_wait_minutes, prediction_for, predicted_at
                     FROM queue_predictions
-                    WHERE prediction_for BETWEEN NOW() AND NOW() + INTERVAL '65 minutes'
-                    ORDER BY DATE_TRUNC('minute', prediction_for), predicted_at DESC
+                    WHERE predicted_at = (SELECT MAX(predicted_at) FROM queue_predictions)
+                    ORDER BY prediction_for ASC
                 """)
                 predictions = cur.fetchall()
 
-                # Current active lanes
+                # Current active lanes — fall back to last 4 hours if nothing recent
                 cur.execute("""
                     SELECT COUNT(DISTINCT lane_id) AS active_lanes
                     FROM service_events
-                    WHERE timestamp >= NOW() - INTERVAL '20 minutes'
+                    WHERE timestamp >= NOW() - INTERVAL '4 hours'
                       AND camera_id NOT LIKE 'SIM_%%'
                       AND lane_id IS NOT NULL
                 """)
                 lane_row = cur.fetchone()
                 current_lanes = max(int(lane_row["active_lanes"] or 1), 1) if lane_row else 1
 
+        # Use the prediction_for timestamps relative to when they were generated
+        base_time = predictions[0]["predicted_at"] if predictions else datetime.now(timezone.utc)
+
         def closest_wait(target_min: int) -> Optional[float]:
-            target_time = now + timedelta(minutes=target_min)
             if not predictions:
                 return None
+            target_time = base_time + timedelta(minutes=target_min)
             closest = min(predictions, key=lambda r: abs((r["prediction_for"] - target_time).total_seconds()))
             return round(float(closest["est_wait_minutes"] or 0), 1)
 
-        wait_now = closest_wait(0)  or 0.0
+        wait_now = closest_wait(0) or 0.0
         wait_5   = closest_wait(5)
         wait_10  = closest_wait(10)
         wait_15  = closest_wait(15)
