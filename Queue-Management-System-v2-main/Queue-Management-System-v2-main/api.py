@@ -210,20 +210,33 @@ def forecast():
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Get the most recent prediction batch unconditionally.
-                # Previously filtered WHERE est_wait_minutes > 0, which meant
-                # a legitimately-quiet queue (all-zero predictions) caused the
-                # API to fall back to an old non-zero batch from hours ago.
+                # Pull wait values for NOW/+5/+10/+15 directly in SQL using
+                # the DB's own NOW() — avoids Python/server timezone drift.
+                # Mirrors the same logic the Streamlit dashboard uses.
                 cur.execute("""
-                    SELECT est_wait_minutes, prediction_for, predicted_at
-                    FROM queue_predictions
-                    WHERE predicted_at = (
-                        SELECT predicted_at FROM queue_predictions
-                        ORDER BY predicted_at DESC LIMIT 1
+                    WITH latest AS (
+                        SELECT MAX(predicted_at) AS max_pa FROM queue_predictions
+                    ),
+                    preds AS (
+                        SELECT prediction_for, est_wait_minutes
+                        FROM queue_predictions, latest
+                        WHERE predicted_at = latest.max_pa
                     )
-                    ORDER BY prediction_for ASC
+                    SELECT
+                        (SELECT est_wait_minutes FROM preds
+                         ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - NOW())))
+                         LIMIT 1) AS wait_now,
+                        (SELECT est_wait_minutes FROM preds
+                         ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - (NOW() + INTERVAL '5 minutes'))))
+                         LIMIT 1) AS wait_5,
+                        (SELECT est_wait_minutes FROM preds
+                         ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - (NOW() + INTERVAL '10 minutes'))))
+                         LIMIT 1) AS wait_10,
+                        (SELECT est_wait_minutes FROM preds
+                         ORDER BY ABS(EXTRACT(EPOCH FROM (prediction_for - (NOW() + INTERVAL '15 minutes'))))
+                         LIMIT 1) AS wait_15
                 """)
-                predictions = cur.fetchall()
+                pred_row = cur.fetchone()
 
                 # Current active lanes — fall back to last 4 hours if nothing recent
                 cur.execute("""
@@ -236,14 +249,12 @@ def forecast():
                 lane_row = cur.fetchone()
                 current_lanes = max(int(lane_row["active_lanes"] or 1), 1) if lane_row else 1
 
-                # Live snapshot for the NOW tile — same multi-camera fix as /live-lanes
+                # Live snapshot for the NOW tile
                 cur.execute("""
-                    SELECT
-                        COALESCE(SUM(queue_count), 0)  AS queue_count,
-                        MAX(avg_dwell_sec)             AS avg_dwell_sec
+                    SELECT MAX(avg_dwell_sec) AS avg_dwell_sec
                     FROM (
                         SELECT DISTINCT ON (camera_id)
-                            queue_count, avg_dwell_sec
+                            avg_dwell_sec
                         FROM queue_state_snapshots
                         WHERE camera_id NOT LIKE 'SIM_%%'
                         ORDER BY camera_id, timestamp DESC
@@ -251,31 +262,16 @@ def forecast():
                 """)
                 live_snap = cur.fetchone()
 
-        # Use live snapshot avg_dwell for the NOW wait (current actual wait);
-        # fall back to prediction batch if snapshot is unavailable.
         live_avg_dwell = float((live_snap or {}).get("avg_dwell_sec") or 0)
-        wait_now_live  = round(live_avg_dwell / 60, 1)
 
-        # Use NOW as the reference so +5/+10/+15 look at future prediction slots,
-        # not slots relative to when the batch was generated (which may be in the past).
-        now_utc = datetime.now(timezone.utc)
+        def _w(val) -> Optional[float]:
+            return round(float(val), 1) if val is not None else None
 
-        def closest_wait(target_min: int) -> Optional[float]:
-            if not predictions:
-                return None
-            target_time = now_utc + timedelta(minutes=target_min)
-            def _delta(r):
-                pf = r["prediction_for"]
-                if pf.tzinfo is None:
-                    pf = pf.replace(tzinfo=timezone.utc)
-                return abs((pf - target_time).total_seconds())
-            closest = min(predictions, key=_delta)
-            return round(float(closest["est_wait_minutes"] or 0), 1)
-
-        wait_now = wait_now_live if live_avg_dwell > 0 else (closest_wait(0) or 0.0)
-        wait_5   = closest_wait(5)
-        wait_10  = closest_wait(10)
-        wait_15  = closest_wait(15)
+        # NOW: prefer live snapshot (seconds-old) over prediction batch (minutes-old)
+        wait_now = round(live_avg_dwell / 60, 1) if live_avg_dwell > 0 else (_w(pred_row["wait_now"] if pred_row else None) or 0.0)
+        wait_5   = _w(pred_row["wait_5"]   if pred_row else None)
+        wait_10  = _w(pred_row["wait_10"]  if pred_row else None)
+        wait_15  = _w(pred_row["wait_15"]  if pred_row else None)
 
         # Lane scenarios capped at 4 (max lanes available)
         scenarios = []
