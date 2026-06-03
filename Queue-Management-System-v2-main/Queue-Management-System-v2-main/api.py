@@ -146,41 +146,29 @@ def live_lanes():
 
 @app.get("/alerts")
 def get_alerts():
-    """Returns the current alert level based on the latest queue_predictions."""
+    """Returns the current alert level using dashboard_state (same source as forecast tab)."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Use DISTINCT ON to get the best (most recently generated) prediction
-                # for the next upcoming slot. Avoids the pipeline.py single-row problem:
-                # pipeline.py writes one row per call with a very fresh predicted_at,
-                # so ORDER BY predicted_at DESC LIMIT 1 always returned that one row
-                # whose est_wait_minutes = wait_15m (a far-future peak value ≈ 25 min).
                 cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        est_wait_minutes, wait_15m, prediction_for, predicted_at
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW()
-                    ORDER BY prediction_for ASC, predicted_at DESC
-                    LIMIT 1
+                    SELECT wait_15m, updated_at
+                    FROM dashboard_state WHERE id = 1
                 """)
-                row = cur.fetchone()
+                state = cur.fetchone()
 
-        if not row:
-            return {"level": None, "message": "No prediction data yet.", "predicted_wait_min": None, "horizon_min": None}
+        if not state or state["wait_15m"] is None:
+            return {"level": None, "message": "No forecast data yet.", "predicted_wait_min": None, "horizon_min": 15}
 
-        # Use wait_15m (15-min lookahead) for the alert threshold — same as dashboard.
-        # est_wait_minutes is the predicted wait for this slot; wait_15m is the
-        # 15-minute horizon from this slot, which is what the manager needs to act on.
-        wait = float(row["wait_15m"] or row["est_wait_minutes"] or 0)
+        wait = float(state["wait_15m"])
 
         if wait > 10:
-            level, message = "red",    f"Queue exceeding {wait:.0f} min — open a lane immediately."
+            level, message = "red",    f"Queue exceeding {wait:.0f} min in 15 min — open a lane immediately."
         elif wait > 7:
-            level, message = "orange", f"Queue building to {wait:.0f} min in 15 min. Open a lane soon."
+            level, message = "orange", f"Queue building to {wait:.0f} min in 15 min — open a lane soon."
         elif wait > 5:
-            level, message = "yellow", f"Queue may reach {wait:.0f} min. Consider opening a lane."
+            level, message = "yellow", f"Queue may reach {wait:.0f} min — consider opening a lane."
         else:
-            level, message = None, f"Queue normal. Predicted wait: {wait:.1f} min."
+            level, message = None,     f"Queue normal. Expected wait in 15 min: {wait:.1f} min."
 
         return {
             "level":              level,
