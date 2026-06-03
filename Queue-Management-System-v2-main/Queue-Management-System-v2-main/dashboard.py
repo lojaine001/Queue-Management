@@ -1694,6 +1694,65 @@ if not pred_df.empty:
             "wait_45m": _wait_45,
         }
 
+# ── Write computed state for the mobile app API to consume ───────────────────
+# The API reads this table directly so the app always shows the exact same
+# values as the dashboard without needing to replicate the simulation logic.
+try:
+    with _conn() as _sc:
+        _scc = _sc.cursor()
+        _scc.execute("""
+            CREATE TABLE IF NOT EXISTS dashboard_state (
+                id             INTEGER PRIMARY KEY DEFAULT 1,
+                updated_at     TIMESTAMPTZ DEFAULT NOW(),
+                queue_now      INTEGER,
+                service_min    FLOAT,
+                wait_0m        FLOAT,
+                wait_5m        FLOAT,
+                wait_10m       FLOAT,
+                wait_15m       FLOAT,
+                lane1_wait_15m FLOAT,
+                lane2_wait_15m FLOAT,
+                lane3_wait_15m FLOAT,
+                lane4_wait_15m FLOAT,
+                open_lanes     INTEGER
+            )
+        """)
+        def _rv(v): return round(float(v), 2) if v is not None and v == v else None
+        _scc.execute("""
+            INSERT INTO dashboard_state
+                (id, updated_at, queue_now, service_min,
+                 wait_0m, wait_5m, wait_10m, wait_15m,
+                 lane1_wait_15m, lane2_wait_15m, lane3_wait_15m, lane4_wait_15m,
+                 open_lanes)
+            VALUES (1, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                updated_at     = NOW(),
+                queue_now      = EXCLUDED.queue_now,
+                service_min    = EXCLUDED.service_min,
+                wait_0m        = EXCLUDED.wait_0m,
+                wait_5m        = EXCLUDED.wait_5m,
+                wait_10m       = EXCLUDED.wait_10m,
+                wait_15m       = EXCLUDED.wait_15m,
+                lane1_wait_15m = EXCLUDED.lane1_wait_15m,
+                lane2_wait_15m = EXCLUDED.lane2_wait_15m,
+                lane3_wait_15m = EXCLUDED.lane3_wait_15m,
+                lane4_wait_15m = EXCLUDED.lane4_wait_15m,
+                open_lanes     = EXCLUDED.open_lanes
+        """, (
+            int(queue_count),
+            _rv(service_minutes),
+            _rv(wait_0m), _rv(wait_5m), _rv(wait_10m), _rv(wait_15m),
+            _rv(lane_waits.get(1, {}).get("wait_15m")),
+            _rv(lane_waits.get(2, {}).get("wait_15m")),
+            _rv(lane_waits.get(3, {}).get("wait_15m")),
+            _rv(lane_waits.get(4, {}).get("wait_15m")),
+            int(selected_lanes),
+        ))
+        _sc.commit()
+        _scc.close()
+except Exception:
+    pass  # never crash the dashboard because of a state write failure
+
 entries_last_hr = entries_delta[0] if entries_delta else 0
 entries_prev_hr = entries_delta[1] if entries_delta else 0
 entries_diff = entries_last_hr - entries_prev_hr

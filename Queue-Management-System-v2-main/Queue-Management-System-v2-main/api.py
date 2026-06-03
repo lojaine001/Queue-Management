@@ -88,21 +88,14 @@ def live_lanes():
                 """)
                 lane_rows = cur.fetchall()
 
-                # Aggregate latest snapshot across all real cameras.
-                # Previously used DISTINCT ON + LIMIT 1 which always picked the
-                # alphabetically-first camera (Bosch_Camera_Entrance) instead of
-                # the checkout/Head-Detector camera (Bosch_Camera_exit).
+                # Read queue count and avg wait from dashboard_state — these are
+                # the exact values the dashboard computes and displays, so the
+                # app snapshot matches the dashboard perfectly.
                 cur.execute("""
-                    SELECT
-                        COALESCE(SUM(queue_count), 0)  AS queue_count,
-                        MAX(avg_dwell_sec)             AS avg_dwell_sec
-                    FROM (
-                        SELECT DISTINCT ON (camera_id)
-                            queue_count, avg_dwell_sec
-                        FROM queue_state_snapshots
-                        WHERE camera_id NOT LIKE 'SIM_%%'
-                        ORDER BY camera_id, timestamp DESC
-                    ) latest_per_camera
+                    SELECT queue_now AS queue_count,
+                           service_min * 60 AS avg_dwell_sec,
+                           open_lanes
+                    FROM dashboard_state WHERE id = 1
                 """)
                 snap = cur.fetchone()
                 total_queue = int(snap["queue_count"] or 0) if snap else 0
@@ -203,119 +196,45 @@ def get_alerts():
 @app.get("/forecast")
 def forecast():
     """
-    Returns predicted wait at NOW/+5/+10/+15 min, plus lane scenarios.
-    Re-simulates the queue on every call (like the dashboard does) so values
-    are always based on current state, not stale est_wait_minutes from the DB.
+    Reads the pre-computed values that the dashboard already calculates and
+    writes to dashboard_state on every refresh. This guarantees the app shows
+    exactly the same numbers as the dashboard — no separate computation needed.
     """
-    BUCKET_MIN = 3  # ensemble model bucket size in minutes
-
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-
-                # 1. Live queue snapshot
                 cur.execute("""
-                    SELECT
-                        COALESCE(SUM(queue_count), 0) AS queue_count,
-                        MAX(avg_dwell_sec)            AS avg_dwell_sec
-                    FROM (
-                        SELECT DISTINCT ON (camera_id)
-                            queue_count, avg_dwell_sec
-                        FROM queue_state_snapshots
-                        WHERE camera_id NOT LIKE 'SIM_%%'
-                        ORDER BY camera_id, timestamp DESC
-                    ) latest_per_camera
+                    SELECT queue_now, service_min,
+                           wait_0m, wait_5m, wait_10m, wait_15m,
+                           lane1_wait_15m, lane2_wait_15m, lane3_wait_15m, lane4_wait_15m,
+                           open_lanes, updated_at
+                    FROM dashboard_state
+                    WHERE id = 1
                 """)
-                live_snap = cur.fetchone()
-                total_queue  = int((live_snap or {}).get("queue_count") or 0)
-                live_avg_sec = float((live_snap or {}).get("avg_dwell_sec") or 0)
+                state = cur.fetchone()
 
-                # 2. Median service time from recent service_events (same as dashboard)
-                cur.execute("""
-                    SELECT COALESCE(
-                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total_dwell_sec / 60.0),
-                        2.0
-                    ) AS service_min
-                    FROM service_events
-                    WHERE timestamp >= NOW() - INTERVAL '7 days'
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND total_dwell_sec > 0
-                """)
-                svc = cur.fetchone()
-                service_min = max(0.5, float((svc or {}).get("service_min") or 2.0))
+        def _f(v): return round(float(v), 1) if v is not None else None
 
-                # 3. Current open lanes
-                cur.execute("""
-                    SELECT COUNT(DISTINCT lane_id) AS active_lanes
-                    FROM service_events
-                    WHERE timestamp >= NOW() - INTERVAL '4 hours'
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND lane_id IS NOT NULL
-                """)
-                lane_row = cur.fetchone()
-                current_lanes = max(int((lane_row or {}).get("active_lanes") or 1), 1)
+        if not state:
+            # dashboard_state not populated yet — dashboard hasn't run since last restart
+            return {
+                "wait_now_min": None, "wait_5_min": None,
+                "wait_10_min": None, "wait_15_min": None,
+                "current_lanes": 1, "lane_scenarios": [],
+            }
 
-                # 4. Predicted future arrivals + precomputed lane-scenario waits.
-                #    DISTINCT ON picks the best prediction per slot (same as dashboard).
-                cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0) AS arrivals,
-                        wait_1lane_15m,
-                        wait_2lane_15m,
-                        wait_3lane_15m
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW()
-                      AND prediction_for <= NOW() + INTERVAL '20 minutes'
-                    ORDER BY prediction_for ASC, predicted_at DESC
-                """)
-                pred_rows = cur.fetchall()
+        current_lanes = int(state["open_lanes"] or 1)
+        wait_now = _f(state["wait_0m"])
+        wait_5   = _f(state["wait_5m"])
+        wait_10  = _f(state["wait_10m"])
+        wait_15  = _f(state["wait_15m"])
 
-        # ── Queue simulation (mirrors dashboard's _compute_waits_for_lanes) ──────
-        # Capacity: how many customers each lane serves per BUCKET_MIN window
-        served_per_bucket = current_lanes * (BUCKET_MIN / service_min)
-
-        # Use backlog (people waiting, not yet being served) as the dashboard does:
-        # queue_count - open_lanes = people waiting; those being served don't add wait.
-        queue = max(0.0, float(total_queue) - float(current_lanes))
-        now_utc = datetime.now(timezone.utc)
-        sim_results: dict[int, float] = {}
-
-        for row in pred_rows:
-            pf = row["prediction_for"]
-            if pf.tzinfo is None:
-                pf = pf.replace(tzinfo=timezone.utc)
-            slot_min = (pf - now_utc).total_seconds() / 60
-            if slot_min < 0:
-                continue
-
-            arrivals = float(row["arrivals"] or 0)
-            queue = max(0.0, queue + arrivals - served_per_bucket)
-            wait = round((queue / current_lanes) * service_min, 1) if current_lanes > 0 and queue > 0 else 0.0
-
-            for target in (5, 10, 15):
-                if slot_min >= target and target not in sim_results:
-                    sim_results[target] = wait
-
-        # Fallback: no DB predictions — decay from current state
-        if not sim_results and total_queue > 0:
-            for target in (5, 10, 15):
-                remaining = max(0.0, total_queue - target * current_lanes / service_min)
-                sim_results[target] = round((remaining / current_lanes) * service_min, 1) if remaining > 0 else 0.0
-
-        wait_now = round(live_avg_sec / 60, 1) if live_avg_sec > 0 else 0.0
-        wait_5   = sim_results.get(5)
-        wait_10  = sim_results.get(10)
-        wait_15  = sim_results.get(15)
-
-        # Lane scenarios from precomputed ensemble columns (15-min horizon per N lanes).
-        # 4-lane value scaled from 3-lane since ensemble only computes up to 3.
-        base = pred_rows[0] if pred_rows else None
-        w1 = round(float(base["wait_1lane_15m"] or 0), 1) if base else 0.0
-        w2 = round(float(base["wait_2lane_15m"] or 0), 1) if base else 0.0
-        w3 = round(float(base["wait_3lane_15m"] or 0), 1) if base else 0.0
-        w4 = round(w3 * 0.75, 1) if w3 > 0 else 0.0
-        lane_waits = {1: w1, 2: w2, 3: w3, 4: w4}
+        lane_waits = {
+            1: _f(state["lane1_wait_15m"]) or 0.0,
+            2: _f(state["lane2_wait_15m"]) or 0.0,
+            3: _f(state["lane3_wait_15m"]) or 0.0,
+            4: _f(state["lane4_wait_15m"]) or 0.0,
+        }
 
         scenarios = []
         for n in range(1, 5):
