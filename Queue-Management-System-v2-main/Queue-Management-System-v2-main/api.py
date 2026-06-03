@@ -275,7 +275,9 @@ def forecast():
         # Capacity: how many customers each lane serves per BUCKET_MIN window
         served_per_bucket = current_lanes * (BUCKET_MIN / service_min)
 
-        queue = float(total_queue)
+        # Use backlog (people waiting, not yet being served) as the dashboard does:
+        # queue_count - open_lanes = people waiting; those being served don't add wait.
+        queue = max(0.0, float(total_queue) - float(current_lanes))
         now_utc = datetime.now(timezone.utc)
         sim_results: dict[int, float] = {}
 
