@@ -314,6 +314,35 @@ def day_recap():
                 """)
                 equip_rows = cur.fetchall()
 
+                # Gender breakdown
+                cur.execute(f"""
+                    SELECT LOWER(gender) AS gender, COUNT(*) AS cnt
+                    FROM entrance_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND gender IS NOT NULL
+                    GROUP BY LOWER(gender)
+                """)
+                gender_rows = cur.fetchall()
+
+                # Age group breakdown (matches dashboard: <30, 30-50, 50+)
+                cur.execute(f"""
+                    SELECT
+                        CASE
+                            WHEN age_estimate < 30 THEN '18-30'
+                            WHEN age_estimate < 50 THEN '30-50'
+                            ELSE '50+'
+                        END AS age_group,
+                        COUNT(*) AS cnt
+                    FROM entrance_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND age_estimate IS NOT NULL
+                    GROUP BY 1
+                    ORDER BY MIN(age_estimate)
+                """)
+                age_rows = cur.fetchall()
+
         equip_total = sum(int(r["cnt"]) for r in equip_rows) or 1
         equipment = []
         order = ["trolley", "store_basket", "personal_bag"]
@@ -330,14 +359,46 @@ def day_recap():
                 "color":   colors[key],
             })
 
+        # Gender
+        gender_total = sum(int(r["cnt"]) for r in gender_rows) or 1
+        gender_colors = {"male": "#2563eb", "female": "#db2777", "unknown": "#94a3b8"}
+        gender_labels = {"male": "Male", "female": "Female", "unknown": "Unknown"}
+        demographics_gender = []
+        for key in ["male", "female", "unknown"]:
+            row = next((r for r in gender_rows if r["gender"] == key), None)
+            count = int(row["cnt"]) if row else 0
+            if count > 0:
+                demographics_gender.append({
+                    "key":     key,
+                    "label":   gender_labels[key],
+                    "count":   count,
+                    "percent": round(count / gender_total * 100),
+                    "color":   gender_colors[key],
+                })
+
+        # Age groups
+        age_total = sum(int(r["cnt"]) for r in age_rows) or 1
+        age_colors = {"18-30": "#f97316", "30-50": "#3fb950", "50+": "#58a6ff"}
+        demographics_age = [
+            {
+                "group":   r["age_group"],
+                "count":   int(r["cnt"]),
+                "percent": round(int(r["cnt"]) / age_total * 100),
+                "color":   age_colors.get(r["age_group"], "#8b949e"),
+            }
+            for r in age_rows
+        ]
+
         return {
-            "date":            display_date,
-            "total_customers": total,
-            "avg_wait_min":    avg_wait_min,
-            "peak_hour":       peak_hour,
-            "peak_hour_end":   peak_end,
-            "peak_count":      peak_count,
-            "equipment":       equipment,
+            "date":               display_date,
+            "total_customers":    total,
+            "avg_wait_min":       avg_wait_min,
+            "peak_hour":          peak_hour,
+            "peak_hour_end":      peak_end,
+            "peak_count":         peak_count,
+            "equipment":          equipment,
+            "demographics_gender": demographics_gender,
+            "demographics_age":    demographics_age,
         }
 
     except Exception as exc:
