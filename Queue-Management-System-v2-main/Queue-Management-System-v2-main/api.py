@@ -325,6 +325,19 @@ def day_recap():
                 """)
                 gender_rows = cur.fetchall()
 
+                # Entries by hour (for traffic pattern chart)
+                cur.execute(f"""
+                    SELECT
+                        EXTRACT(HOUR FROM timestamp)::int AS hour,
+                        COUNT(*) AS cnt
+                    FROM entrance_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                    GROUP BY 1
+                    ORDER BY 1
+                """)
+                hourly_rows = cur.fetchall()
+
                 # Age group breakdown (matches dashboard: <30, 30-50, 50+)
                 cur.execute(f"""
                     SELECT
@@ -389,6 +402,12 @@ def day_recap():
             for r in age_rows
         ]
 
+        # Entries by hour — find peak for highlighting
+        hourly = [{"hour": f"{r['hour']:02d}:00", "count": int(r["cnt"])} for r in hourly_rows]
+        peak_cnt = max((h["count"] for h in hourly), default=0)
+        for h in hourly:
+            h["is_peak"] = h["count"] == peak_cnt and peak_cnt > 0
+
         return {
             "date":               display_date,
             "total_customers":    total,
@@ -399,6 +418,7 @@ def day_recap():
             "equipment":          equipment,
             "demographics_gender": demographics_gender,
             "demographics_age":    demographics_age,
+            "entries_by_hour":    hourly,
         }
 
     except Exception as exc:
