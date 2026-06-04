@@ -314,47 +314,13 @@ def day_recap():
                 """)
                 equip_rows = cur.fetchall()
 
-                # Gender breakdown
-                cur.execute(f"""
-                    SELECT LOWER(gender) AS gender, COUNT(*) AS cnt
-                    FROM entrance_events
-                    WHERE {date_filter}
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND gender IS NOT NULL
-                    GROUP BY LOWER(gender)
+                # Demographics and hourly entries read from dashboard_state
+                # so values match the dashboard exactly.
+                cur.execute("""
+                    SELECT demographics_json, entries_hour_json
+                    FROM dashboard_state WHERE id = 1
                 """)
-                gender_rows = cur.fetchall()
-
-                # Entries by hour (for traffic pattern chart)
-                cur.execute(f"""
-                    SELECT
-                        EXTRACT(HOUR FROM timestamp)::int AS hour,
-                        COUNT(*) AS cnt
-                    FROM entrance_events
-                    WHERE {date_filter}
-                      AND camera_id NOT LIKE 'SIM_%%'
-                    GROUP BY 1
-                    ORDER BY 1
-                """)
-                hourly_rows = cur.fetchall()
-
-                # Age group breakdown (matches dashboard: <30, 30-50, 50+)
-                cur.execute(f"""
-                    SELECT
-                        CASE
-                            WHEN age_estimate < 30 THEN '18-30'
-                            WHEN age_estimate < 50 THEN '30-50'
-                            ELSE '50+'
-                        END AS age_group,
-                        COUNT(*) AS cnt
-                    FROM entrance_events
-                    WHERE {date_filter}
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND age_estimate IS NOT NULL
-                    GROUP BY 1
-                    ORDER BY MIN(age_estimate)
-                """)
-                age_rows = cur.fetchall()
+                ds_row = cur.fetchone()
 
         equip_total = sum(int(r["cnt"]) for r in equip_rows) or 1
         equipment = []
@@ -372,53 +338,22 @@ def day_recap():
                 "color":   colors[key],
             })
 
-        # Gender
-        gender_total = sum(int(r["cnt"]) for r in gender_rows) or 1
-        gender_colors = {"male": "#2563eb", "female": "#db2777", "unknown": "#94a3b8"}
-        gender_labels = {"male": "Male", "female": "Female", "unknown": "Unknown"}
-        demographics_gender = []
-        for key in ["male", "female", "unknown"]:
-            row = next((r for r in gender_rows if r["gender"] == key), None)
-            count = int(row["cnt"]) if row else 0
-            if count > 0:
-                demographics_gender.append({
-                    "key":     key,
-                    "label":   gender_labels[key],
-                    "count":   count,
-                    "percent": round(count / gender_total * 100),
-                    "color":   gender_colors[key],
-                })
-
-        # Age groups
-        age_total = sum(int(r["cnt"]) for r in age_rows) or 1
-        age_colors = {"18-30": "#f97316", "30-50": "#3fb950", "50+": "#58a6ff"}
-        demographics_age = [
-            {
-                "group":   r["age_group"],
-                "count":   int(r["cnt"]),
-                "percent": round(int(r["cnt"]) / age_total * 100),
-                "color":   age_colors.get(r["age_group"], "#8b949e"),
-            }
-            for r in age_rows
-        ]
-
-        # Entries by hour — find peak for highlighting
-        hourly = [{"hour": f"{r['hour']:02d}:00", "count": int(r["cnt"])} for r in hourly_rows]
-        peak_cnt = max((h["count"] for h in hourly), default=0)
-        for h in hourly:
-            h["is_peak"] = h["count"] == peak_cnt and peak_cnt > 0
+        # Demographics and hourly from dashboard_state (exact match with dashboard)
+        import json as _json
+        _demo      = _json.loads(ds_row["demographics_json"])   if ds_row and ds_row["demographics_json"]   else {}
+        _hourly    = _json.loads(ds_row["entries_hour_json"])   if ds_row and ds_row["entries_hour_json"]   else []
 
         return {
-            "date":               display_date,
-            "total_customers":    total,
-            "avg_wait_min":       avg_wait_min,
-            "peak_hour":          peak_hour,
-            "peak_hour_end":      peak_end,
-            "peak_count":         peak_count,
-            "equipment":          equipment,
-            "demographics_gender": demographics_gender,
-            "demographics_age":    demographics_age,
-            "entries_by_hour":    hourly,
+            "date":                display_date,
+            "total_customers":     total,
+            "avg_wait_min":        avg_wait_min,
+            "peak_hour":           peak_hour,
+            "peak_hour_end":       peak_end,
+            "peak_count":          peak_count,
+            "equipment":           equipment,
+            "demographics_gender": _demo.get("gender", []),
+            "demographics_age":    _demo.get("age",    []),
+            "entries_by_hour":     _hourly,
         }
 
     except Exception as exc:

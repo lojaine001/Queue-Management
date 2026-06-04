@@ -1698,46 +1698,103 @@ if not pred_df.empty:
 # The API reads this table directly so the app always shows the exact same
 # values as the dashboard without needing to replicate the simulation logic.
 try:
+    import json as _json
     with _conn() as _sc:
         _scc = _sc.cursor()
         _scc.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_state (
-                id             INTEGER PRIMARY KEY DEFAULT 1,
-                updated_at     TIMESTAMPTZ DEFAULT NOW(),
-                queue_now      INTEGER,
-                service_min    FLOAT,
-                wait_0m        FLOAT,
-                wait_5m        FLOAT,
-                wait_10m       FLOAT,
-                wait_15m       FLOAT,
-                lane1_wait_15m FLOAT,
-                lane2_wait_15m FLOAT,
-                lane3_wait_15m FLOAT,
-                lane4_wait_15m FLOAT,
-                open_lanes     INTEGER
+                id                  INTEGER PRIMARY KEY DEFAULT 1,
+                updated_at          TIMESTAMPTZ DEFAULT NOW(),
+                queue_now           INTEGER,
+                service_min         FLOAT,
+                wait_0m             FLOAT,
+                wait_5m             FLOAT,
+                wait_10m            FLOAT,
+                wait_15m            FLOAT,
+                lane1_wait_15m      FLOAT,
+                lane2_wait_15m      FLOAT,
+                lane3_wait_15m      FLOAT,
+                lane4_wait_15m      FLOAT,
+                open_lanes          INTEGER,
+                demographics_json   TEXT,
+                entries_hour_json   TEXT
             )
         """)
+        # Add columns if upgrading from old schema
+        for _col, _type in [("demographics_json", "TEXT"), ("entries_hour_json", "TEXT")]:
+            _scc.execute(f"""
+                DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                                   WHERE table_name='dashboard_state' AND column_name='{_col}')
+                    THEN ALTER TABLE dashboard_state ADD COLUMN {_col} {_type}; END IF;
+                END $$;
+            """)
+
         def _rv(v): return round(float(v), 2) if v is not None and v == v else None
+
+        # Build demographics JSON exactly as dashboard computes it
+        _gender_total = int(demo_gender["count"].sum()) if not demo_gender.empty else 0
+        _gender_data = []
+        _gender_colors = {"male": "#2563eb", "female": "#db2777"}
+        for _, _gr in demo_gender.iterrows():
+            _gk = str(_gr["gender"]).lower()
+            _gc = int(_gr["count"])
+            _gender_data.append({
+                "key": _gk, "label": _gk.capitalize(),
+                "count": _gc,
+                "percent": round(_gc / _gender_total * 100) if _gender_total else 0,
+                "color": _gender_colors.get(_gk, "#94a3b8"),
+            })
+
+        _age_total = int(demo_age["count"].sum()) if not demo_age.empty else 0
+        _age_colors = {"18-30": "#f97316", "30-50": "#3fb950", "50+": "#58a6ff"}
+        _age_data = []
+        for _, _ar in demo_age.iterrows():
+            _ag = str(_ar["age_group"])
+            _ac = int(_ar["count"])
+            _age_data.append({
+                "group": _ag, "count": _ac,
+                "percent": round(_ac / _age_total * 100) if _age_total else 0,
+                "color": _age_colors.get(_ag, "#8b949e"),
+            })
+
+        _demo_json = _json.dumps({"gender": _gender_data, "age": _age_data})
+
+        # Build hourly entries JSON
+        _hourly = []
+        if not traffic_today.empty:
+            _peak_cnt = int(traffic_today["entries"].max())
+            for _, _hr in traffic_today.iterrows():
+                _hc = int(_hr["entries"])
+                _hourly.append({
+                    "hour": _to_local_timestamp(_hr["hour"]).strftime("%H:00"),
+                    "count": _hc,
+                    "is_peak": _hc == _peak_cnt and _peak_cnt > 0,
+                })
+        _hourly_json = _json.dumps(_hourly)
+
         _scc.execute("""
             INSERT INTO dashboard_state
                 (id, updated_at, queue_now, service_min,
                  wait_0m, wait_5m, wait_10m, wait_15m,
                  lane1_wait_15m, lane2_wait_15m, lane3_wait_15m, lane4_wait_15m,
-                 open_lanes)
-            VALUES (1, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 open_lanes, demographics_json, entries_hour_json)
+            VALUES (1, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
-                updated_at     = NOW(),
-                queue_now      = EXCLUDED.queue_now,
-                service_min    = EXCLUDED.service_min,
-                wait_0m        = EXCLUDED.wait_0m,
-                wait_5m        = EXCLUDED.wait_5m,
-                wait_10m       = EXCLUDED.wait_10m,
-                wait_15m       = EXCLUDED.wait_15m,
-                lane1_wait_15m = EXCLUDED.lane1_wait_15m,
-                lane2_wait_15m = EXCLUDED.lane2_wait_15m,
-                lane3_wait_15m = EXCLUDED.lane3_wait_15m,
-                lane4_wait_15m = EXCLUDED.lane4_wait_15m,
-                open_lanes     = EXCLUDED.open_lanes
+                updated_at          = NOW(),
+                queue_now           = EXCLUDED.queue_now,
+                service_min         = EXCLUDED.service_min,
+                wait_0m             = EXCLUDED.wait_0m,
+                wait_5m             = EXCLUDED.wait_5m,
+                wait_10m            = EXCLUDED.wait_10m,
+                wait_15m            = EXCLUDED.wait_15m,
+                lane1_wait_15m      = EXCLUDED.lane1_wait_15m,
+                lane2_wait_15m      = EXCLUDED.lane2_wait_15m,
+                lane3_wait_15m      = EXCLUDED.lane3_wait_15m,
+                lane4_wait_15m      = EXCLUDED.lane4_wait_15m,
+                open_lanes          = EXCLUDED.open_lanes,
+                demographics_json   = EXCLUDED.demographics_json,
+                entries_hour_json   = EXCLUDED.entries_hour_json
         """, (
             int(queue_count),
             _rv(service_minutes),
@@ -1747,6 +1804,8 @@ try:
             _rv(lane_waits.get(3, {}).get("wait_15m")),
             _rv(lane_waits.get(4, {}).get("wait_15m")),
             int(selected_lanes),
+            _demo_json,
+            _hourly_json,
         ))
         _sc.commit()
         _scc.close()
