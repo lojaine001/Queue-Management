@@ -44,9 +44,13 @@ from .equipment_classifier import (
 # OWLv2 scores each query independently; we take the highest-scoring query
 # per detection and map it to the equipment label for that group.
 _QUERY_GROUPS: dict[str, list[str]] = {
-    EQUIPMENT_TROLLEY:      ["shopping trolley", "supermarket trolley", "shopping cart"],
-    EQUIPMENT_STORE_BASKET: ["shopping basket", "hand basket", "wire basket"],
-    EQUIPMENT_PERSONAL_BAG: ["handbag", "backpack", "tote bag", "reusable shopping bag"],
+    EQUIPMENT_TROLLEY:      ["shopping trolley", "supermarket trolley", "shopping cart",
+                             "grocery cart", "metal trolley"],
+    EQUIPMENT_STORE_BASKET: ["shopping basket", "hand basket", "wire basket",
+                             "plastic basket", "carry basket"],
+    EQUIPMENT_PERSONAL_BAG: ["handbag", "backpack", "shoulder bag", "tote bag",
+                             "crossbody bag", "canvas bag", "leather bag", "purse",
+                             "satchel", "cloth bag", "personal bag", "reusable bag"],
 }
 
 # Flat list of all queries (order matters — index used for label lookup)

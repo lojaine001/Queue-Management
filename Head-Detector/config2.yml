@@ -64,7 +64,7 @@ show_equipment_labels: true
 # owlv2_score_thresh: minimum confidence (0–1); 0.15 is a safe default.
 owlv2_enabled:         true
 owlv2_interval_frames: 30
-owlv2_score_thresh:    0.15
+owlv2_score_thresh:    0.10
 
 # ── Queue quality filter ──────────────────────────────────────────────────────
 # Tracks shorter than this (seconds) are passer-by noise; excluded from
