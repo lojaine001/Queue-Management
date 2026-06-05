@@ -92,11 +92,18 @@ def run_on_frame(
         outputs = model(**inputs)
 
     target_sizes = torch.tensor([pil_img.size[::-1]])
-    results = processor.post_process_grounded_object_detection(
-        outputs=outputs,
-        target_sizes=target_sizes,
-        score_threshold=thresh,
-    )[0]
+    try:
+        results = processor.post_process_grounded_object_detection(
+            outputs=outputs,
+            target_sizes=target_sizes,
+            score_threshold=thresh,
+        )[0]
+    except TypeError:
+        # Older transformers versions don't accept score_threshold — filter manually
+        results = processor.post_process_grounded_object_detection(
+            outputs=outputs,
+            target_sizes=target_sizes,
+        )[0]
 
     fh, fw = frame_bgr.shape[:2]
     detections = []
@@ -109,6 +116,8 @@ def run_on_frame(
         y1 = int(max(0,  box[1]))
         x2 = int(min(fw, box[2]))
         y2 = int(min(fh, box[3]))
+        if float(score) < thresh:
+            continue
         label     = QUERY_TO_LABEL.get(int(label_idx), "unknown")
         query_txt = ALL_QUERIES[int(label_idx)]
         detections.append((x1, y1, x2, y2, label, float(score), query_txt))
