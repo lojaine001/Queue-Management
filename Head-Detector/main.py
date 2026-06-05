@@ -757,7 +757,9 @@ def main():
                     for t in confirmed_visual_tracks
                 }
                 frame_equip = equip_clf.classify_tracks(img, frame_bboxes)
-                track_equipment.update(frame_equip)
+                for _tid, _label in frame_equip.items():
+                    if _label != EQUIPMENT_NONE:
+                        track_equipment[_tid] = _label
 
             # ── OWLv2 zero-shot caddy detection (low frame rate) ─────────────
             _owlv2_frame_count += 1
