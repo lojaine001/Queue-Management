@@ -34,10 +34,15 @@ DB_CONFIG = dict(
 )
 
 LANE_MAX_CAPACITY = 10  # denominator for fill bar
+STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
 
 
 def _conn():
-    return psycopg2.connect(**DB_CONFIG)
+    conn = psycopg2.connect(**DB_CONFIG)
+    with conn.cursor() as cur:
+        cur.execute("SET timezone = %s", (STORE_TZ,))
+    conn.commit()
+    return conn
 
 
 def _lane_status(avg_wait_min: float, queue_depth: int) -> str:
