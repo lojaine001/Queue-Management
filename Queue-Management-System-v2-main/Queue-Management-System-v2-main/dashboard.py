@@ -60,7 +60,7 @@ def _today_hours():
     """Return (open_hour, open_min, close_hour, close_min, open_tot, close_tot) for today."""
     _oh, _om, _ch, _cm = _day_hours(pd.Timestamp.now().weekday())
     return _oh, _om, _ch, _cm, _oh * 60 + _om, _ch * 60 + _cm
-REFRESH_SEC = int(os.getenv("REFRESH_SEC", 30))
+REFRESH_SEC = int(os.getenv("REFRESH_SEC", 60))
 WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
@@ -1173,14 +1173,9 @@ def load_full_model_predictions(days: int = 30):
 
 st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout="wide")
 
-if "_page_load_time" not in st.session_state:
-    st.session_state["_page_load_time"] = _time.time()
-
 @st.fragment(run_every=REFRESH_SEC)
 def _auto_refresh():
-    if _time.time() - st.session_state.get("_page_load_time", _time.time()) >= REFRESH_SEC * 0.8:
-        st.session_state["_page_load_time"] = _time.time()
-        st.rerun()
+    st.rerun()
 _auto_refresh()
 
 st.markdown(
