@@ -1811,8 +1811,8 @@ try:
                 (id, updated_at, queue_now, service_min,
                  wait_0m, wait_5m, wait_10m, wait_15m,
                  lane1_wait_15m, lane2_wait_15m, lane3_wait_15m, lane4_wait_15m,
-                 open_lanes, demographics_json, entries_hour_json)
-            VALUES (1, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 demographics_json, entries_hour_json)
+            VALUES (1, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 updated_at          = NOW(),
                 queue_now           = EXCLUDED.queue_now,
@@ -1825,7 +1825,6 @@ try:
                 lane2_wait_15m      = EXCLUDED.lane2_wait_15m,
                 lane3_wait_15m      = EXCLUDED.lane3_wait_15m,
                 lane4_wait_15m      = EXCLUDED.lane4_wait_15m,
-                open_lanes          = EXCLUDED.open_lanes,
                 demographics_json   = EXCLUDED.demographics_json,
                 entries_hour_json   = EXCLUDED.entries_hour_json
         """, (
@@ -1836,7 +1835,6 @@ try:
             _rv(lane_waits.get(2, {}).get("wait_15m")),
             _rv(lane_waits.get(3, {}).get("wait_15m")),
             _rv(lane_waits.get(4, {}).get("wait_15m")),
-            int(selected_lanes),
             _demo_json,
             _hourly_json,
         ))
@@ -1995,7 +1993,19 @@ def _sync_days_to_qp():
     st.query_params["training_days"] = str(st.session_state.get("training_span_days", int(os.getenv("DATA_SPAN_DAYS", 7))))
 
 def _sync_lanes_to_qp():
-    st.query_params["lanes"] = str(st.session_state.get("forecast_active_lanes", detected_lanes))
+    _new_lanes = st.session_state.get("forecast_active_lanes", detected_lanes)
+    st.query_params["lanes"] = str(_new_lanes)
+    try:
+        with _conn() as _wc:
+            with _wc.cursor() as _wcur:
+                _wcur.execute(
+                    "UPDATE dashboard_state SET open_lanes = %s, updated_at = NOW() WHERE id = 1",
+                    (_new_lanes,),
+                )
+            _wc.commit()
+        st.session_state["_dashboard_last_written_lanes"] = int(_new_lanes)
+    except Exception:
+        pass
 
 def _guard_arrival_models():
     current = st.session_state.get("arrival_models") or []
