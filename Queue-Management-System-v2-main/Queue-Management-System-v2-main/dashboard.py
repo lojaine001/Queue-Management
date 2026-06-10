@@ -1565,6 +1565,20 @@ if "forecast_active_lanes" not in st.session_state:
             st.session_state["forecast_active_lanes"] = _db_lanes if _db_lanes else detected_lanes
         except Exception:
             st.session_state["forecast_active_lanes"] = detected_lanes
+    st.session_state["_dashboard_last_written_lanes"] = st.session_state["forecast_active_lanes"]
+else:
+    try:
+        with _conn() as _sync_conn:
+            with _sync_conn.cursor() as _sync_cur:
+                _sync_cur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
+                _sync_row = _sync_cur.fetchone()
+                _sync_db_lanes = int(_sync_row[0]) if _sync_row and _sync_row[0] else None
+        if (_sync_db_lanes
+                and _sync_db_lanes != st.session_state.get("_dashboard_last_written_lanes")
+                and _sync_db_lanes != st.session_state.get("forecast_active_lanes")):
+            st.session_state["forecast_active_lanes"] = _sync_db_lanes
+    except Exception:
+        pass
 selected_lanes = int(st.session_state["forecast_active_lanes"])
 selected_lanes = max(1, min(MAX_LANES, selected_lanes))
 
@@ -1812,6 +1826,7 @@ try:
         ))
         _sc.commit()
         _scc.close()
+        st.session_state["_dashboard_last_written_lanes"] = int(selected_lanes)
 except Exception:
     pass  # never crash the dashboard because of a state write failure
 
