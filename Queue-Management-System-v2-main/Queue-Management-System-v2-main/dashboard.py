@@ -1556,7 +1556,15 @@ if "forecast_active_lanes" not in st.session_state:
     if _qp_lanes is not None and str(_qp_lanes).isdigit() and int(_qp_lanes) in range(1, 6):
         st.session_state["forecast_active_lanes"] = int(_qp_lanes)
     else:
-        st.session_state["forecast_active_lanes"] = detected_lanes
+        try:
+            with _conn() as _init_conn:
+                with _init_conn.cursor() as _init_cur:
+                    _init_cur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
+                    _init_row = _init_cur.fetchone()
+                    _db_lanes = int(_init_row[0]) if _init_row and _init_row[0] else None
+            st.session_state["forecast_active_lanes"] = _db_lanes if _db_lanes else detected_lanes
+        except Exception:
+            st.session_state["forecast_active_lanes"] = detected_lanes
 selected_lanes = int(st.session_state["forecast_active_lanes"])
 selected_lanes = max(1, min(MAX_LANES, selected_lanes))
 

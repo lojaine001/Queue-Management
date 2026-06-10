@@ -62,6 +62,10 @@ class AlertResponse(BaseModel):
     lane_id: Optional[str] = None
 
 
+class SetLanesRequest(BaseModel):
+    lanes: int
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -393,6 +397,23 @@ def forecast_chart():
                 for row in rows
             ]
         }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/set-lanes")
+def set_lanes(body: SetLanesRequest):
+    if not (1 <= body.lanes <= 4):
+        raise HTTPException(status_code=400, detail="lanes must be between 1 and 4")
+    try:
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE dashboard_state SET open_lanes = %s, updated_at = NOW() WHERE id = 1",
+                    (body.lanes,),
+                )
+            conn.commit()
+        return {"status": "ok", "lanes": body.lanes}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
