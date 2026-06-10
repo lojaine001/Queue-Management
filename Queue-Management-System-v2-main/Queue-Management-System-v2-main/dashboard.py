@@ -1178,6 +1178,22 @@ def _auto_refresh():
     st.rerun()
 _auto_refresh()
 
+@st.fragment(run_every=8)
+def _lane_sync():
+    try:
+        with _conn() as _lsc:
+            with _lsc.cursor() as _lscur:
+                _lscur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
+                _row = _lscur.fetchone()
+                _db_val = int(_row[0]) if _row and _row[0] else None
+        if (_db_val
+                and _db_val != st.session_state.get("_dashboard_last_written_lanes")
+                and _db_val != st.session_state.get("forecast_active_lanes")):
+            st.rerun()
+    except Exception:
+        pass
+_lane_sync()
+
 st.markdown(
     """
 <style>
