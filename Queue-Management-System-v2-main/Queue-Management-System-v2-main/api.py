@@ -15,7 +15,6 @@ import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
@@ -439,18 +438,24 @@ def forecast_chart_3h():
 
 @app.get("/snapshot/checkout")
 def snapshot_checkout():
+    import base64
     p = SNAP_DIR / "latest_checkout.jpg"
     if not p.exists():
-        raise HTTPException(status_code=404, detail="No snapshot yet")
-    return FileResponse(str(p), media_type="image/jpeg")
+        return {"image": None}
+    with open(str(p), "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"image": f"data:image/jpeg;base64,{data}"}
 
 
 @app.get("/snapshot/entrance")
 def snapshot_entrance():
+    import base64
     p = SNAP_DIR / "latest_entrance.jpg"
     if not p.exists():
-        raise HTTPException(status_code=404, detail="No snapshot yet")
-    return FileResponse(str(p), media_type="image/jpeg")
+        return {"image": None}
+    with open(str(p), "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"image": f"data:image/jpeg;base64,{data}"}
 
 
 @app.post("/set-lanes")
