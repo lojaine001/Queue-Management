@@ -401,6 +401,38 @@ def forecast_chart():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/forecast-chart-3h")
+def forecast_chart_3h():
+    """Returns 3-hour time series of predicted arrivals and wait for the app chart."""
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE prediction_for >= NOW()
+                      AND prediction_for <= NOW() + INTERVAL '3 hours'
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """)
+                rows = cur.fetchall()
+
+        return {
+            "slots": [
+                {
+                    "time":     row["prediction_for"].strftime("%H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/set-lanes")
 def set_lanes(body: SetLanesRequest):
     if not (1 <= body.lanes <= 4):
