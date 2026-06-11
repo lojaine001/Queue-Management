@@ -1,6 +1,9 @@
 import os
 import logging
 import sys
+
+LIVE_SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'snapshots')
+LIVE_SNAP_INTERVAL = 60.0
 import ctypes
 from collections import deque
 from tracemalloc import start
@@ -409,6 +412,7 @@ def main():
     person_loggers = {}
     track_start_times = {}
     last_snapshot_time = 0.0
+    last_live_snap_time = 0.0
 
     # ── Inference timing accumulators ─────────────────────────────────────────
     _t_detect = _t_track = _t_total = 0.0
@@ -759,6 +763,11 @@ def main():
                 max_dwell = float(max(dwells)) if dwells else 0.0
                 db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell, active_lanes)
                 last_snapshot_time = current_time
+
+            if current_time - last_live_snap_time >= LIVE_SNAP_INTERVAL:
+                os.makedirs(LIVE_SNAP_DIR, exist_ok=True)
+                cv2.imwrite(os.path.join(LIVE_SNAP_DIR, 'latest_entrance.jpg'), viz_img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                last_live_snap_time = current_time
 
             while counted_entry_times and current_time - counted_entry_times[0] > 86400:
                 counted_entry_times.popleft()

@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
 
 app = FastAPI(title="IQMS Manager API", version="2.0")
 
@@ -431,6 +435,22 @@ def forecast_chart_3h():
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/snapshot/checkout")
+def snapshot_checkout():
+    p = SNAP_DIR / "latest_checkout.jpg"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="No snapshot yet")
+    return FileResponse(str(p), media_type="image/jpeg")
+
+
+@app.get("/snapshot/entrance")
+def snapshot_entrance():
+    p = SNAP_DIR / "latest_entrance.jpg"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="No snapshot yet")
+    return FileResponse(str(p), media_type="image/jpeg")
 
 
 @app.post("/set-lanes")
