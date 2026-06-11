@@ -55,6 +55,9 @@ import cv2
 import copy
 import time
 import numpy as np
+
+LIVE_SNAP_DIR = Path(__file__).resolve().parent.parent / "Queue-Management-System-v2-main" / "Queue-Management-System-v2-main" / "snapshots"
+LIVE_SNAP_INTERVAL = 60.0
 import requests
 import argparse
 from datetime import datetime
@@ -556,6 +559,7 @@ def main():
     lane_last_insert: dict[str, tuple[int, float, int]] = {}  # roi_name → (track_id, dwell_seconds, active_heads_in_lane)
     recent_track_outcomes = {}  # track_id -> visual outcome overlay for 1 second after death
     last_snapshot_time = 0.0
+    last_live_snap_time = 0.0
     last_caddy_frame_time = 0.0
     last_summary_time = time.time()
     SUMMARY_INTERVAL_MIN = 15
@@ -1057,6 +1061,11 @@ def main():
                 debug_image_path = os.path.join(snapshot_path, f'debug_{no_snapshots}.jpg')
                 cv2.imwrite(debug_image_path, img)
                 no_snapshots += 1
+
+            if current_time - last_live_snap_time >= LIVE_SNAP_INTERVAL:
+                os.makedirs(str(LIVE_SNAP_DIR), exist_ok=True)
+                cv2.imwrite(str(LIVE_SNAP_DIR / 'latest_checkout.jpg'), img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                last_live_snap_time = current_time
 
             if preview_enabled:
                 try:
