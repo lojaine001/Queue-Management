@@ -38,6 +38,7 @@ DB_CONFIG = dict(
 
 LANE_MAX_CAPACITY = 10  # denominator for fill bar
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
+BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
 
 
 def _conn():
@@ -314,6 +315,37 @@ def day_recap():
                 avg_row      = cur.fetchone()
                 avg_wait_min = float(avg_row["avg_min"]) if avg_row and avg_row["avg_min"] else 0.0
 
+                # Lanes used today
+                cur.execute(f"""
+                    SELECT COUNT(DISTINCT lane_id) AS lanes_count
+                    FROM service_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                """)
+                lanes_row    = cur.fetchone()
+                lanes_today  = int(lanes_row["lanes_count"]) if lanes_row and lanes_row["lanes_count"] else 0
+
+                cur.execute(f"""
+                    SELECT lane_id, COUNT(*) AS cnt
+                    FROM service_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                    GROUP BY lane_id ORDER BY cnt DESC LIMIT 1
+                """)
+                busiest_row  = cur.fetchone()
+                busiest_lane = busiest_row["lane_id"] if busiest_row else None
+
+                # Alert minutes today (from ensemble predictions)
+                alert_date_filter = f"DATE(prediction_for) = '{ref_date}'" if ref_date else "DATE(prediction_for) = CURRENT_DATE"
+                cur.execute(f"""
+                    SELECT COUNT(*) AS alert_slots
+                    FROM queue_predictions
+                    WHERE {alert_date_filter}
+                      AND status = 'ALERT'
+                """)
+                alert_row     = cur.fetchone()
+                alert_minutes = int((alert_row["alert_slots"] or 0) if alert_row else 0) * BUCKET_MIN
+
                 # Equipment mix
                 cur.execute(f"""
                     SELECT equipment_type, COUNT(*) AS cnt
@@ -334,11 +366,11 @@ def day_recap():
                 """)
                 ds_row = cur.fetchone()
 
-        equip_total = sum(int(r["cnt"]) for r in equip_rows) or 1
+        denom = total or 1
         equipment = []
-        order = ["trolley", "store_basket", "personal_bag"]
-        colors = {"trolley": "#06b6d4", "store_basket": "#a855f7", "personal_bag": "#f59e0b"}
-        labels = {"trolley": "Trolley", "store_basket": "Store basket", "personal_bag": "Personal bag"}
+        order  = ["trolley", "store_basket"]
+        colors = {"trolley": "#06b6d4", "store_basket": "#a855f7"}
+        labels = {"trolley": "Trolley", "store_basket": "Store basket"}
         for key in order:
             row = next((r for r in equip_rows if r["equipment_type"] == key), None)
             count = int(row["cnt"]) if row else 0
@@ -346,7 +378,7 @@ def day_recap():
                 "type":    key,
                 "label":   labels[key],
                 "count":   count,
-                "percent": round(count / equip_total * 100),
+                "percent": round(count / denom * 100),
                 "color":   colors[key],
             })
 
@@ -363,6 +395,9 @@ def day_recap():
             "peak_hour_end":       peak_end,
             "peak_count":          peak_count,
             "equipment":           equipment,
+            "lanes_today":         lanes_today,
+            "busiest_lane":        busiest_lane,
+            "alert_minutes":       alert_minutes,
             "demographics_gender": _demo.get("gender", []),
             "demographics_age":    _demo.get("age",    []),
             "entries_by_hour":     _hourly,
