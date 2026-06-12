@@ -262,6 +262,8 @@ def forecast():
             "wait_15_min":    wait_15,
             "current_lanes":  current_lanes,
             "lane_scenarios": scenarios,
+            "queue_now":      int(state["queue_now"]) if state["queue_now"] is not None else None,
+            "updated_at":     state["updated_at"].isoformat() if state["updated_at"] else None,
         }
 
     except Exception as exc:
