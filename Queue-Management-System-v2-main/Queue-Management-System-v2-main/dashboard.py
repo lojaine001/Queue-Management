@@ -60,7 +60,7 @@ def _today_hours():
     """Return (open_hour, open_min, close_hour, close_min, open_tot, close_tot) for today."""
     _oh, _om, _ch, _cm = _day_hours(pd.Timestamp.now().weekday())
     return _oh, _om, _ch, _cm, _oh * 60 + _om, _ch * 60 + _cm
-REFRESH_SEC = int(os.getenv("REFRESH_SEC", 60))
+REFRESH_SEC = int(os.getenv("REFRESH_SEC", 30))
 WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
@@ -1173,26 +1173,15 @@ def load_full_model_predictions(days: int = 30):
 
 st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout="wide")
 
+if "_page_load_time" not in st.session_state:
+    st.session_state["_page_load_time"] = _time.time()
+
 @st.fragment(run_every=REFRESH_SEC)
 def _auto_refresh():
-    st.rerun()
+    if _time.time() - st.session_state.get("_page_load_time", _time.time()) >= REFRESH_SEC * 0.8:
+        st.session_state["_page_load_time"] = _time.time()
+        st.rerun()
 _auto_refresh()
-
-@st.fragment(run_every=8)
-def _lane_sync():
-    try:
-        with _conn() as _lsc:
-            with _lsc.cursor() as _lscur:
-                _lscur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
-                _row = _lscur.fetchone()
-                _db_val = int(_row[0]) if _row and _row[0] else None
-        if (_db_val
-                and _db_val != st.session_state.get("_dashboard_last_written_lanes")
-                and _db_val != st.session_state.get("forecast_active_lanes")):
-            st.rerun()
-    except Exception:
-        pass
-_lane_sync()
 
 st.markdown(
     """
@@ -1571,32 +1560,8 @@ if "forecast_active_lanes" not in st.session_state:
     _qp_lanes = st.query_params.get("lanes", None)
     if _qp_lanes is not None and str(_qp_lanes).isdigit() and int(_qp_lanes) in range(1, 6):
         st.session_state["forecast_active_lanes"] = int(_qp_lanes)
-        st.session_state["_dashboard_last_written_lanes"] = int(_qp_lanes)
     else:
         st.session_state["forecast_active_lanes"] = detected_lanes
-        try:
-            with _conn() as _init_conn:
-                with _init_conn.cursor() as _init_cur:
-                    _init_cur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
-                    _init_row = _init_cur.fetchone()
-                    _stale_db_val = int(_init_row[0]) if _init_row and _init_row[0] else detected_lanes
-            # Mark stale DB value as already seen so sync block won't override DEFAULT_LANES
-            st.session_state["_dashboard_last_written_lanes"] = _stale_db_val
-        except Exception:
-            st.session_state["_dashboard_last_written_lanes"] = detected_lanes
-else:
-    try:
-        with _conn() as _sync_conn:
-            with _sync_conn.cursor() as _sync_cur:
-                _sync_cur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
-                _sync_row = _sync_cur.fetchone()
-                _sync_db_lanes = int(_sync_row[0]) if _sync_row and _sync_row[0] else None
-        if (_sync_db_lanes
-                and _sync_db_lanes != st.session_state.get("_dashboard_last_written_lanes")
-                and _sync_db_lanes != st.session_state.get("forecast_active_lanes")):
-            st.session_state["forecast_active_lanes"] = _sync_db_lanes
-    except Exception:
-        pass
 selected_lanes = int(st.session_state["forecast_active_lanes"])
 selected_lanes = max(1, min(MAX_LANES, selected_lanes))
 
@@ -1613,6 +1578,8 @@ pred_future = pd.DataFrame(columns=["ds", "arrivals"])
 
 _arrivals_capped = False
 _pred_mean = _pred_min = _pred_max = float("nan")
+_in_service = 0
+_waiting_backlog = 0.0
 _dwell_per_slot = None
 _dwell_per_slot_base = None
 _dwell_pred_by_model: dict[str, list[float]] = {}
@@ -1844,7 +1811,6 @@ try:
         ))
         _sc.commit()
         _scc.close()
-        st.session_state["_dashboard_last_written_lanes"] = int(selected_lanes)
 except Exception:
     pass  # never crash the dashboard because of a state write failure
 
