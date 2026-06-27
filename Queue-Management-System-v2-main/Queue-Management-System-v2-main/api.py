@@ -485,8 +485,8 @@ def forecast_chart_12h():
                         COALESCE(ensemble_yhat, 0)    AS arrivals,
                         COALESCE(est_wait_minutes, 0) AS wait_min
                     FROM queue_predictions
-                    WHERE prediction_for >= NOW()
-                      AND prediction_for <= NOW() + INTERVAL '12 hours'
+                    WHERE prediction_for >= NOW() - INTERVAL '6 hours'
+                      AND prediction_for <= NOW() + INTERVAL '6 hours'
                     ORDER BY prediction_for ASC, predicted_at DESC
                 """)
                 rows = cur.fetchall()
