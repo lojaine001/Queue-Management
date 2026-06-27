@@ -1645,12 +1645,16 @@ def run_prediction_pipeline(
     lane_scenarios: dict[int, dict] = {}
     for n in range(1, 5):
         _scenario_queue = max(0, _snap_raw - n)
+        # No per-lane queue cap here: capping at lanes*MAX_QUEUE_PER_LANE makes the
+        # lane factor cancel in the wait formula (capped_queue/service = MAX*dwell),
+        # so 1-lane and 2-lane scenarios produce identical waits under saturation.
+        # Scenario analysis needs an uncapped backlog to preserve the comparison signal.
         w_rows, w15, w30, _ = compute_wait_estimates(
             _fw_horizon.copy(),
             current_queue=_scenario_queue,
             avg_dwell_min=_pb_service_horizon,
             active_lanes=n,
-            max_queue_per_lane=MAX_QUEUE_PER_LANE,
+            max_queue_per_lane=None,
             max_wait_min=MAX_WAIT_MIN,
         )
         _lane_snap_wait = round(
