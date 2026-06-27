@@ -60,7 +60,7 @@ def _today_hours():
     """Return (open_hour, open_min, close_hour, close_min, open_tot, close_tot) for today."""
     _oh, _om, _ch, _cm = _day_hours(pd.Timestamp.now().weekday())
     return _oh, _om, _ch, _cm, _oh * 60 + _om, _ch * 60 + _cm
-REFRESH_SEC = int(os.getenv("REFRESH_SEC", 60))
+REFRESH_SEC = int(os.getenv("REFRESH_SEC", 900))
 WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
@@ -100,17 +100,19 @@ def _run_prediction(data_span_days: int = 30):
     _here  = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(_here, "ensemble_predict.py")
     cwd    = os.path.dirname(os.path.dirname(_here))   # Queue-Management/ for prediction imports
-    env    = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env    = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    print(
+        f"[Dashboard] Starting prediction subprocess: source=REAL days={data_span_days} "
+        f"script={script} cwd={cwd}",
+        flush=True,
+    )
     result = subprocess.run(
         [sys.executable, script, "--source", "REAL", "--days", str(data_span_days)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         env=env,
         cwd=cwd,
     )
-    return result.returncode == 0, result.stdout, result.stderr
+    print(f"[Dashboard] Prediction subprocess finished: returncode={result.returncode}", flush=True)
+    return result.returncode == 0, "", ""
 
 
 def _to_local_timestamp(value):
@@ -1148,7 +1150,8 @@ def load_full_model_predictions(days: int = 30):
     """Per-model yhat for every prediction slot over the last N days + upcoming future slots.
 
     Uses DISTINCT ON (prediction_for) to pick the most recent prediction run per slot,
-    so past slots show the most up-to-date forecast that was made for them.
+    so past slots show the latest saved forecast for that slot, not an in-sample
+    model fit over the raw training data.
     """
     with _conn() as conn:
         try:
@@ -1156,6 +1159,7 @@ def load_full_model_predictions(days: int = 30):
                 f"""
                 SELECT DISTINCT ON (prediction_for)
                        prediction_for AS ds,
+                       predicted_at,
                        prophet_yhat, lstm_yhat, xgb_yhat, ensemble_yhat
                 FROM queue_predictions
                 WHERE prediction_for >= NOW() - INTERVAL '{days} days'
@@ -1169,30 +1173,24 @@ def load_full_model_predictions(days: int = 30):
     return df
 
 
+@st.cache_data(ttl=REFRESH_SEC)
+def load_prophet_training_fit():
+    fit_path = Path(__file__).resolve().parent / "models" / f"prophet_training_fit_{BUCKET_MIN}m.csv"
+    if not fit_path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(fit_path)
+    except Exception:
+        return pd.DataFrame()
+
+
 # ── Page config ────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout="wide")
 
-@st.fragment(run_every=REFRESH_SEC)
-def _auto_refresh():
-    st.rerun()
-_auto_refresh()
-
-@st.fragment(run_every=8)
-def _lane_sync():
-    try:
-        with _conn() as _lsc:
-            with _lsc.cursor() as _lscur:
-                _lscur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
-                _row = _lscur.fetchone()
-                _db_val = int(_row[0]) if _row and _row[0] else None
-        if (_db_val
-                and _db_val != st.session_state.get("_dashboard_last_written_lanes")
-                and _db_val != st.session_state.get("forecast_active_lanes")):
-            st.rerun()
-    except Exception:
-        pass
-_lane_sync()
+# Auto-refresh is intentionally disabled here. The previous fragment-based
+# rerun path could blank the page before the dashboard finished rendering.
+# Use the Refresh button while we debug prediction/training behavior.
 
 st.markdown(
     """
@@ -1432,8 +1430,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+_HISTORY_RANGE_OPTIONS = [1, 2, 4, 6, 12, 24, 48, 168]
 if "history_range_hours" not in st.session_state:
-    st.session_state["history_range_hours"] = 24
+    _qp_history_range = st.query_params.get("history_range_hours", None)
+    if (
+        _qp_history_range is not None
+        and str(_qp_history_range).isdigit()
+        and int(_qp_history_range) in _HISTORY_RANGE_OPTIONS
+    ):
+        st.session_state["history_range_hours"] = int(_qp_history_range)
+    else:
+        st.session_state["history_range_hours"] = 24
 
 if "lane_infer_window_min" not in st.session_state:
     st.session_state["lane_infer_window_min"] = _LANE_INFER_WINDOW_MIN
@@ -1504,6 +1511,7 @@ try:
     raw_arrivals = load_raw_arrivals(_span)
     service_history = load_service_history(_span)
     full_model_preds = load_full_model_predictions(_span)
+    prophet_training_fit = load_prophet_training_fit()
     if not full_model_preds.empty and "ds" in full_model_preds.columns:
         _ds_local = _to_local_series(full_model_preds["ds"])
         _open_mask = _ds_local.apply(lambda t: is_open(pd.Timestamp(t)))
@@ -1997,6 +2005,9 @@ def _sync_days_to_qp():
 def _sync_lanes_to_qp():
     st.query_params["lanes"] = str(st.session_state.get("forecast_active_lanes", detected_lanes))
 
+def _sync_history_range_to_qp():
+    st.query_params["history_range_hours"] = str(st.session_state.get("history_range_hours", 24))
+
 def _guard_arrival_models():
     current = st.session_state.get("arrival_models") or []
     if not current:
@@ -2342,9 +2353,10 @@ _display_range_col, _display_range_note_col = st.columns([2, 5])
 with _display_range_col:
     st.select_slider(
         "Chart display range",
-        options=[1, 2, 4, 6, 12, 24, 48, 168],
+        options=_HISTORY_RANGE_OPTIONS,
         format_func=_hour_phrase,
         key="history_range_hours",
+        on_change=_sync_history_range_to_qp,
     )
 with _display_range_note_col:
     st.markdown(
@@ -2366,6 +2378,22 @@ _section_title(
     "Raw Data vs Model Predictions",
     f"showing last {_hour_phrase(history_range_hours)} · trained on {_training_days_val} days · {_cmp_label_str}",
 )
+_latest_predicted_at = None
+if not full_model_preds.empty and "predicted_at" in full_model_preds.columns:
+    try:
+        _latest_predicted_at = _to_local_timestamp(full_model_preds["predicted_at"].max())
+    except Exception:
+        _latest_predicted_at = None
+_pred_source_note = (
+    f"Latest saved prediction run: {_latest_predicted_at.strftime('%d/%m %H:%M:%S')}. "
+    if _latest_predicted_at is not None else ""
+)
+st.markdown(
+    f'<div class="detail-note">{_pred_source_note}'
+    'Prophet uses the saved training-fit curve from the latest run when available. '
+    'LSTM/XGBoost lines still come from saved <code>queue_predictions</code> forecast rows.</div>',
+    unsafe_allow_html=True,
+)
 
 _COLORS = {
     "raw":      "#94a3b8",
@@ -2375,7 +2403,7 @@ _COLORS = {
     "ensemble": "#16a34a",
 }
 
-if not raw_arrivals.empty or not full_model_preds.empty:
+if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_fit.empty:
     fig_cmp = go.Figure()
 
     # ── Historical raw arrivals (resampled to 15-min median) ─────────────────
@@ -2406,7 +2434,23 @@ if not raw_arrivals.empty or not full_model_preds.empty:
             hovertemplate="%{x|%d/%m %H:%M}<br>Raw arrivals (15 min): %{y:.1f}<extra></extra>",
         ))
 
-    # ── Per-model predictions (only selected models + dynamic ensemble) ─────────
+    # ── Prophet in-sample training fit from the latest run ───────────────────
+    if "prophet" in _cmp_active_models and not prophet_training_fit.empty:
+        pfit = prophet_training_fit.copy()
+        pfit["ds"] = _to_local_series(pfit["ds"])
+        pfit["yhat"] = pd.to_numeric(pfit["yhat"], errors="coerce").clip(lower=0)
+        pfit = pfit[pfit["ds"].apply(lambda t: is_open(pd.Timestamp(t)))]
+        pfit = _insert_overnight_gaps(pfit[["ds", "yhat"]])
+        fig_cmp.add_trace(go.Scatter(
+            x=pfit["ds"],
+            y=pfit["yhat"],
+            mode="lines",
+            name="Prophet fit",
+            line=dict(color=_COLORS["prophet"], width=2),
+            hovertemplate="%{x|%d/%m %H:%M}<br>Prophet fit: %{y:.1f}<extra></extra>",
+        ))
+
+    # ── Per-model saved forecasts (LSTM/XGBoost + fallback Prophet) ──────────
     if not full_model_preds.empty:
         fmp = full_model_preds.copy()
         fmp["ds"] = _to_local_series(fmp["ds"])
@@ -2446,6 +2490,8 @@ if not raw_arrivals.empty or not full_model_preds.empty:
         # Individual selected-model traces
         for m in _cmp_active_models:
             if m not in _cmp_col_map:
+                continue
+            if m == "prophet" and not prophet_training_fit.empty:
                 continue
             col, label, color, dash, width = _cmp_col_map[m]
             if col not in fmp.columns:

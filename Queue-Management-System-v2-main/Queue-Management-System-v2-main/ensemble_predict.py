@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
+import hashlib
+import json
 import pickle
 import time as _time
 from pathlib import Path
@@ -11,7 +13,7 @@ import psycopg2
 import pandas as pd
 import numpy as np
 from prophet import Prophet
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import warnings
 import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
@@ -86,7 +88,11 @@ SCALER_PATH       = _resolve_model_path(f'lstm_scaler_{BUCKET_MINUTES}m.pkl')
 XGB_PATH          = _resolve_model_path(f'xgb_queue_{BUCKET_MINUTES}m.json')
 PROPHET_PATH      = _resolve_model_path(f'prophet_queue_{BUCKET_MINUTES}m.pkl')
 PROPHET_META_PATH = _resolve_model_path(f'prophet_queue_{BUCKET_MINUTES}m_meta.json')
+PROPHET_FIT_PATH  = MODELS_DIR / f'prophet_training_fit_{BUCKET_MINUTES}m.csv'
 DWELL_MODEL_PATH  = _resolve_model_path(f'xgb_dwell_{BUCKET_MINUTES}m.json')
+LSTM_META_PATH    = MODELS_DIR / f'lstm_queue_{BUCKET_MINUTES}m_meta.json'
+XGB_META_PATH     = MODELS_DIR / f'xgb_queue_{BUCKET_MINUTES}m_meta.json'
+DWELL_META_PATH   = MODELS_DIR / f'xgb_dwell_{BUCKET_MINUTES}m_meta.json'
 
 DWELL_FEATURE_COLS = ["hour", "minute_of_hour", "day_of_week", "is_weekend"]
 
@@ -166,22 +172,130 @@ def _models_are_fresh() -> bool:
     return (_time.time() - oldest) < MODEL_MAX_AGE_HOURS * 3600
 
 
+def _path_is_fresh(path: Path) -> bool:
+    return os.path.exists(path) and (_time.time() - os.path.getmtime(path)) < MODEL_MAX_AGE_HOURS * 3600
+
+
+def _load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_json(path: Path, payload: dict) -> None:
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
 DATA_SPAN_DAYS_DEFAULT = int(os.getenv("DATA_SPAN_DAYS", 30))
+
+
+def _log(message: str) -> None:
+    print(message, flush=True)
+
+
+def _fmt_ts(value) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return pd.Timestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _to_local_wall_series(series: pd.Series) -> pd.Series:
+    """Convert DB UTC timestamps into timezone-naive local wall-clock time."""
+    utc_offset = datetime.now(timezone.utc).astimezone().utcoffset()
+    return pd.to_datetime(series).dt.tz_localize(None) + utc_offset
+
+
+def _frame_fingerprint(df: pd.DataFrame) -> str:
+    """Stable short fingerprint for comparing Prophet training frames between runs."""
+    if df.empty:
+        return "empty"
+    stable = df[["ds", "y"]].copy()
+    stable["ds"] = pd.to_datetime(stable["ds"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    stable["y"] = pd.to_numeric(stable["y"], errors="coerce").fillna(0).round(4)
+    payload = stable.to_csv(index=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _log_prophet_frame(label: str, frame: pd.DataFrame) -> str:
+    if frame.empty:
+        _log(f"[Prophet:Data] {label}: EMPTY")
+        return "empty"
+
+    dbg = frame[["ds", "y"]].copy()
+    dbg["ds"] = pd.to_datetime(dbg["ds"], errors="coerce")
+    dbg["y"] = pd.to_numeric(dbg["y"], errors="coerce").fillna(0)
+    dbg = dbg.dropna(subset=["ds"]).sort_values("ds").reset_index(drop=True)
+    fingerprint = _frame_fingerprint(dbg)
+    open_mask = dbg["ds"].map(lambda t: is_open(pd.Timestamp(t)))
+    nonzero = dbg[dbg["y"] > 0]
+    unique_days = int(dbg["ds"].dt.date.nunique())
+    sample_head = ", ".join(
+        f"{row.ds.strftime('%m-%d %H:%M')}={row.y:.1f}" for row in dbg.head(4).itertuples()
+    )
+    sample_tail = ", ".join(
+        f"{row.ds.strftime('%m-%d %H:%M')}={row.y:.1f}" for row in dbg.tail(4).itertuples()
+    )
+
+    _log(
+        f"[Prophet:Data] {label}: rows={len(dbg)} unique_days={unique_days} "
+        f"open_rows={int(open_mask.sum())} closed_rows={int((~open_mask).sum())} "
+        f"nonzero_rows={len(nonzero)} fingerprint={fingerprint}"
+    )
+    _log(
+        f"[Prophet:Data] {label}: window={_fmt_ts(dbg['ds'].min())} -> {_fmt_ts(dbg['ds'].max())} "
+        f"sum={float(dbg['y'].sum()):.2f} mean={float(dbg['y'].mean()):.3f} "
+        f"median={float(dbg['y'].median()):.3f} max={float(dbg['y'].max()):.2f}"
+    )
+    if not nonzero.empty:
+        _log(
+            f"[Prophet:Data] {label}: nonzero_window={_fmt_ts(nonzero['ds'].min())} -> "
+            f"{_fmt_ts(nonzero['ds'].max())}"
+        )
+    _log(f"[Prophet:Data] {label}: first4 {sample_head}")
+    _log(f"[Prophet:Data] {label}: last4 {sample_tail}")
+    return fingerprint
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_span_days: int = DATA_SPAN_DAYS_DEFAULT) -> dict:
     """Train Prophet + LSTM + XGBoost ensemble and return a forecast dict."""
+    run_started = datetime.now()
+    _log("=" * 90)
+    _log(
+        "[Run] Ensemble forecast started "
+        f"at {run_started.strftime('%Y-%m-%d %H:%M:%S')} | source={source} "
+        f"days={data_span_days} bootstrap={bootstrap}"
+    )
+    _log(
+        "[Config] "
+        f"bucket={BUCKET_MINUTES}min forecast_steps={FORECAST_STEPS} "
+        f"weights prophet={W_PROPHET:.2f} lstm={W_LSTM:.2f} xgb={W_XGB:.2f} "
+        f"model_max_age={MODEL_MAX_AGE_HOURS}h"
+    )
+    _log(
+        "[Paths] "
+        f"prophet={PROPHET_PATH} | lstm={LSTM_PATH} | xgb={XGB_PATH} | dwell={DWELL_MODEL_PATH}"
+    )
     where_clause = get_where_clause(source)
 
     # ── 1. Load data ─────────────────────────────────────────────────────────
     conn = psycopg2.connect(**DB_CONFIG)
-    print(f"[Ensemble] Connected to PostgreSQL (Source: {source}, span: {data_span_days}d) [ok]")
+    _log(f"[DB] Connected to PostgreSQL database={DB_CONFIG.get('dbname')} host={DB_CONFIG.get('host')} [ok]")
 
     clean_filter = f"timestamp >= NOW() - INTERVAL '{data_span_days} days' AND dwell_seconds >= 10"
     if where_clause:
         data_filter = f"{where_clause} AND {clean_filter}"
     else:
         data_filter = f"WHERE {clean_filter}"
+    _log(f"[Data] entrance_events filter: {data_filter}")
 
     query = f"""
         SELECT
@@ -194,14 +308,24 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     """
     df_real = pd.read_sql(query, conn)
     conn.close()
-    print(f"[Ensemble] Loaded {len(df_real)} {BUCKET_MINUTES}-min buckets from DB")
+    _log(f"[Data] Loaded {len(df_real)} non-empty {BUCKET_MINUTES}-min buckets from DB")
 
     if len(df_real) > 0:
         df_real["entry_count"] = pd.to_numeric(df_real["entry_count"], errors="coerce").fillna(0).astype(int)
+        _log(
+            "[Data] Raw bucket window: "
+            f"{_fmt_ts(df_real['bucket'].min())} -> {_fmt_ts(df_real['bucket'].max())} | "
+            f"total_entries={int(df_real['entry_count'].sum())} "
+            f"mean={float(df_real['entry_count'].mean()):.2f} max={int(df_real['entry_count'].max())}"
+        )
+    else:
+        _log("[Data] Raw bucket window: no entrance buckets found for selected filter")
 
     df_real_r = df_real.rename(columns={"bucket": "ds", "entry_count": "y"})
-    df_real_r["ds"] = pd.to_datetime(df_real_r["ds"]).dt.tz_localize(None)
+    df_real_r["ds"] = _to_local_wall_series(df_real_r["ds"])
     df_real_r["y"]  = pd.to_numeric(df_real_r["y"], errors="coerce").fillna(0).astype(int)
+    _log("[Prophet:Time] Converted DB bucket timestamps to local wall-clock time before training/export")
+    _prophet_raw_fingerprint = _log_prophet_frame("raw DB buckets before smoothing/fill", df_real_r)
 
     real_span_days = (
         (df_real_r["ds"].max() - df_real_r["ds"].min()).total_seconds() / 86400
@@ -221,9 +345,9 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     else:
         df = df_real_r.sort_values("ds").reset_index(drop=True)
         if bootstrap and real_span_days >= MIN_REAL_DAYS_FOR_SIM:
-            print(f"[Ensemble] {real_span_days:.0f} days real — bootstrap not needed")
+            _log(f"[Data] {real_span_days:.2f} days real - bootstrap not needed")
         else:
-            print(f"[Ensemble] {real_span_days:.0f} days real — training on real data only")
+            _log(f"[Data] {real_span_days:.2f} days real - training on real data only")
 
     df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
     df["y"]  = pd.to_numeric(df["y"], errors="coerce").fillna(0)
@@ -237,6 +361,9 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     if not non_zero.empty:
         cap_value = max(float(non_zero.quantile(0.99)), 30.0)
         df["y"] = df["y"].clip(upper=cap_value)
+        _log(f"[Data] Outlier cap applied at y<={cap_value:.2f} from {len(non_zero)} non-zero buckets")
+    else:
+        _log("[Data] No non-zero buckets before closed-hour fill")
 
     # ── 3b. 15-min rolling median smooth (5 × 3-min buckets) ─────────────────
     df["y"] = (
@@ -245,37 +372,89 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         .median()
         .round(2)
     )
-    print(f"[Ensemble] Applied 15-min rolling median smooth to training data")
+    _log("[Data] Applied 15-min rolling median smooth to training data")
 
     # ── 4. Closed-hour zeros ─────────────────────────────────────────────────
     df = add_closed_zeros(df[["ds", "y"]].copy(), days=data_span_days)
 
-    print(f"[Ensemble] DataFrame shape: {df.shape}")
+    _open_mask_train = df["ds"].map(lambda t: is_open(pd.Timestamp(t)))
+    _log(
+        "[Data] Final Prophet/LSTM/XGB frame: "
+        f"rows={len(df)} open_rows={int(_open_mask_train.sum())} closed_zero_rows={int((~_open_mask_train).sum())} "
+        f"window={_fmt_ts(df['ds'].min())} -> {_fmt_ts(df['ds'].max())} "
+        f"total_y={float(df['y'].sum()):.1f} mean_y={float(df['y'].mean()):.2f} max_y={float(df['y'].max()):.1f}"
+    )
+    _prophet_train_fingerprint = _log_prophet_frame("final training frame after smoothing/fill", df)
 
     future_timestamps = future_open_timestamps()
     future_df = pd.DataFrame({"ds": future_timestamps})
     n_steps = len(future_timestamps)
+    _log(
+        "[Future] "
+        f"steps={n_steps} window={_fmt_ts(future_df['ds'].min() if not future_df.empty else None)} "
+        f"-> {_fmt_ts(future_df['ds'].max() if not future_df.empty else None)}"
+    )
 
     # ── MODEL 1 — PROPHET ────────────────────────────────────────────────────
     _prophet_meta = {}
     if os.path.exists(PROPHET_META_PATH):
         try:
-            import json as _json
             with open(PROPHET_META_PATH) as _mf:
-                _prophet_meta = _json.load(_mf)
+                _prophet_meta = json.load(_mf)
         except Exception:
             _prophet_meta = {}
     _prophet_days_changed = _prophet_meta.get("data_span_days") != data_span_days
+    _prophet_data_changed = _prophet_meta.get("train_fingerprint") != _prophet_train_fingerprint
+    _force_prophet_retrain = _truthy_env("FORCE_PROPHET_RETRAIN")
+    _models_fresh = _models_are_fresh()
+    _log(
+        "[Prophet:Cache] "
+        f"all_core_models_fresh={_models_fresh} "
+        f"prophet_meta_days={_prophet_meta.get('data_span_days', 'none')} "
+        f"requested_days={data_span_days} prophet_days_changed={_prophet_days_changed} "
+        f"meta_fingerprint={_prophet_meta.get('train_fingerprint', 'none')} "
+        f"current_fingerprint={_prophet_train_fingerprint} "
+        f"prophet_data_changed={_prophet_data_changed} force={_force_prophet_retrain}"
+    )
 
-    if _models_are_fresh() and not _prophet_days_changed:
-        print("\n[Prophet] Loading saved model...")
+    _prophet_cache_ok = (
+        _models_fresh
+        and not _prophet_days_changed
+        and not _prophet_data_changed
+        and not _force_prophet_retrain
+    )
+    if _prophet_cache_ok:
+        _log("\n[Prophet] Loading saved model...")
         with open(PROPHET_PATH, "rb") as _f:
             prophet_model = pickle.load(_f)
-        print("[Prophet] Loaded [ok]")
+        _log("[Prophet] Loaded [ok]")
     else:
-        _reason = "days changed" if _prophet_days_changed else "model stale"
-        print(f"\n[Prophet] Training ({_reason}, span={data_span_days}d)...")
+        _reasons = []
+        if _prophet_days_changed:
+            _reasons.append("days changed")
+        if _prophet_data_changed:
+            _reasons.append("data changed")
+        if _force_prophet_retrain:
+            _reasons.append("FORCE_PROPHET_RETRAIN")
+        if not _models_fresh:
+            _reasons.append("model stale/missing")
+        _reason = ", ".join(_reasons) if _reasons else "cache disabled"
         _cps = 0.30 if data_span_days <= 10 else (0.15 if data_span_days <= 20 else 0.1)
+        _prophet_params = {
+            "daily_seasonality": False,
+            "weekly_seasonality": data_span_days >= 7,
+            "yearly_seasonality": False,
+            "changepoint_prior_scale": _cps,
+            "seasonality_prior_scale": 10.0,
+            "interval_width": 0.80,
+            "daily_fourier_order": 10,
+            "weekly_fourier_order": 5 if data_span_days >= 7 else 0,
+        }
+        _log(
+            f"\n[Prophet] Training ({_reason}, span={data_span_days}d) | "
+            f"rows={len(df)} train_fingerprint={_prophet_train_fingerprint}"
+        )
+        _log(f"[Prophet:Params] {json.dumps(_prophet_params, sort_keys=True)}")
         prophet_model = Prophet(
             daily_seasonality=False,   # replaced by custom higher-order below
             weekly_seasonality=(data_span_days >= 7),
@@ -291,16 +470,44 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         prophet_model.fit(df)
         with open(PROPHET_PATH, "wb") as _f:
             pickle.dump(prophet_model, _f)
-        import json as _json
         with open(PROPHET_META_PATH, "w") as _mf:
-            _json.dump({"data_span_days": data_span_days}, _mf)
-        print("[Prophet] Trained and saved [ok]")
+            json.dump(
+                {
+                    "data_span_days": data_span_days,
+                    "raw_fingerprint": _prophet_raw_fingerprint,
+                    "train_fingerprint": _prophet_train_fingerprint,
+                    "train_rows": int(len(df)),
+                    "train_start": _fmt_ts(df["ds"].min()),
+                    "train_end": _fmt_ts(df["ds"].max()),
+                    "train_y_sum": float(df["y"].sum()),
+                    "params": _prophet_params,
+                    "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                _mf,
+                indent=2,
+            )
+        _log("[Prophet] Trained and saved [ok]")
+    prophet_train_fit = prophet_model.predict(df[["ds"]])[["ds", "yhat", "yhat_lower", "yhat_upper"]]
+    prophet_train_fit = df[["ds", "y"]].merge(prophet_train_fit, on="ds", how="left")
+    prophet_train_fit["data_span_days"] = data_span_days
+    prophet_train_fit["train_fingerprint"] = _prophet_train_fingerprint
+    prophet_train_fit.to_csv(PROPHET_FIT_PATH, index=False)
+    _log(f"[Prophet] Saved training fit curve to {PROPHET_FIT_PATH}")
     forecast       = prophet_model.predict(future_df)
     prophet_preds  = forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].reset_index(drop=True)
     prophet_vals   = prophet_preds["yhat"].clip(lower=0).values
+    _log(
+        "[Prophet] Forecast summary: "
+        f"min={float(np.min(prophet_vals)):.2f} mean={float(np.mean(prophet_vals)):.2f} "
+        f"max={float(np.max(prophet_vals)):.2f}"
+    )
+    _prophet_preview = ", ".join(
+        f"{row.ds.strftime('%H:%M')}={row.yhat:.2f}" for row in prophet_preds.head(6).itertuples()
+    )
+    _log(f"[Prophet] Forecast first6: {_prophet_preview}")
 
     # ── MODEL 2 — LSTM ───────────────────────────────────────────────────────
-    print("\n[LSTM] Preparing sequences...")
+    _log("\n[LSTM] Preparing sequences...")
 
     def _make_sequences(data, seq_len):
         X, y_out = [], []
@@ -318,13 +525,30 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     _open_mask_lstm = np.array([is_open(pd.Timestamp(t)) for t in df["ds"].values])
     y_open_values   = y_values[_open_mask_lstm]
 
-    if _models_are_fresh():
-        print("[LSTM] Loading saved model and scaler...")
+    _log(f"[LSTM] open_values={len(y_open_values)} sequence_len={SEQUENCE_LEN}")
+    _lstm_meta = _load_json(LSTM_META_PATH)
+    _lstm_cache_ok = (
+        _path_is_fresh(LSTM_PATH)
+        and _path_is_fresh(SCALER_PATH)
+        and _lstm_meta.get("data_span_days") == data_span_days
+        and _lstm_meta.get("train_fingerprint") == _prophet_train_fingerprint
+        and not _truthy_env("FORCE_LSTM_RETRAIN")
+    )
+    _log(
+        "[LSTM:Cache] "
+        f"fresh={_path_is_fresh(LSTM_PATH) and _path_is_fresh(SCALER_PATH)} "
+        f"meta_days={_lstm_meta.get('data_span_days', 'none')} requested_days={data_span_days} "
+        f"meta_fingerprint={_lstm_meta.get('train_fingerprint', 'none')} "
+        f"current_fingerprint={_prophet_train_fingerprint} cache_ok={_lstm_cache_ok}"
+    )
+
+    if _lstm_cache_ok:
+        _log("[LSTM] Loading saved model and scaler...")
         lstm_model = tf.keras.models.load_model(LSTM_PATH)
         with open(SCALER_PATH, "rb") as _f:
             scaler = pickle.load(_f)
         y_open_scaled = scaler.transform(y_open_values.reshape(-1, 1))
-        print("[LSTM] Loaded [ok]")
+        _log("[LSTM] Loaded [ok]")
     else:
         scaler = MinMaxScaler(feature_range=(0, 1))
         if len(df_real_r) > 0:
@@ -337,7 +561,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         y_open_scaled = scaler.transform(y_open_values.reshape(-1, 1))
 
         X_lstm, y_lstm = _make_sequences(y_open_scaled, SEQUENCE_LEN)
-        print(f"[LSTM] Training on {len(X_lstm)} open-hour sequences (epochs=20)...")
+        _log(f"[LSTM] Training on {len(X_lstm)} open-hour sequences (epochs=20)...")
         lstm_model = Sequential([
             LSTM(64, input_shape=(SEQUENCE_LEN, 1), return_sequences=True),
             Dropout(0.2),
@@ -350,13 +574,19 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         lstm_model.save(LSTM_PATH)
         with open(SCALER_PATH, "wb") as _f:
             pickle.dump(scaler, _f)
-        print("[LSTM] Trained and saved [ok]")
+        _save_json(LSTM_META_PATH, {
+            "data_span_days": data_span_days,
+            "train_fingerprint": _prophet_train_fingerprint,
+            "open_values": int(len(y_open_values)),
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        _log("[LSTM] Trained and saved [ok]")
 
     opening_profile_source = df_real_r if len(df_real_r) > 0 else df[["ds", "y"]]
     opening_profile_scaled = _build_lstm_opening_profile(opening_profile_source, scaler)
     opening_profile_raw = _build_lstm_opening_profile_raw(opening_profile_source)
     if opening_profile_scaled:
-        print(
+        _log(
             "[LSTM] Built opening profile "
             f"({len(opening_profile_scaled)} buckets over first {LSTM_OPENING_BLEND_MINUTES} min)"
         )
@@ -388,7 +618,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     ).flatten().clip(min=0)
 
     # ── MODEL 3 — XGBOOST ───────────────────────────────────────────────────
-    print("\n[XGBoost] Building features...")
+    _log("\n[XGBoost] Building features...")
 
     FEATURE_COLS = [
         "hour", "minute_of_hour", "day_of_week", "is_weekend",
@@ -409,12 +639,27 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         return d.dropna()
 
     df_feat = _build_features(df)
+    _log(f"[XGBoost] Feature rows={len(df_feat)} feature_cols={FEATURE_COLS}")
+    _xgb_meta = _load_json(XGB_META_PATH)
+    _xgb_cache_ok = (
+        _path_is_fresh(XGB_PATH)
+        and _xgb_meta.get("data_span_days") == data_span_days
+        and _xgb_meta.get("train_fingerprint") == _prophet_train_fingerprint
+        and not _truthy_env("FORCE_XGB_RETRAIN")
+    )
+    _log(
+        "[XGBoost:Cache] "
+        f"fresh={_path_is_fresh(XGB_PATH)} "
+        f"meta_days={_xgb_meta.get('data_span_days', 'none')} requested_days={data_span_days} "
+        f"meta_fingerprint={_xgb_meta.get('train_fingerprint', 'none')} "
+        f"current_fingerprint={_prophet_train_fingerprint} cache_ok={_xgb_cache_ok}"
+    )
 
-    if _models_are_fresh():
-        print("[XGBoost] Loading saved model...")
+    if _xgb_cache_ok:
+        _log("[XGBoost] Loading saved model...")
         xgb_model = xgb.XGBRegressor()
         xgb_model.load_model(XGB_PATH)
-        print("[XGBoost] Loaded [ok]")
+        _log("[XGBoost] Loaded [ok]")
     else:
         xgb_model = xgb.XGBRegressor(
             n_estimators=200, max_depth=4, learning_rate=0.05,
@@ -422,7 +667,13 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         )
         xgb_model.fit(df_feat[FEATURE_COLS], df_feat["y"])
         xgb_model.save_model(XGB_PATH)
-        print("[XGBoost] Trained and saved [ok]")
+        _save_json(XGB_META_PATH, {
+            "data_span_days": data_span_days,
+            "train_fingerprint": _prophet_train_fingerprint,
+            "feature_rows": int(len(df_feat)),
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        _log("[XGBoost] Trained and saved [ok]")
 
     # Seed from real observed data only — df["y"] ends with add_closed_zeros synthetic
     # zeros for overnight/post-close gaps, which poison lag_1/lag_2/lag_3 and
@@ -472,11 +723,18 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         lstm_vals[i] = max(float(lstm_vals[i]), morning_floor)
 
     # ── ENSEMBLE ─────────────────────────────────────────────────────────────
-    print("\n[Ensemble] Combining predictions (Prophet 40% / LSTM 30% / XGBoost 30%)...")
+    _log("\n[Ensemble] Combining predictions (Prophet 40% / LSTM 30% / XGBoost 30%)...")
     ensemble_vals = (W_PROPHET * prophet_vals + W_LSTM * lstm_vals + W_XGB * xgb_vals).clip(min=0).round(1)
+    _log(
+        "[Ensemble] Forecast summary: "
+        f"prophet_mean={float(np.mean(prophet_vals)):.2f} "
+        f"lstm_mean={float(np.mean(lstm_vals)):.2f} "
+        f"xgb_mean={float(np.mean(xgb_vals)):.2f} "
+        f"ensemble_mean={float(np.mean(ensemble_vals)):.2f}"
+    )
 
     # ── Wait estimates ────────────────────────────────────────────────────────
-    print("\n[Wait] Loading current queue state from snapshots...")
+    _log("\n[Wait] Loading current queue state from snapshots...")
     _conn_snap = psycopg2.connect(**DB_CONFIG)
     try:
         snap_latest = pd.read_sql("""
@@ -515,6 +773,12 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         """, _conn_svc)
     finally:
         _conn_svc.close()
+    if not df_svc.empty:
+        df_svc["timestamp"] = _to_local_wall_series(df_svc["timestamp"])
+        _log(
+            "[Dwell:Time] Converted service_event timestamps to local wall-clock time "
+            "before dwell model features"
+        )
 
     # Flat median fallback (always compute as safety net)
     svc_median = None
@@ -526,8 +790,24 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
 
     # Train / load XGBoost dwell model
     dwell_model = None
-    _dwell_fresh = os.path.exists(DWELL_MODEL_PATH) and (_time.time() - os.path.getmtime(DWELL_MODEL_PATH)) < MODEL_MAX_AGE_HOURS * 3600
-    if _dwell_fresh:
+    _dwell_fingerprint = _frame_fingerprint(
+        df_svc.rename(columns={"timestamp": "ds", "service_min": "y"})[["ds", "y"]]
+    ) if not df_svc.empty else "empty"
+    _dwell_meta = _load_json(DWELL_META_PATH)
+    _dwell_cache_ok = (
+        _path_is_fresh(DWELL_MODEL_PATH)
+        and _dwell_meta.get("data_span_days") == data_span_days
+        and _dwell_meta.get("dwell_fingerprint") == _dwell_fingerprint
+        and not _truthy_env("FORCE_DWELL_RETRAIN")
+    )
+    _log(
+        "[Dwell:Cache] "
+        f"fresh={_path_is_fresh(DWELL_MODEL_PATH)} "
+        f"meta_days={_dwell_meta.get('data_span_days', 'none')} requested_days={data_span_days} "
+        f"meta_fingerprint={_dwell_meta.get('dwell_fingerprint', 'none')} "
+        f"current_fingerprint={_dwell_fingerprint} cache_ok={_dwell_cache_ok}"
+    )
+    if _dwell_cache_ok:
         print("[Dwell] Loading saved dwell model...")
         dwell_model = xgb.XGBRegressor()
         dwell_model.load_model(DWELL_MODEL_PATH)
@@ -535,7 +815,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     elif not df_svc.empty and len(df_svc) >= 30:
         print(f"[Dwell] Training dwell model on {len(df_svc)} service events...")
         _ds = df_svc.copy()
-        _ds["timestamp"] = pd.to_datetime(_ds["timestamp"]).dt.tz_localize(None)
+        _ds["timestamp"] = pd.to_datetime(_ds["timestamp"])
         _ds["hour"]           = _ds["timestamp"].dt.hour
         _ds["minute_of_hour"] = _ds["timestamp"].dt.minute
         _ds["day_of_week"]    = _ds["timestamp"].dt.dayofweek
@@ -547,6 +827,12 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         )
         dwell_model.fit(_ds[DWELL_FEATURE_COLS], _ds["service_min"])
         dwell_model.save_model(DWELL_MODEL_PATH)
+        _save_json(DWELL_META_PATH, {
+            "data_span_days": data_span_days,
+            "dwell_fingerprint": _dwell_fingerprint,
+            "events": int(len(df_svc)),
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
         print(f"[Dwell] Trained and saved [ok]  (median={avg_dwell_min:.2f} min)")
     else:
         print(f"[Dwell] Not enough data ({len(df_svc)} events) — using flat median fallback ({avg_dwell_min:.2f} min)")
@@ -594,7 +880,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     finally:
         _conn_hist.close()
 
-    df_hist["bucket"] = pd.to_datetime(df_hist["bucket"]).dt.tz_localize(None)
+    df_hist["bucket"] = _to_local_wall_series(df_hist["bucket"])
     hist_by_time = dict(
         zip(df_hist["bucket"].dt.floor(f"{BUCKET_MINUTES}min"),
             df_hist["entry_count"].astype(float))
@@ -874,6 +1160,7 @@ def _save_to_db(result: dict) -> None:
 
 if __name__ == "__main__":
     import argparse
+    import traceback
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=str, default="REAL", choices=["REAL", "SIM", "ALL"])
@@ -883,7 +1170,15 @@ if __name__ == "__main__":
                         help="Number of past days of entrance_events to use for training (default: DATA_SPAN_DAYS env var or 30).")
     args = parser.parse_args()
 
-    result = run_ensemble_forecast(source=args.source, bootstrap=args.bootstrap, data_span_days=args.days)
-    _print_results(result)
-    _save_to_db(result)
-    print("\n[Ensemble] All done.")
+    _main_started = datetime.now()
+    try:
+        result = run_ensemble_forecast(source=args.source, bootstrap=args.bootstrap, data_span_days=args.days)
+        _print_results(result)
+        _save_to_db(result)
+        _elapsed = (datetime.now() - _main_started).total_seconds()
+        _log(f"\n[Run] Ensemble forecast finished successfully in {_elapsed:.1f}s")
+    except Exception as exc:
+        _elapsed = (datetime.now() - _main_started).total_seconds()
+        _log(f"\n[Run] Ensemble forecast FAILED after {_elapsed:.1f}s: {exc}")
+        traceback.print_exc()
+        raise
