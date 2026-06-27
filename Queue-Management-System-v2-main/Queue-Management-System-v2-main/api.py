@@ -230,16 +230,16 @@ def forecast():
         wait_10  = _f(state["wait_10m"])
         wait_15  = _f(state["wait_15m"])
 
-        lane_waits = {
-            1: _f(state["lane1_wait_15m"]) or 0.0,
-            2: _f(state["lane2_wait_15m"]) or 0.0,
-            3: _f(state["lane3_wait_15m"]) or 0.0,
-            4: _f(state["lane4_wait_15m"]) or 0.0,
-        }
-
+        # Per-lane scenario waits at +10 min horizon.
+        # lane{n}_wait_10m is not stored in dashboard_state, so we derive it
+        # proportionally from wait_10m: demand is ~constant at this horizon,
+        # so wait scales linearly with 1/lanes.
         scenarios = []
         for n in range(1, 5):
-            estimated = lane_waits[n]
+            if wait_10 is not None and current_lanes > 0:
+                estimated = round(wait_10 * current_lanes / n, 1)
+            else:
+                estimated = 0.0
             if estimated > 10:
                 color = "red"
             elif estimated > 7:
@@ -463,6 +463,68 @@ def forecast_chart_3h():
             "slots": [
                 {
                     "time":     row["prediction_for"].strftime("%H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/forecast-chart-12h")
+def forecast_chart_12h():
+    """Returns 12-hour time series of predicted arrivals and wait for the app chart."""
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE prediction_for >= NOW()
+                      AND prediction_for <= NOW() + INTERVAL '12 hours'
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """)
+                rows = cur.fetchall()
+        return {
+            "slots": [
+                {
+                    "time":     row["prediction_for"].strftime("%H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/forecast-chart-2d")
+def forecast_chart_2d():
+    """Returns 2-day history + forecast time series for the app chart."""
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE prediction_for >= NOW() - INTERVAL '2 days'
+                      AND prediction_for <= NOW() + INTERVAL '12 hours'
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """)
+                rows = cur.fetchall()
+        return {
+            "slots": [
+                {
+                    "time":     row["prediction_for"].strftime("%d/%m %H:%M"),
                     "arrivals": round(float(row["arrivals"]), 1),
                     "wait_min": round(float(row["wait_min"]), 1),
                 }
