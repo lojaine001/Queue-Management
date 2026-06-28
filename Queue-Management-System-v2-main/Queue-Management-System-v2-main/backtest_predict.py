@@ -161,7 +161,8 @@ def _check_models():
     missing = [
         name for path, name in [
             (LSTM_PATH, "LSTM"), (SCALER_PATH, "Scaler"),
-            (XGB_PATH, "XGBoost"), (PROPHET_PATH, "Prophet"),
+            (XGB_PATH, "XGBoost"),
+            # Prophet excluded: backtest writes prophet_yhat=NULL (leakage risk)
         ]
         if not os.path.exists(path)
     ]
@@ -190,8 +191,6 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
 
     # ── 1. Load trained models ────────────────────────────────────────────────
     print("[Backtest] Loading trained models...")
-    with open(PROPHET_PATH, "rb") as fh:
-        prophet_model = pickle.load(fh)
     lstm_model = tf.keras.models.load_model(LSTM_PATH)
     with open(SCALER_PATH, "rb") as fh:
         scaler = pickle.load(fh)
@@ -248,13 +247,7 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
     n = len(past_slots)
     print(f"[Backtest] {n} open-hour slots to predict")
 
-    # ── 3. Prophet (batch) ────────────────────────────────────────────────────
-    prophet_df = pd.DataFrame({"ds": past_slots["ds"].values})
-    prophet_preds = prophet_model.predict(prophet_df)
-    prophet_vals  = prophet_preds["yhat"].clip(lower=0).values
-    print("[Backtest] Prophet predictions done ✓")
-
-    # ── 4. LSTM (batch with actual sliding window) ────────────────────────────
+    # ── 3. LSTM (batch with actual sliding window) ────────────────────────────
     y_scaled   = scaler.transform(df_full["y"].values.reshape(-1, 1))
     ds_to_idx  = {row["ds"]: i for i, row in df_full.iterrows()}
 
@@ -312,15 +305,16 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
         floor_share = LSTM_OPENING_FLOOR_SHARE_MAX + (
             (LSTM_OPENING_FLOOR_SHARE_MIN - LSTM_OPENING_FLOOR_SHARE_MAX) * progress
         )
-        model_baseline = max(float(prophet_vals[i]), float(xgb_vals[i]))
+        model_baseline = float(xgb_vals[i])
         opening_hist = float(opening_profile_raw.get(minute_of_day, 0.0))
         opening_baseline = max(opening_hist, 0.6 * model_baseline)
         morning_floor = max(0.0, floor_share * opening_baseline)
         lstm_vals[i] = max(float(lstm_vals[i]), morning_floor)
 
-    # ── 6. Ensemble ───────────────────────────────────────────────────────────
+    # ── 6. Ensemble (Prophet excluded — leakage risk; renormalize LSTM+XGBoost) ──
+    _w_total = W_LSTM + W_XGB
     ensemble_vals = (
-        W_PROPHET * prophet_vals + W_LSTM * lstm_vals + W_XGB * xgb_vals
+        (W_LSTM / _w_total) * lstm_vals + (W_XGB / _w_total) * xgb_vals
     ).clip(min=0).round(1)
 
     # ── 7. Save to DB ─────────────────────────────────────────────────────────
@@ -337,6 +331,18 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur  = conn.cursor()
+    cur.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'queue_predictions' AND column_name = 'source'
+            ) THEN
+                ALTER TABLE queue_predictions
+                    ADD COLUMN source VARCHAR(20) DEFAULT 'ensemble';
+            END IF;
+        END $$;
+    """)
+    conn.commit()
     predicted_at = datetime.now()
     saved = 0
 
@@ -346,19 +352,20 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
             INSERT INTO queue_predictions
                 (predicted_at, prediction_for,
                  prophet_yhat, lstm_yhat, xgb_yhat, ensemble_yhat,
-                 est_wait_minutes, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                 est_wait_minutes, status, source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (prediction_for) {conflict_action}
             """,
             (
                 predicted_at,
                 row["ds"].to_pydatetime(),
-                _db_val(prophet_vals[i]),
+                None,                        # prophet_yhat — NULL (leakage risk)
                 _db_val(lstm_vals[i]),
                 _db_val(xgb_vals[i]),
                 _db_val(ensemble_vals[i]),
                 None,
                 None,
+                'backtest',
             ),
         )
         saved += cur.rowcount

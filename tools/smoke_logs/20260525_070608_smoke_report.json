@@ -1,0 +1,98 @@
+[
+  {
+    "name": "compile targets",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779685548.5472753,
+    "ended_at": 1779685548.7145596,
+    "duration_sec": 0.16728425025939941,
+    "detail": "ok",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_070548_compile_targets.log",
+    "exit_code": 0,
+    "extra": {}
+  },
+  {
+    "name": "pipeline dry run",
+    "ok": false,
+    "kind": "command",
+    "started_at": 1779685548.7173562,
+    "ended_at": 1779685548.7845917,
+    "duration_sec": 0.06723546981811523,
+    "detail": "exit code 1",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_070548_pipeline_dry_run.log",
+    "exit_code": 1,
+    "extra": {}
+  },
+  {
+    "name": "hybrid dry run",
+    "ok": false,
+    "kind": "command",
+    "started_at": 1779685548.7859418,
+    "ended_at": 1779685548.9031131,
+    "duration_sec": 0.1171712875366211,
+    "detail": "exit code 1",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_070548_hybrid_dry_run.log",
+    "exit_code": 1,
+    "extra": {}
+  },
+  {
+    "name": "ensemble dry run",
+    "ok": false,
+    "kind": "command",
+    "started_at": 1779685548.907314,
+    "ended_at": 1779685549.0259116,
+    "duration_sec": 0.11859750747680664,
+    "detail": "exit code 1",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_070548_ensemble_dry_run.log",
+    "exit_code": 1,
+    "extra": {}
+  },
+  {
+    "name": "backtest model readiness",
+    "ok": false,
+    "kind": "command",
+    "started_at": 1779685549.0324657,
+    "ended_at": 1779685562.8533437,
+    "duration_sec": 13.820878028869629,
+    "detail": "exit code 1",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_070549_backtest_model_readiness.log",
+    "exit_code": 1,
+    "extra": {}
+  },
+  {
+    "name": "hybrid app",
+    "ok": false,
+    "kind": "streamlit",
+    "started_at": 1779685562.8587308,
+    "ended_at": 1779685563.8689747,
+    "duration_sec": 1.0102438926696777,
+    "detail": "streamlit exited early with code 1",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_070602_hybrid_app.log",
+    "exit_code": 1,
+    "extra": {
+      "root_url": "http://127.0.0.1:8511/",
+      "health_url": "http://127.0.0.1:8511/_stcore/health",
+      "page_ready": false,
+      "health_ready": false,
+      "marker_ready": false
+    }
+  },
+  {
+    "name": "dashboard app",
+    "ok": false,
+    "kind": "streamlit",
+    "started_at": 1779685563.8730025,
+    "ended_at": 1779685568.8876028,
+    "duration_sec": 5.0146002769470215,
+    "detail": "streamlit exited early with code 2",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_070603_dashboard_app.log",
+    "exit_code": 2,
+    "extra": {
+      "root_url": "http://127.0.0.1:8512/",
+      "health_url": "http://127.0.0.1:8512/_stcore/health",
+      "page_ready": false,
+      "health_ready": false,
+      "marker_ready": true
+    }
+  }
+]

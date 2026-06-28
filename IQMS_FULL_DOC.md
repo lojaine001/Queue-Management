@@ -365,12 +365,31 @@ Optimizer: `adam`, Loss: `mse`, Epochs: 20, Batch: 32. MinMax-scaled on real dat
 | `lag_12` | feature name retained; used as a 60 min lag in the current 3-min implementation |
 | `rolling_mean_6` | feature name retained; used as a 30-min trailing average in the current 3-min implementation |
 
-#### Ensemble combination
+#### Prophet seasonality
+
+Custom higher-order seasonalities (May 2026):
+
+```python
+prophet_model.add_seasonality(name='daily',  period=1, fourier_order=10)
+prophet_model.add_seasonality(name='weekly', period=7, fourier_order=5)
+```
+
+`changepoint_prior_scale=0.10` (raised from 0.05). Higher Fourier orders capture sharp opening rush, lunch peak, and evening peak patterns that default orders miss.
+
+**Leakage note:** Prophet trains on all historical data, so for backtest (retroactive) runs its seasonality encodes future information. `backtest_predict.py` therefore writes `prophet_yhat=NULL` and excludes Prophet from the backtest ensemble.
+
+#### Ensemble combination (real-time)
 
 ```python
 ensemble = 0.40 * prophet_vals + 0.30 * lstm_vals + 0.30 * xgb_vals
 ensemble = ensemble.clip(min=0).round(1)
 ```
+
+Each row is tagged `source='ensemble'`. See §6.4 for the backtest variant.
+
+#### XGBoost lag seed
+
+`recent_y` is seeded from real DB data only (`df_real_r["y"]`), not the `add_closed_zeros`-augmented series. After an overnight gap the augmented series ends with hundreds of synthetic zeros, poisoning `lag_1/lag_2/lag_3/rolling_mean_6` and causing near-zero predictions at day opening.
 
 #### Dynamic wait-time estimation
 
@@ -387,6 +406,25 @@ for arrivals in ensemble_vals:
 ```
 
 `wait_15m` = step 5, `wait_30m` = step 10. Status: `OK` (<5 min), `BUSY` (5–10 min), `ALERT` (≥10 min).
+
+**Scheduling:** Use `predict_runner.py` — a long-running process that calls `ensemble_predict.py` every `PREDICT_INTERVAL_MIN` minutes (default 15) but only while `is_open()` returns `True`. Outside open hours it logs `shop closed, skipping` and waits. Respects `SHOP_SCHEDULE_OVERRIDE`.
+
+### 6.4 `backtest_predict.py` — retroactive historical fill
+
+Fills `queue_predictions` for past open-hour slots using the already-trained LSTM and XGBoost models. Prophet is **excluded** (`prophet_yhat=NULL`) to avoid global-seasonality leakage.
+
+```bash
+python backtest_predict.py --days 30
+python backtest_predict.py --days 7 --source REAL --overwrite
+```
+
+| Aspect | `ensemble_predict.py` | `backtest_predict.py` |
+|---|---|---|
+| Target | Future slots | Past slots |
+| `predicted_at` | ≤ `prediction_for` | > `prediction_for` |
+| Prophet | included | **excluded** (NULL) |
+| Ensemble | 0.40·P + 0.30·L + 0.30·X | (0.30·L + 0.30·X) / 0.60 |
+| `source` | `'ensemble'` | `'backtest'` |
 
 ---
 
@@ -458,6 +496,9 @@ Written by `ensemble_predict.py`.
 | `wait_15m` | NUMERIC(8,2) | wait at +15 min horizon |
 | `wait_30m` | NUMERIC(8,2) | wait at +30 min horizon |
 | `status` | VARCHAR(10) | `OK` / `BUSY` / `ALERT` |
+| `source` | VARCHAR(20) | `'ensemble'` (real-time) or `'backtest'` (retroactive fill) |
+
+**Leakage guarantee:** `load_full_model_predictions()` in the dashboard uses `AND (predicted_at <= prediction_for OR source = 'backtest')` to ensure only forward-looking predictions (or explicitly-disclosed backtest rows with `prophet_yhat=NULL`) appear in historical charts.
 
 ### 7.5 Recommended Grafana queries
 
@@ -833,7 +874,7 @@ Two `IndexError` crashes fixed in `prediction/core.py`:
 1. Early-exit when `forecast_df` is empty (`n_steps == 0`) — returns `([], None, None, 0.0)` immediately.
 2. `dwell_per_step` and `lanes_per_step` lists are padded to `n_steps` after construction; the fill value falls back to `1.0` / `1` when the source list is itself empty (e.g. no XGBoost dwell predictions available).
 
-**Fix 23 — Dashboard chart improvements**
+**Fix 23 — Dashboard chart accuracy improvements**
 
 | Area | Change |
 |---|---|
@@ -844,6 +885,48 @@ Two `IndexError` crashes fixed in `prediction/core.py`:
 | Arrivals bar chart (`fig_cap`) | Bars now show per-5-min-group means (via `pf` display frame) with a 2-bucket centred rolling smooth, so the note's reported range exactly matches bar heights |
 | Per-bar capacity line | Each bar's capacity computed from `_dwell_per_slot_base` values averaged within the matching 5-min group — consistent with the XGBoost dwell predictions shown in the note |
 
+### May 2026 (Part 2) — Data integrity, leakage prevention & dashboard robustness
+
+**Fix 24 — `queue_predictions.source` column**
+
+Added `source VARCHAR(20) DEFAULT 'ensemble'` to `queue_predictions`. Rows written by `ensemble_predict.py` carry `'ensemble'`; rows written by `backtest_predict.py` carry `'backtest'`. Idempotent migration block in both scripts.
+
+**Fix 25 — Backtest Prophet leakage**
+
+Prophet excluded from `backtest_predict.py`. `prophet_yhat=NULL` for all backtest rows. Ensemble renormalized to LSTM + XGBoost: `(W_LSTM·lstm + W_XGB·xgb) / (W_LSTM + W_XGB)`. XGBoost and LSTM remain leakage-free (lag/sliding-window features only look backward).
+
+**Fix 26 — Prophet Fourier orders**
+
+Fourier orders raised: `daily fourier_order=10` (was 4), `weekly fourier_order=5` (was 3). `changepoint_prior_scale=0.10` (was 0.05). Captures sharp opening rush, lunch, and evening peaks that default orders miss.
+
+**Fix 27 — XGBoost lag seed poisoned by `add_closed_zeros`**
+
+`recent_y` for iterative XGBoost forecasting now seeded from `df_real_r["y"]` (real DB rows only), not the `add_closed_zeros`-augmented series. After an overnight gap the augmented series ends with hundreds of synthetic zeros, making lag features all 0 and causing near-zero predictions at day opening.
+
+**Fix 28 — Dashboard historical chart leakage guard**
+
+`load_full_model_predictions()` query amended:
+```sql
+AND (predicted_at <= prediction_for OR source = 'backtest')
+```
+Real-time rows (`predicted_at ≤ prediction_for`) are mathematically leakage-free. Backtest rows are admitted with `prophet_yhat=NULL` disclosure.
+
+**Fix 29 — Live Operations metrics shown when store is closed**
+
+`_store_open_now = is_open(pd.Timestamp.now(tz=LOCAL_TZ))` guard added. All wait metrics and per-lane waits set to `None` when the store is closed.
+
+**Fix 30 — Prediction scheduler not shop-hours-aware**
+
+New `predict_runner.py` replaces the old fixed-interval scheduler. Checks `is_open()` before each run; skips silently outside operating hours; respects `SHOP_SCHEDULE_OVERRIDE`.
+
+**Fix 31 — Reset & Recalc deleted irreplaceable historical predictions**
+
+`_clear_future_predictions()` now deletes only `prediction_for > NOW()`. Historical real-time rows (leakage-free, non-reproducible) are preserved. Two-step confirmation pattern (`_confirm_reset` / `_do_reset` session state flags) prevents accidental clicks.
+
+**Fix 32 — Service Dwell Time chart "Now" line misalignment**
+
+Both arrival and dwell charts now use UTC epoch milliseconds for x-axis range: `int(ts.timestamp() * 1000)`. The XGBoost + LSTM mean trace now includes both historical open slots and one future slot, using tz-naive timestamps throughout to avoid `TypeError: Cannot mix tz-aware with tz-naive`.
+
 ---
 
 ## 13. Known Limitations
@@ -851,7 +934,7 @@ Two `IndexError` crashes fixed in `prediction/core.py`:
 - `track_id` resets on app restart — use `timestamp` for cross-session analysis
 - `service_events` not yet populated by live production pipelines (only simulator)
 - `active_lanes` is static per session; restart required after config change
-- `ensemble_predict.py` is a one-shot script, must be scheduled externally
+- `predict_runner.py` must remain running as a long-lived process; use a Windows Service or `nohup`
 - Gender/age bucket enrichment meaningful only for Pipeline B (`Bosch_Camera_Entrance`)
 - Pipeline A always stores `has_bag=FALSE`, `gender='unknown'`, `age=NULL`
 - Single-polygon ROI per pipeline instance
@@ -860,4 +943,4 @@ Two `IndexError` crashes fixed in `prediction/core.py`:
 
 ---
 
-*Generated: 2026-04-12 | Updated: 2026-05-24 | IQMS v2 with insert-at-death, bag detection, 3-min buckets, per-day schedule*
+*Generated: 2026-04-12 | Updated: 2026-05-24 | IQMS v2 — insert-at-death, bag detection, 3-min buckets, per-day schedule, source column, backtest leakage fix, Prophet Fourier orders, predict_runner, Reset & Recalc*

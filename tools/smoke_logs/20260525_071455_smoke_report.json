@@ -1,0 +1,40 @@
+[
+  {
+    "name": "hybrid app",
+    "ok": true,
+    "kind": "streamlit",
+    "started_at": 1779686089.2580087,
+    "ended_at": 1779686092.2814968,
+    "duration_sec": 3.0234880447387695,
+    "detail": "ok",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_071449_hybrid_app.log",
+    "exit_code": -15,
+    "extra": {
+      "root_url": "http://127.0.0.1:8511/",
+      "health_url": "http://127.0.0.1:8511/_stcore/health",
+      "startup_ready": true,
+      "page_ready": false,
+      "health_ready": false,
+      "marker_ready": true
+    }
+  },
+  {
+    "name": "dashboard app",
+    "ok": true,
+    "kind": "streamlit",
+    "started_at": 1779686092.283847,
+    "ended_at": 1779686095.308983,
+    "duration_sec": 3.0251359939575195,
+    "detail": "ok",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_071452_dashboard_app.log",
+    "exit_code": -15,
+    "extra": {
+      "root_url": "http://127.0.0.1:8512/",
+      "health_url": "http://127.0.0.1:8512/_stcore/health",
+      "startup_ready": true,
+      "page_ready": false,
+      "health_ready": false,
+      "marker_ready": true
+    }
+  }
+]

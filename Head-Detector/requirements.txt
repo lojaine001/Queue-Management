@@ -3,7 +3,7 @@ PyYAML
 python-dotenv
 pyrootutils
 opencv-python<4.11
-numpy>=2.0
+numpy>=1.23.0,<2.0.0
 colorlog
 Pillow
 scipy>=1.10,<1.16
@@ -19,6 +19,8 @@ openvino==2025.3.0
 # different tracker path is selected, but the standard Head-Detector install
 # still keeps it available.
 norfair==2.3.0
+torch
+transformers
 requests
 pandas
 tqdm

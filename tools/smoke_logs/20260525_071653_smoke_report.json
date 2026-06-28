@@ -1,0 +1,62 @@
+[
+  {
+    "name": "compile targets",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779686156.7132185,
+    "ended_at": 1779686157.2172182,
+    "duration_sec": 0.5039997100830078,
+    "detail": "ok",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_071556_compile_targets.log",
+    "exit_code": 0,
+    "extra": {}
+  },
+  {
+    "name": "pipeline dry run",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779686157.2252932,
+    "ended_at": 1779686159.734603,
+    "duration_sec": 2.509309768676758,
+    "detail": "ok",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_071557_pipeline_dry_run.log",
+    "exit_code": 0,
+    "extra": {}
+  },
+  {
+    "name": "hybrid dry run",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779686159.7413156,
+    "ended_at": 1779686192.291081,
+    "duration_sec": 32.54976534843445,
+    "detail": "ok",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_071559_hybrid_dry_run.log",
+    "exit_code": 0,
+    "extra": {}
+  },
+  {
+    "name": "ensemble dry run",
+    "ok": false,
+    "kind": "command",
+    "started_at": 1779686192.2952394,
+    "ended_at": 1779686209.3215384,
+    "duration_sec": 17.026298999786377,
+    "detail": "exit code -13",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_071632_ensemble_dry_run.log",
+    "exit_code": -13,
+    "extra": {}
+  },
+  {
+    "name": "backtest model readiness",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779686209.3243237,
+    "ended_at": 1779686213.8357036,
+    "duration_sec": 4.511379957199097,
+    "detail": "ok",
+    "log_path": "/mnt/c/Users/arnau/Documents/project/rtsp/Retail-Wait-Prediction/Queue-Management/tools/smoke_logs/20260525_071649_backtest_model_readiness.log",
+    "exit_code": -9,
+    "extra": {}
+  }
+]

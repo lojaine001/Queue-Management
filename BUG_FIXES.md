@@ -597,6 +597,243 @@ def insert_entrance(self, track_id, gender, age, confidence, camera_id,
 
 ---
 
+---
+
+## May 2026 (Part 1) — Per-day schedule, prediction accuracy & chart improvements
+
+### 20. Shop hours not per-day aware
+
+**Problem**
+
+`SHOP_OPEN` and `SHOP_CLOSE` were global constants, forcing all days to the same hours.
+
+**Fix**
+
+Added `SHOP_SCHEDULE_OVERRIDE` JSON env var (weekday-keyed, `"0"` = Monday … `"6"` = Sunday) and `_day_hours(weekday)` helper in `prediction/core.py`. `is_open()` and `future_open_timestamps()` both resolve per-day hours. The dashboard exposes today's effective window via `_today_hours()` and renders a context pill with an `(override)` badge.
+
+Example (Sunday closes at 13:00):
+```
+SHOP_SCHEDULE_OVERRIDE={"6": {"close_hour": 13, "close_minute": 0}}
+```
+
+---
+
+### 21. Live Operations predictions not filtered by open hours
+
+**Problem**
+
+`load_predictions()` returned future rows without filtering by open hours, showing tomorrow's open-period predictions outside current shop hours.
+
+**Fix**
+
+After loading, the dashboard applies `is_open()` to `pred_df` rows so Live Operations never shows predictions outside the shop's operating window.
+
+---
+
+### 22. `compute_wait_estimates` IndexError on empty or short forecasts
+
+**Problem**
+
+Two `IndexError` crashes in `prediction/core.py` when `forecast_df` was empty or when `dwell_per_step` / `lanes_per_step` lists were shorter than `n_steps`.
+
+**Fix**
+
+1. Early-exit when `forecast_df` is empty — returns `([], None, None, 0.0)` immediately.
+2. Lists are padded to `n_steps` after construction; fill value falls back to `1.0` / `1` when the source list is itself empty.
+
+---
+
+### 23. Dashboard chart accuracy improvements
+
+Various chart display accuracy fixes:
+
+| Area | Change |
+|---|---|
+| `fig_s2` y-axis | Auto-scaled to `max(peak_queue × 1.3, WAIT_ALERT_MIN + 5, 15)` |
+| `fig_cap` y-axis | Auto-scaled to `max(pred_max × 1.3, effective_cap × 1.3, 8)` |
+| Net flow dead-band | Clamped to 1 decimal; "balanced" label when \|arrivals − capacity\| ≤ 1.0 |
+| `_eff_dwell` | Uses XGBoost dwell prediction for slot 0 instead of the mean |
+| Arrivals bar chart | Per-5-min-group means with 2-bucket centred rolling smooth |
+| Per-bar capacity line | Computed from `_dwell_per_slot_base` values averaged within 5-min groups |
+
+---
+
+## May 2026 (Part 2) — Data integrity, leakage prevention & dashboard robustness
+
+### 24. `queue_predictions.source` column missing
+
+**Problem**
+
+There was no way to distinguish rows written by the real-time runner (`ensemble_predict.py`, `predicted_at ≤ prediction_for`) from rows written retroactively by `backtest_predict.py` (`predicted_at > prediction_for`). Backtest rows could appear in the historical chart as if they were genuine forward predictions.
+
+**Fix**
+
+Added `source VARCHAR(20) DEFAULT 'ensemble'` column to `queue_predictions`. An idempotent migration block in both `ensemble_predict.py` and `backtest_predict.py` adds the column automatically if it does not yet exist.
+
+```sql
+ALTER TABLE queue_predictions ADD COLUMN source VARCHAR(20) DEFAULT 'ensemble';
+```
+
+Default `'ensemble'` ensures existing rows (all written by the real-time runner) receive the correct label without a manual backfill.
+
+---
+
+### 25. Backtest Prophet leakage — `prophet_yhat` written as NULL
+
+**Problem**
+
+`backtest_predict.py` ran the saved Prophet model to generate `prophet_yhat` for historical slots. Prophet's global seasonality is trained on *all* available data including data after the target slot → systematic lookahead for any past slot.
+
+**Fix**
+
+- Prophet removed from `backtest_predict.py` entirely (`_check_models()` no longer requires the pkl file, no model loading, no prediction step).
+- `prophet_yhat = NULL` for all backtest rows.
+- Ensemble renormalized to LSTM + XGBoost only:
+
+```python
+_w_total = W_LSTM + W_XGB
+ensemble_vals = ((W_LSTM / _w_total) * lstm_vals + (W_XGB / _w_total) * xgb_vals).clip(min=0).round(1)
+```
+
+XGBoost and LSTM remain leakage-free by construction: lag features only look backward, and the LSTM sliding window uses only actual historical values up to each slot.
+
+---
+
+### 26. Prophet Fourier orders too low to capture sharp retail peaks
+
+**Problem**
+
+Default Fourier orders (daily=4, weekly=3) could not model the sharp morning opening rush, lunch peak, and evening peak transitions typical in retail.
+
+**Fix**
+
+Higher custom seasonality in `ensemble_predict.py`:
+
+```python
+prophet_model.add_seasonality(name='daily',  period=1, fourier_order=10)
+prophet_model.add_seasonality(name='weekly', period=7, fourier_order=5)
+```
+
+`changepoint_prior_scale` raised from `0.05` → `0.10` for better trend adaptation during week-on-week traffic shifts.
+
+---
+
+### 27. XGBoost lag seed poisoned by synthetic closed-hour zeros
+
+**Problem**
+
+In `ensemble_predict.py`, `recent_y` (the rolling lag buffer for iterative XGBoost forecasting) was seeded from `df["y"]` which included synthetic zeros added by `add_closed_zeros`. After any overnight or post-close gap, the tail of `df["y"]` was hundreds of zeros, making `lag_1`, `lag_2`, `lag_3`, and `rolling_mean_6` all 0. XGBoost then predicted near-zero for the entire day opening.
+
+**Root cause:** `add_closed_zeros` is required for Prophet (continuous series) but the same augmented `df` was incorrectly used for the XGBoost lag seed.
+
+**Fix**
+
+```python
+# Before:
+recent_y = df["y"].tolist()
+# After:
+recent_y = df_real_r["y"].tolist()   # real DB data only, no synthetic zeros
+```
+
+Recovery command for already-stored zero predictions:
+```bash
+python backtest_predict.py --days 1 --source REAL --overwrite
+```
+
+---
+
+### 28. Dashboard historical chart included backtest rows without leakage disclosure
+
+**Problem**
+
+`load_full_model_predictions()` had no filter to distinguish rows where `predicted_at > prediction_for` (retroactively computed by `backtest_predict.py`) from genuine real-time predictions. Both appeared identically in the "Raw Data vs Model Predictions" chart.
+
+**Fix**
+
+Compound filter added to the query:
+
+```sql
+WHERE prediction_for >= NOW() - INTERVAL '{days} days'
+  AND (
+      predicted_at <= prediction_for   -- real-time: mathematically leakage-free
+      OR source = 'backtest'           -- backtest: XGBoost+LSTM only, prophet_yhat=NULL
+  )
+```
+
+Real-time rows satisfy `predicted_at ≤ prediction_for` by construction (the runner predicts future slots). Backtest rows are admitted with `prophet_yhat=NULL` and the explicit `source='backtest'` tag.
+
+---
+
+### 29. Live Operations wait metrics shown when store is closed
+
+**Problem**
+
+`pred_future` contained tomorrow's open-hour slots (the next open period). Live Operations computed and displayed non-zero wait estimates at any hour, including overnight.
+
+**Fix**
+
+Added `_store_open_now = is_open(pd.Timestamp.now(tz=LOCAL_TZ))` guard in `dashboard.py`. All wait metrics (`wait_0m`, `wait_5m`, `wait_10m`, `wait_15m`) and per-lane waits are set to `None` when the store is closed. The metric cards either show `—` or are hidden entirely.
+
+---
+
+### 30. Prediction scheduler not shop-hours-aware
+
+**Problem**
+
+The previous scheduler ran predictions at a fixed interval regardless of shop hours, writing stale rows overnight and wasting compute during closed periods.
+
+**Fix**
+
+New `predict_runner.py` at `Queue-Management-System-v2-main/`:
+
+- Calls `is_open(pd.Timestamp.now())` before each run.
+- Skips silently outside operating hours.
+- Respects `SHOP_SCHEDULE_OVERRIDE` per-day hours.
+- Interval controlled by `PREDICT_INTERVAL_MIN` env var (default 15 min).
+- `PREDICT_SOURCE` env var (default `REAL`) controls which data is used.
+
+```bash
+python predict_runner.py   # run as a long-lived process or Windows service
+```
+
+---
+
+### 31. Dashboard Reset & Recalc deleted irreplaceable historical predictions
+
+**Problem**
+
+The original "clear predictions" helper deleted *all* rows from `queue_predictions`, including historical ensemble rows written in real time. Once deleted, they cannot be regenerated — they are genuine forward predictions made before each slot (leakage-free) and have no equivalent in backtest.
+
+**Fix — two-part**
+
+1. `_clear_future_predictions()` now deletes only future rows:
+
+```python
+cur.execute("DELETE FROM queue_predictions WHERE prediction_for > NOW()")
+```
+
+2. "Reset & Recalc" uses a two-step confirmation pattern (session state flags `_confirm_reset` / `_do_reset`). The actual execution block runs full-width after the column layout to avoid narrow-column rendering issues in Streamlit.
+
+---
+
+### 32. Service Dwell Time chart — "Now" line misalignment and missing historical mean trace
+
+**Problem**
+
+Three issues:
+
+1. The "Now" vline was misaligned between the arrivals chart and the dwell chart: the arrivals chart used local-time strings for x-axis range; the dwell chart used UTC epoch milliseconds. Plotly interprets bare date strings as UTC, causing a shift equal to the local timezone offset.
+2. The XGBoost + LSTM mean trace showed only future values (≤ 1 slot) and no historical data.
+3. `TypeError: Cannot mix tz-aware with tz-naive values` when appending `future_open_timestamps()` (tz-naive) to `_open_slots` (tz-aware).
+
+**Fixes**
+
+1. Both charts use UTC epoch milliseconds: `int(_chart_x_start.timestamp() * 1000)`.
+2. Mean trace split into `_mean_hist` (all historical open slots) + `_mean_fut[:1]` (one future slot).
+3. All slot timestamps stripped to tz-naive before comparison using `pd.Timestamp(t).replace(tzinfo=None)`; `_now_naive = _now_local.replace(tzinfo=None)` used as the split point.
+
+---
+
 ## Current Limitations Still Present
 
 - `service_events` exists but is not yet populated by a true exit-line workflow in the live production pipelines

@@ -371,6 +371,22 @@ python ensemble_predict.py --source ALL
 
 ---
 
+#### Prophet
+
+Prophet is used with custom higher-order seasonalities to capture sharp retail peaks (opening rush, lunch, evening):
+
+```python
+prophet_model.add_seasonality(name='daily',  period=1, fourier_order=10)
+prophet_model.add_seasonality(name='weekly', period=7, fourier_order=5)
+```
+
+`changepoint_prior_scale=0.10` (raised from 0.05) for better trend adaptation.  
+`seasonality_prior_scale=10.0` allows the seasonal component to be flexible enough to match peak-hour patterns.
+
+**Leakage note:** Prophet is trained on all available historical data, so its seasonality encodes information from *after* any given target slot. For the real-time runner this is irrelevant (it only predicts future slots). For `backtest_predict.py`, Prophet is therefore excluded and `prophet_yhat` is written as `NULL`.
+
+---
+
 #### LSTM
 
 **Architecture:**
@@ -437,23 +453,27 @@ The first rows of the training set are dropped by `dropna()` after feature const
 
 **Recursive forecasting:**
 ```
-recent_y = full training y values
+recent_y = real DB history only (df_real_r["y"])   ← NOT the add_closed_zeros augmented series
 for each future timestamp:
     build feature row from timestamp + tail of recent_y
     predict → append to recent_y (used as lag for next step)
 ```
 The one-hour lag feature falls back to `recent_y[0]` if not enough history is available (cold start only).
 
+> **Fixed (May 2026):** `recent_y` is now seeded from `df_real_r["y"]` (real DB rows only) instead of `df["y"]` (which includes synthetic closed-hour zeros added by `add_closed_zeros` for Prophet). After any overnight gap the tail of `df["y"]` is all zeros, making `lag_1/lag_2/lag_3/rolling_mean_6` all 0 and causing XGBoost to predict near-zero at day opening.
+
 > **Fixed:** XGBoost model is saved to `models/xgb_queue.json` after training and reloaded on subsequent runs within `MODEL_MAX_AGE_HOURS`.
 
 ---
 
-#### Ensemble combination
+#### Ensemble combination (real-time)
 
 ```python
 ensemble = 0.40 * prophet_vals + 0.30 * lstm_vals + 0.30 * xgb_vals
 ensemble = ensemble.clip(min=0).round(1)
 ```
+
+Each INSERT writes `source='ensemble'`. Rows produced by the backtest script (`backtest_predict.py`) carry `source='backtest'` and have `prophet_yhat=NULL` — see §6.4.
 
 ---
 
@@ -498,7 +518,69 @@ for step_i, arrivals in enumerate(ensemble_vals):   # 20 steps
 | ≥ 10 min | `ALERT` |
 
 **Forecast horizon:** 20 steps × 3 minutes = 60 minutes  
-**Scheduling:** Run as a cron job or scheduled task — it is not a daemon. Recommended: every 15–30 minutes.
+**Scheduling:** Use `predict_runner.py` (see §6.5) — it runs `ensemble_predict.py` every `PREDICT_INTERVAL_MIN` minutes but only during open hours. Never run `ensemble_predict.py` directly as a daemon; it is a one-shot script.
+
+---
+
+### 6.4 `backtest_predict.py` — retroactive historical fill
+
+Fills gaps in `queue_predictions` with historical predictions using the already-trained LSTM and XGBoost models. Used after restoring lost data or after the first model training on a system with existing `entrance_events` history.
+
+**CLI**
+
+```bash
+python backtest_predict.py --days 30
+python backtest_predict.py --days 7 --source REAL --overwrite
+```
+
+**Key differences from `ensemble_predict.py`:**
+
+| Aspect | `ensemble_predict.py` | `backtest_predict.py` |
+|---|---|---|
+| Target slots | Future open-hour buckets | Past open-hour buckets |
+| `predicted_at` | ≤ `prediction_for` | > `prediction_for` |
+| Prophet | trained + predicted | **excluded** (`prophet_yhat=NULL`) |
+| Ensemble | 0.40·P + 0.30·L + 0.30·X | (0.30·L + 0.30·X) / 0.60 |
+| `source` column | `'ensemble'` | `'backtest'` |
+| Conflict handling | `DO UPDATE` | `DO NOTHING` (use `--overwrite` to update) |
+
+**Why Prophet is excluded from backtest:**  
+Prophet is trained on all data including data *after* the target slot (global seasonality leakage). LSTM and XGBoost only use data strictly before each slot (sliding window / lag features), so they remain leakage-free.
+
+**When to run:**
+- After `Reset & Recalc` if historical chart appears empty
+- After a model retrain on a large new dataset
+- After a day with no data (camera down, holiday) to fill gaps
+
+```bash
+# Fill last 7 days, overwrite any existing backtest rows
+python backtest_predict.py --days 7 --source REAL --overwrite
+```
+
+---
+
+### 6.5 `predict_runner.py` — shop-hours-aware scheduler
+
+Long-running process that calls `ensemble_predict.py` on a repeating interval but only while the shop is open.
+
+**CLI**
+
+```bash
+python predict_runner.py    # from Queue-Management-System-v2-main/
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `PREDICT_INTERVAL_MIN` | `15` | Minutes between prediction runs |
+| `PREDICT_SOURCE` | `REAL` | Data source: `REAL` / `SIM` / `ALL` |
+| `DATA_SPAN_DAYS` | `30` | Training data window passed to `ensemble_predict.py` |
+
+**Behaviour:**
+- Checks `is_open(pd.Timestamp.now())` before each run — respects `SHOP_SCHEDULE_OVERRIDE`.
+- Logs `shop closed, skipping` outside open hours (no stale rows accumulated overnight).
+- Runs until interrupted (`Ctrl+C`) — deploy as a Windows Service or `nohup` process.
 
 ---
 
@@ -579,8 +661,24 @@ In the simulator, `lane_id` is stored automatically when a person completes serv
 | `wait_15m` | NUMERIC(8,2) | wait estimate at the +15 min horizon |
 | `wait_30m` | NUMERIC(8,2) | wait estimate at the +30 min horizon |
 | `status` | VARCHAR(10) | `OK` / `BUSY` / `ALERT` |
+| `source` | VARCHAR(20) | `'ensemble'` (real-time runner) or `'backtest'` (historical fill) |
 
-> **Migration:** If the table was created before `wait_15m`/`wait_30m` were added, `ensemble_predict.py` auto-adds the columns via a `DO $$ ... $$` block on startup. No manual `ALTER TABLE` needed.
+> **Migration:** Missing columns (`wait_15m`, `wait_30m`, `source`) are auto-added by `ensemble_predict.py` and `backtest_predict.py` via idempotent `DO $$ ... $$` blocks on startup. No manual `ALTER TABLE` needed.
+
+**Source semantics:**
+
+| `source` | `predicted_at` vs `prediction_for` | `prophet_yhat` | Leakage |
+|---|---|---|---|
+| `'ensemble'` | `predicted_at ≤ prediction_for` | populated | none — prediction made before the slot |
+| `'backtest'` | `predicted_at > prediction_for` | `NULL` | minor — XGBoost/LSTM use only past lags; Prophet excluded |
+
+**Dashboard filter** — `load_full_model_predictions()` uses:
+
+```sql
+AND (predicted_at <= prediction_for OR source = 'backtest')
+```
+
+This admits real-time rows (guaranteed leakage-free) and backtest rows (disclosed as retroactive) while excluding any anomalous rows that would be neither.
 
 ### 7.5 Recommended Grafana queries
 
@@ -1171,4 +1269,44 @@ This is the recommended way to validate the prediction layer against synthetic w
 
 ---
 
-*Last updated: April 2026*
+## 14. Automated Smoke Testing
+
+Use the repo-local smoke runner to automatically test the main model and dashboard entrypoints:
+
+```bash
+python tools/auto_smoke_test.py
+```
+
+What it covers by default:
+
+- syntax compilation for the main prediction and dashboard files
+- shared Prophet pipeline dry run without writing `queue_predictions`
+- hybrid wait model dry run
+- ensemble forecast dry run without DB save
+- backtest model-file readiness check
+- Streamlit startup, health, and basic page-refresh checks for:
+  - `simulator/app_hybrid_wait.py`
+  - `Queue-Management-System-v2-main/Queue-Management-System-v2-main/dashboard.py`
+
+Useful variants:
+
+```bash
+python tools/auto_smoke_test.py --only compile pipeline hybrid
+python tools/auto_smoke_test.py --only hybrid_app dashboard_app
+```
+
+Logs and the JSON report are written to:
+
+```text
+tools/smoke_logs/
+```
+
+The runner is intentionally safe by default:
+
+- `prediction.pipeline.save_prediction()` is monkey-patched out during the pipeline smoke
+- the ensemble dry run does not call `_save_to_db()`
+- the backtest check verifies model readiness without writing historical rows
+
+---
+
+*Last updated: May 2026 — source column, backtest leakage fix, Prophet Fourier orders, XGBoost lag seeding fix, predict_runner, Reset & Recalc, Service Dwell chart alignment*

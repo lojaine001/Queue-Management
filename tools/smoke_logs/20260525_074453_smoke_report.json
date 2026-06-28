@@ -1,0 +1,50 @@
+[
+  {
+    "name": "compile targets",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779687852.5973704,
+    "ended_at": 1779687853.1085746,
+    "duration_sec": 0.5112042427062988,
+    "detail": "ok",
+    "log_path": "C:\\Users\\arnau\\Documents\\project\\rtsp\\Retail-Wait-Prediction\\Queue-Management\\tools\\smoke_logs\\20260525_074412_compile_targets.log",
+    "exit_code": 0,
+    "extra": {}
+  },
+  {
+    "name": "pipeline dry run",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779687853.1095805,
+    "ended_at": 1779687855.6452017,
+    "duration_sec": 2.535621166229248,
+    "detail": "ok",
+    "log_path": "C:\\Users\\arnau\\Documents\\project\\rtsp\\Retail-Wait-Prediction\\Queue-Management\\tools\\smoke_logs\\20260525_074413_pipeline_dry_run.log",
+    "exit_code": 0,
+    "extra": {}
+  },
+  {
+    "name": "hybrid dry run",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779687855.6452017,
+    "ended_at": 1779687888.983257,
+    "duration_sec": 33.33805537223816,
+    "detail": "ok",
+    "log_path": "C:\\Users\\arnau\\Documents\\project\\rtsp\\Retail-Wait-Prediction\\Queue-Management\\tools\\smoke_logs\\20260525_074415_hybrid_dry_run.log",
+    "exit_code": 0,
+    "extra": {}
+  },
+  {
+    "name": "backtest model readiness",
+    "ok": true,
+    "kind": "command",
+    "started_at": 1779687888.9862602,
+    "ended_at": 1779687893.0424638,
+    "duration_sec": 4.056203603744507,
+    "detail": "ok",
+    "log_path": "C:\\Users\\arnau\\Documents\\project\\rtsp\\Retail-Wait-Prediction\\Queue-Management\\tools\\smoke_logs\\20260525_074448_backtest_model_readiness.log",
+    "exit_code": 1,
+    "extra": {}
+  }
+]

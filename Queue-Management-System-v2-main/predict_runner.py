@@ -24,38 +24,40 @@ import sys
 import time
 from datetime import datetime
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-SHOP_OPEN            = int(os.getenv("SHOP_OPEN",         8))
-SHOP_OPEN_MINUTE     = int(os.getenv("SHOP_OPEN_MINUTE",  30))
-SHOP_CLOSE_HOUR      = int(os.getenv("SHOP_CLOSE_HOUR",  20))
-SHOP_CLOSE_MINUTE    = int(os.getenv("SHOP_CLOSE_MINUTE", 30))
-SHOP_OPEN_TOT        = SHOP_OPEN * 60 + SHOP_OPEN_MINUTE       # 510
-SHOP_CLOSE_TOT       = SHOP_CLOSE_HOUR * 60 + SHOP_CLOSE_MINUTE  # 1230
-PREDICT_INTERVAL_MIN = int(os.getenv("PREDICT_INTERVAL_MIN", 15))
-PREDICT_SOURCE       = os.getenv("PREDICT_SOURCE", "REAL")
+import pandas as pd
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
-_SCRIPT      = os.path.join(_HERE, "Queue-Management-System-v2-main", "ensemble_predict.py")
 _PREDICT_CWD = os.path.dirname(_HERE)   # Queue-Management/ — needed for `prediction` imports
+if _PREDICT_CWD not in sys.path:
+    sys.path.insert(0, _PREDICT_CWD)
+
+from dotenv import find_dotenv, load_dotenv
+load_dotenv(find_dotenv(usecwd=True))
+
+from prediction.core import is_open as _core_is_open  # respects SHOP_SCHEDULE_OVERRIDE
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+PREDICT_INTERVAL_MIN = int(os.getenv("PREDICT_INTERVAL_MIN", 15))
+PREDICT_SOURCE       = os.getenv("PREDICT_SOURCE", "REAL")
+DATA_SPAN_DAYS       = int(os.getenv("DATA_SPAN_DAYS", 30))
+
+_SCRIPT      = os.path.join(_HERE, "Queue-Management-System-v2-main", "ensemble_predict.py")
 
 
 def _is_open() -> bool:
-    now = datetime.now()
-    tot = now.hour * 60 + now.minute
-    return SHOP_OPEN_TOT <= tot < SHOP_CLOSE_TOT
+    return _core_is_open(pd.Timestamp.now())
 
 
 def _run_once() -> bool:
     result = subprocess.run(
-        [sys.executable, _SCRIPT, "--source", PREDICT_SOURCE],
+        [sys.executable, _SCRIPT, "--source", PREDICT_SOURCE, "--days", str(DATA_SPAN_DAYS)],
         cwd=_PREDICT_CWD,
     )
     return result.returncode == 0
 
 
 def main() -> None:
-    print(f"[Runner] predict_runner started — interval {PREDICT_INTERVAL_MIN} min, "
-          f"shop {SHOP_OPEN:02d}:{SHOP_OPEN_MINUTE:02d}–{SHOP_CLOSE_HOUR:02d}:{SHOP_CLOSE_MINUTE:02d}")
+    print(f"[Runner] predict_runner started — interval {PREDICT_INTERVAL_MIN} min (schedule from SHOP_SCHEDULE_OVERRIDE)")
     print(f"[Runner] Script : {_SCRIPT}")
     print(f"[Runner] CWD    : {_PREDICT_CWD}")
 
