@@ -83,6 +83,13 @@ def _resolve_model_path(filename: str) -> Path:
     return preferred
 
 
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 LSTM_PATH         = _resolve_model_path(f'lstm_queue_{BUCKET_MINUTES}m.keras')
 SCALER_PATH       = _resolve_model_path(f'lstm_scaler_{BUCKET_MINUTES}m.pkl')
 XGB_PATH          = _resolve_model_path(f'xgb_queue_{BUCKET_MINUTES}m.json')
@@ -93,6 +100,17 @@ DWELL_MODEL_PATH  = _resolve_model_path(f'xgb_dwell_{BUCKET_MINUTES}m.json')
 LSTM_META_PATH    = MODELS_DIR / f'lstm_queue_{BUCKET_MINUTES}m_meta.json'
 XGB_META_PATH     = MODELS_DIR / f'xgb_queue_{BUCKET_MINUTES}m_meta.json'
 DWELL_META_PATH   = MODELS_DIR / f'xgb_dwell_{BUCKET_MINUTES}m_meta.json'
+_CALIB_PATH = Path(__file__).parent / "calibration.json"
+ARRIVAL_CALIBRATION_ENABLED_DEFAULT = _env_flag("ARRIVAL_CALIBRATION_ENABLED", True)
+try:
+    _calib = json.loads(_CALIB_PATH.read_text(encoding="utf-8")) if _CALIB_PATH.exists() else {}
+except Exception:
+    _calib = {}
+_k_global = float(_calib.get("k_global", 1.0))
+_k_by_hour = {
+    int(hour): float(value)
+    for hour, value in _calib.get("k_by_hour", {}).items()
+}
 
 DWELL_FEATURE_COLS = ["hour", "minute_of_hour", "day_of_week", "is_weekend"]
 
@@ -265,7 +283,12 @@ def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_span_days: int = DATA_SPAN_DAYS_DEFAULT) -> dict:
+def run_ensemble_forecast(
+    source: str = "REAL",
+    bootstrap: bool = False,
+    data_span_days: int = DATA_SPAN_DAYS_DEFAULT,
+    arrival_calibration_enabled: bool | None = None,
+) -> dict:
     """Train Prophet + LSTM + XGBoost ensemble and return a forecast dict."""
     run_started = datetime.now()
     _log("=" * 90)
@@ -724,7 +747,27 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
 
     # ── ENSEMBLE ─────────────────────────────────────────────────────────────
     _log("\n[Ensemble] Combining predictions (Prophet 40% / LSTM 30% / XGBoost 30%)...")
-    ensemble_vals = (W_PROPHET * prophet_vals + W_LSTM * lstm_vals + W_XGB * xgb_vals).clip(min=0).round(1)
+    ensemble_vals_raw = (W_PROPHET * prophet_vals + W_LSTM * lstm_vals + W_XGB * xgb_vals).clip(min=0)
+    ensemble_vals = ensemble_vals_raw.copy()
+    _arrival_calib_enabled = (
+        ARRIVAL_CALIBRATION_ENABLED_DEFAULT
+        if arrival_calibration_enabled is None else bool(arrival_calibration_enabled)
+    )
+    if _arrival_calib_enabled and (_k_by_hour or abs(_k_global - 1.0) > 1e-9):
+        _log(
+            "[Calibration] Applying ensemble arrival calibration "
+            f"(k_global={_k_global:.4f}, hourly_slots={len(_k_by_hour)})"
+        )
+        for i, ts in enumerate(future_timestamps):
+            hour = pd.Timestamp(ts).hour
+            k = _k_by_hour.get(hour, _k_global)
+            ensemble_vals[i] = max(0.0, float(ensemble_vals[i]) * k)
+    elif not _arrival_calib_enabled:
+        _log("[Calibration] Arrival calibration disabled by option/env; using raw ensemble forecast")
+    prophet_vals = prophet_vals.clip(min=0)
+    lstm_vals = lstm_vals.clip(min=0)
+    xgb_vals = xgb_vals.clip(min=0)
+    ensemble_vals = ensemble_vals.clip(min=0).round(1)
     _log(
         "[Ensemble] Forecast summary: "
         f"prophet_mean={float(np.mean(prophet_vals)):.2f} "
@@ -1098,7 +1141,19 @@ def _save_to_db(result: dict) -> None:
         except (TypeError, ValueError):
             return None
 
-    predicted_at  = datetime.now()
+    _local_tz = datetime.now().astimezone().tzinfo
+
+    def _local_wall_to_utc_dt(value) -> datetime | None:
+        if value is None:
+            return None
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(_local_tz)
+        else:
+            ts = ts.tz_convert(_local_tz)
+        return ts.tz_convert("UTC").to_pydatetime()
+
+    predicted_at  = datetime.now(timezone.utc)
     lw            = result["lane_waits_15m"]
     _lw1          = _db_val(lw.get(1, 0.0))
     _lw2          = _db_val(lw.get(2, 0.0))
@@ -1140,7 +1195,7 @@ def _save_to_db(result: dict) -> None:
                 source          = EXCLUDED.source
         """, (
             predicted_at,
-            row["ds"].to_pydatetime(),
+            _local_wall_to_utc_dt(row["ds"]),
             _db_val(prophet_vals[i]),
             _db_val(lstm_vals[i]),
             _db_val(xgb_vals[i]),
@@ -1168,11 +1223,24 @@ if __name__ == "__main__":
                         help="Pad sparse real data with synthetic history when < 14 days available.")
     parser.add_argument("--days", type=int, default=DATA_SPAN_DAYS_DEFAULT,
                         help="Number of past days of entrance_events to use for training (default: DATA_SPAN_DAYS env var or 30).")
+    parser.add_argument(
+        "--arrival-calibration",
+        type=str,
+        choices=["on", "off"],
+        default=None,
+        help="Override ARRIVAL_CALIBRATION_ENABLED for this run.",
+    )
     args = parser.parse_args()
 
     _main_started = datetime.now()
     try:
-        result = run_ensemble_forecast(source=args.source, bootstrap=args.bootstrap, data_span_days=args.days)
+        _arrival_calib_enabled = None if args.arrival_calibration is None else (args.arrival_calibration == "on")
+        result = run_ensemble_forecast(
+            source=args.source,
+            bootstrap=args.bootstrap,
+            data_span_days=args.days,
+            arrival_calibration_enabled=_arrival_calib_enabled,
+        )
         _print_results(result)
         _save_to_db(result)
         _elapsed = (datetime.now() - _main_started).total_seconds()
