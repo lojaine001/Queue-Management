@@ -3,7 +3,7 @@ import logging
 import sys
 
 LIVE_SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'snapshots')
-LIVE_SNAP_INTERVAL = 60.0
+LIVE_SNAP_INTERVAL = 5.0
 import ctypes
 from collections import deque
 from tracemalloc import start
