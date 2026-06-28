@@ -107,13 +107,16 @@ def live_lanes():
                 cur.execute("""
                     SELECT queue_now AS queue_count,
                            service_min * 60 AS avg_dwell_sec,
-                           open_lanes
+                           open_lanes,
+                           wait_0m
                     FROM dashboard_state WHERE id = 1
                 """)
                 snap = cur.fetchone()
                 total_queue = int(snap["queue_count"] or 0) if snap else 0
                 active_lanes = max(len(lane_rows), 1)
                 queue_per_lane = max(0, round(total_queue / active_lanes))
+                # Use the dashboard's predicted wait-now as the wait shown per lane
+                global_wait_now = round(float(snap["wait_0m"] or 0), 1) if snap else 0.0
 
         lanes = []
         active_lane_ids = {str(r["lane_id"]) for r in lane_rows}
@@ -127,7 +130,7 @@ def live_lanes():
         for i, lane_id in enumerate(known_lanes[:4]):
             matching = next((r for r in lane_rows if str(r["lane_id"]) == lane_id), None)
             if matching:
-                avg_wait = float(matching["avg_wait_min"] or 0)
+                avg_wait = global_wait_now
                 depth = queue_per_lane
                 status = _lane_status(avg_wait, depth)
             else:
