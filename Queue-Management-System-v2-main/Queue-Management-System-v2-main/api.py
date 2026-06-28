@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 
 import psycopg2
@@ -15,6 +16,8 @@ import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
 
 app = FastAPI(title="IQMS Manager API", version="2.0")
 
@@ -35,6 +38,7 @@ DB_CONFIG = dict(
 
 LANE_MAX_CAPACITY = 10  # denominator for fill bar
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
+BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
 
 
 def _conn():
@@ -226,16 +230,16 @@ def forecast():
         wait_10  = _f(state["wait_10m"])
         wait_15  = _f(state["wait_15m"])
 
-        lane_waits = {
-            1: _f(state["lane1_wait_15m"]) or 0.0,
-            2: _f(state["lane2_wait_15m"]) or 0.0,
-            3: _f(state["lane3_wait_15m"]) or 0.0,
-            4: _f(state["lane4_wait_15m"]) or 0.0,
-        }
-
+        # Per-lane scenario waits at +10 min horizon.
+        # lane{n}_wait_10m is not stored in dashboard_state, so we derive it
+        # proportionally from wait_10m: demand is ~constant at this horizon,
+        # so wait scales linearly with 1/lanes.
         scenarios = []
         for n in range(1, 5):
-            estimated = lane_waits[n]
+            if wait_10 is not None and current_lanes > 0:
+                estimated = round(wait_10 * current_lanes / n, 1)
+            else:
+                estimated = 0.0
             if estimated > 10:
                 color = "red"
             elif estimated > 7:
@@ -258,6 +262,8 @@ def forecast():
             "wait_15_min":    wait_15,
             "current_lanes":  current_lanes,
             "lane_scenarios": scenarios,
+            "queue_now":      int(state["queue_now"]) if state["queue_now"] is not None else None,
+            "updated_at":     state["updated_at"].isoformat() if state["updated_at"] else None,
         }
 
     except Exception as exc:
@@ -311,6 +317,37 @@ def day_recap():
                 avg_row      = cur.fetchone()
                 avg_wait_min = float(avg_row["avg_min"]) if avg_row and avg_row["avg_min"] else 0.0
 
+                # Lanes used today
+                cur.execute(f"""
+                    SELECT COUNT(DISTINCT lane_id) AS lanes_count
+                    FROM service_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                """)
+                lanes_row    = cur.fetchone()
+                lanes_today  = int(lanes_row["lanes_count"]) if lanes_row and lanes_row["lanes_count"] else 0
+
+                cur.execute(f"""
+                    SELECT lane_id, COUNT(*) AS cnt
+                    FROM service_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                    GROUP BY lane_id ORDER BY cnt DESC LIMIT 1
+                """)
+                busiest_row  = cur.fetchone()
+                busiest_lane = busiest_row["lane_id"] if busiest_row else None
+
+                # Alert minutes today (from ensemble predictions)
+                alert_date_filter = f"DATE(prediction_for) = '{ref_date}'" if ref_date else "DATE(prediction_for) = CURRENT_DATE"
+                cur.execute(f"""
+                    SELECT COUNT(*) AS alert_slots
+                    FROM queue_predictions
+                    WHERE {alert_date_filter}
+                      AND status = 'ALERT'
+                """)
+                alert_row     = cur.fetchone()
+                alert_minutes = int((alert_row["alert_slots"] or 0) if alert_row else 0) * BUCKET_MIN
+
                 # Equipment mix
                 cur.execute(f"""
                     SELECT equipment_type, COUNT(*) AS cnt
@@ -331,11 +368,11 @@ def day_recap():
                 """)
                 ds_row = cur.fetchone()
 
-        equip_total = sum(int(r["cnt"]) for r in equip_rows) or 1
+        denom = total or 1
         equipment = []
-        order = ["trolley", "store_basket", "personal_bag"]
-        colors = {"trolley": "#06b6d4", "store_basket": "#a855f7", "personal_bag": "#f59e0b"}
-        labels = {"trolley": "Trolley", "store_basket": "Store basket", "personal_bag": "Personal bag"}
+        order  = ["trolley", "store_basket"]
+        colors = {"trolley": "#06b6d4", "store_basket": "#a855f7"}
+        labels = {"trolley": "Trolley", "store_basket": "Store basket"}
         for key in order:
             row = next((r for r in equip_rows if r["equipment_type"] == key), None)
             count = int(row["cnt"]) if row else 0
@@ -343,7 +380,7 @@ def day_recap():
                 "type":    key,
                 "label":   labels[key],
                 "count":   count,
-                "percent": round(count / equip_total * 100),
+                "percent": round(count / denom * 100),
                 "color":   colors[key],
             })
 
@@ -360,6 +397,9 @@ def day_recap():
             "peak_hour_end":       peak_end,
             "peak_count":          peak_count,
             "equipment":           equipment,
+            "lanes_today":         lanes_today,
+            "busiest_lane":        busiest_lane,
+            "alert_minutes":       alert_minutes,
             "demographics_gender": _demo.get("gender", []),
             "demographics_age":    _demo.get("age",    []),
             "entries_by_hour":     _hourly,
@@ -399,6 +439,122 @@ def forecast_chart():
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/forecast-chart-3h")
+def forecast_chart_3h():
+    """Returns 3-hour time series of predicted arrivals and wait for the app chart."""
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE prediction_for >= NOW()
+                      AND prediction_for <= NOW() + INTERVAL '3 hours'
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """)
+                rows = cur.fetchall()
+
+        return {
+            "slots": [
+                {
+                    "time":     row["prediction_for"].strftime("%H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/forecast-chart-12h")
+def forecast_chart_12h():
+    """Returns 12-hour time series of predicted arrivals and wait for the app chart."""
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE prediction_for >= NOW() - INTERVAL '6 hours'
+                      AND prediction_for <= NOW() + INTERVAL '6 hours'
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """)
+                rows = cur.fetchall()
+        return {
+            "slots": [
+                {
+                    "time":     row["prediction_for"].strftime("%H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/forecast-chart-2d")
+def forecast_chart_2d():
+    """Returns 2-day history + forecast time series for the app chart."""
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE prediction_for >= NOW() - INTERVAL '2 days'
+                      AND prediction_for <= NOW() + INTERVAL '12 hours'
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """)
+                rows = cur.fetchall()
+        return {
+            "slots": [
+                {
+                    "time":     row["prediction_for"].strftime("%d/%m %H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
+                }
+                for row in rows
+            ]
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/snapshot/checkout")
+def snapshot_checkout():
+    import base64
+    p = SNAP_DIR / "latest_checkout.jpg"
+    if not p.exists():
+        return {"image": None}
+    with open(str(p), "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"image": f"data:image/jpeg;base64,{data}"}
+
+
+@app.get("/snapshot/entrance")
+def snapshot_entrance():
+    import base64
+    p = SNAP_DIR / "latest_entrance.jpg"
+    if not p.exists():
+        return {"image": None}
+    with open(str(p), "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return {"image": f"data:image/jpeg;base64,{data}"}
 
 
 @app.post("/set-lanes")
