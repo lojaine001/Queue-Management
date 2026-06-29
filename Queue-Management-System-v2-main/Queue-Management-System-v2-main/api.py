@@ -81,17 +81,18 @@ def health():
 def live_lanes():
     """
     Returns per-lane queue status for the Live tab.
-    Reads recent service_events grouped by lane_id + current queue snapshot.
+    Uses lane_counts jsonb from latest queue_state_snapshots for per-lane fill.
     """
     try:
+        import json as _json
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Recent activity per lane — use last 2 hours as fallback
+                # Recent activity per lane — use last 2 hours for avg wait
                 cur.execute("""
                     SELECT
                         lane_id,
-                        COUNT(*)                                    AS recent_checkouts,
-                        ROUND(AVG(total_dwell_sec)::numeric / 60.0, 1)      AS avg_wait_min
+                        COUNT(*)                                           AS recent_checkouts,
+                        ROUND(AVG(total_dwell_sec)::numeric / 60.0, 1)   AS avg_wait_min
                     FROM service_events
                     WHERE timestamp >= NOW() - INTERVAL '2 hours'
                       AND camera_id NOT LIKE 'SIM_%%'
@@ -101,53 +102,58 @@ def live_lanes():
                 """)
                 lane_rows = cur.fetchall()
 
-                # Read queue count and avg wait from dashboard_state — these are
-                # the exact values the dashboard computes and displays, so the
-                # app snapshot matches the dashboard perfectly.
+                # Latest snapshot with per-lane counts from exit camera
                 cur.execute("""
-                    SELECT queue_now AS queue_count,
-                           service_min * 60 AS avg_dwell_sec,
-                           open_lanes
-                    FROM dashboard_state WHERE id = 1
+                    SELECT queue_count, lane_counts, avg_dwell_sec, active_lanes
+                    FROM queue_state_snapshots
+                    WHERE camera_id NOT LIKE 'SIM_%%'
+                      AND camera_id NOT ILIKE '%%entrance%%'
+                    ORDER BY timestamp DESC
+                    LIMIT 1
                 """)
                 snap = cur.fetchone()
-                total_queue = int(snap["queue_count"] or 0) if snap else 0
-                active_lanes = max(len(lane_rows), 1)
-                queue_per_lane = max(0, round(total_queue / active_lanes))
+
+                cur.execute("SELECT service_min FROM dashboard_state WHERE id = 1")
+                ds = cur.fetchone()
+
+        total_queue = int(snap["queue_count"] or 0) if snap else 0
+        avg_dwell_sec = float(snap["avg_dwell_sec"] or 0) if snap else 0.0
+
+        # Parse lane_counts jsonb — keys are lane_id strings, values are head counts
+        raw_lc = snap["lane_counts"] if snap else None
+        if isinstance(raw_lc, str):
+            raw_lc = _json.loads(raw_lc)
+        lane_counts: dict = raw_lc or {}
+
+        # Determine lane IDs: prefer lane_counts keys, fall back to service_events
+        lc_ids = sorted(str(k) for k in lane_counts.keys())
+        svc_ids = sorted(str(r["lane_id"]) for r in lane_rows)
+        known_lanes = lc_ids if lc_ids else svc_ids
+        while len(known_lanes) < 4:
+            known_lanes.append(str(len(known_lanes) + 1))
 
         lanes = []
-        active_lane_ids = {str(r["lane_id"]) for r in lane_rows}
-
-        # Build up to 4 lanes
-        known_lanes = sorted(active_lane_ids) if active_lane_ids else []
-        # Pad to 4 if fewer
-        while len(known_lanes) < 4:
-            known_lanes.append(str(len(known_lanes)))
-
         for i, lane_id in enumerate(known_lanes[:4]):
-            matching = next((r for r in lane_rows if str(r["lane_id"]) == lane_id), None)
-            if matching:
-                avg_wait = float(matching["avg_wait_min"] or 0)
-                depth = queue_per_lane
-                status = _lane_status(avg_wait, depth)
-            else:
-                avg_wait = 0.0
-                depth = 0
-                status = "closed"
-
+            svc = next((r for r in lane_rows if str(r["lane_id"]) == lane_id), None)
+            avg_wait = float(svc["avg_wait_min"] or 0) if svc else 0.0
+            depth = int(lane_counts.get(lane_id, lane_counts.get(int(lane_id) if lane_id.isdigit() else lane_id, 0)))
+            status = _lane_status(avg_wait, depth) if (svc or depth > 0) else "closed"
             lanes.append({
-                "lane_number": i + 1,
-                "lane_id":     lane_id,
-                "status":      status,
-                "waiting":     depth,
-                "fill":        depth,
-                "fill_max":    LANE_MAX_CAPACITY,
+                "lane_number":  i + 1,
+                "lane_id":      lane_id,
+                "status":       status,
+                "waiting":      depth,
+                "fill":         depth,
+                "fill_max":     LANE_MAX_CAPACITY,
                 "avg_wait_min": avg_wait,
             })
 
+        avg_wait_min = round(avg_dwell_sec / 60, 1) if avg_dwell_sec else (
+            round(float(ds["service_min"]), 1) if ds and ds["service_min"] else 0.0
+        )
         snapshot = {
             "total_in_queue": total_queue,
-            "avg_wait_min":   round(float(snap["avg_dwell_sec"] or 0) / 60, 1) if snap else 0.0,
+            "avg_wait_min":   avg_wait_min,
             "open_lanes":     len([l for l in lanes if l["status"] != "closed"]),
         }
 
