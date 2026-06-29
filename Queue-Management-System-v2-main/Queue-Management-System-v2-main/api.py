@@ -293,14 +293,16 @@ def day_recap():
                     FROM entrance_events
                     WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
                 """)
                 total = int((cur.fetchone() or {}).get("total") or 0)
 
                 cur.execute(f"""
-                    SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS cnt
+                    SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour, COUNT(*) AS cnt
                     FROM entrance_events
                     WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
                     GROUP BY 1 ORDER BY 2 DESC LIMIT 1
                 """)
                 peak_row   = cur.fetchone()
