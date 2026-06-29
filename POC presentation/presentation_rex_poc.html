@@ -6,13 +6,13 @@
     <title>REX POC — IQMS Presentation</title>
     <style>
         :root {
-            --primary: #0071e3;
-            --background: #f5f5f7;
-            --slide-bg: #ffffff;
+            --primary: #0066cc;
+            --background: #f5f9fd;
+            --slide-bg: linear-gradient(135deg, #f5f9fd 0%, #e6f2fc 100%);
             --text: #1d1d1f;
-            --text-secondary: #86868b;
+            --text-secondary: #6e6e73;
             --border: #d2d2d7;
-            --code-bg: #f5f5f7;
+            --code-bg: rgba(0, 113, 227, 0.05);
         }
 
         * {
@@ -37,7 +37,11 @@
             width: 100vw;
             height: 100vh;
             position: relative;
-            background-color: var(--slide-bg);
+            background: var(--slide-bg);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(225, 238, 253, 0.6) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(200, 225, 252, 0.6) 0px, transparent 50%),
+                var(--slide-bg);
             overflow: hidden;
             display: flex;
             flex-direction: column;
@@ -335,7 +339,7 @@
 <div class="two-col">
 <div class="left-col">
 <h1>REX POC — Système Intelligent de Gestion de File d'Attente (IQMS)</h1>
-<h2>Rapport Complet de Restitution et Guide d'Intégration</h2>
+<h2>Retour d'Expérience</h2>
 <p><strong>Juin 2026</strong></p>
 </div>
 <div class="right-col">
@@ -406,14 +410,17 @@
 </div>
 </div>
 <div class="slide">
-<h2>5. Placement Caméra : Contraintes et Limites</h2>
+<h2>5. Placement Caméra : Limites &amp; Perspectives Panoramiques</h2>
 <div class="two-col">
 <div class="left-col">
 <ul>
-<li><strong>Exclusion des caméras 360°</strong> :</li>
-<li>Technologie non disponible et non prise en charge par le système de détection actuel.</li>
-<li>Les distorsions optiques des caméras 360° altèrent la précision du tracking IA.</li>
-<li><strong>Préconisation d'installation</strong> : Utiliser des caméras IP standard avec un flux RTSP haute définition stable pour chaque zone de passage.</li>
+<li><strong>Retour sur la caméra panoramique 360°</strong> :</li>
+<li><strong>Intention initiale</strong> : Prévue dans le design de base pour offrir une vision globale de la zone de sortie des caisses.</li>
+<li><strong>Limitation POC</strong> : Non déployée en raison d'incidents techniques lors de la phase de test sur site.</li>
+<li><strong>Perspectives et valeur ajoutée</strong> :</li>
+<li><strong>Vision d'ensemble</strong> : Utile pour analyser la dynamique globale du trafic en sortie de caisses.</li>
+<li><strong>Supervision active</strong> : Permettrait de valider automatiquement la présence physique des caissiers pour déterminer si une ligne est active ou non.</li>
+<li><strong>Recommandation</strong> : Utiliser des caméras IP standards en attendant de résoudre l'intégration de la caméra panoramique.</li>
 </ul>
 </div>
 <div class="right-col">
@@ -430,7 +437,9 @@
 <li><strong>Points forts</strong> :</li>
 <li>Très efficace dans les environnements à forte densité et de passage rapide.</li>
 <li>Moins sensible aux masquages partiels du corps.</li>
-<li><strong>Matériel recommandé</strong> : Serveurs équipés de cartes graphiques dédiées (GPU) supportant l'accélération matérielle TensorRT.</li>
+<li><strong>Performance &amp; Matériel</strong> :</li>
+<li><strong>Optimisation matérielle</strong> : Excellentes performances démontrées sur des <strong>CPU Intel récents</strong> via l'accélération native <strong>ONNX / OpenVINO</strong> (choix optimal pour le déploiement sur site).</li>
+<li><strong>Option dédiée</strong> : Compatibilité GPU + TensorRT disponible, mais non indispensable.</li>
 </ul>
 </div>
 <div class="right-col">
@@ -476,7 +485,7 @@
 <h2>9. Analyse Vidéo IA : Bilan des Performances</h2>
 <div class="two-col">
 <div class="left-col">
-<p>Les fonctions d'analyse vidéo ont donné de <strong>très bons résultats (VERY Good Results)</strong> lors du POC :</p>
+<p>Les fonctions d'analyse vidéo ont donné <strong>des taux de détection très satisfaisants</strong> lors du POC :</p>
 <ul>
 <li><strong>Comptage précis</strong> : Taux de détection et de suivi individuel supérieur aux attentes du pilote.</li>
 <li><strong>Robustesse opérationnelle</strong> : Le système maintient la cohésion des trajectoires individuelles même en cas d'arrêts prolongés des clients en file.</li>
@@ -509,10 +518,14 @@
 <h2>11. Base de Données : Structure des Hypertables</h2>
 <div class="two-col">
 <div class="left-col">
-<p>L'organisation des données repose sur des hypertables optimisées par plages de temps :</p>
+<p>L'organisation des données repose sur trois hypertables temporelles optimisées par TimescaleDB :</p>
 <ul>
-<li><strong>Table des événements de passage (<code>entrance_events</code>)</strong> : Stocke chaque entrée/sortie de client avec son horodatage et sa durée de présence.</li>
-<li><strong>Table des états de file (<code>queue_state_snapshots</code>)</strong> : Enregistre toutes les 10 secondes le nombre de personnes en file et les caisses actives pour servir de point de repère.</li>
+<li><strong>Événements d'Entrée/Passage (<code>entrance_events</code>)</strong> : Enregistre chaque client détecté avec ses attributs démographiques et sa durée de passage.</li>
+<li><em>Champs</em> : <code>timestamp</code> (TIMESTAMPTZ), <code>camera_id</code>, <code>track_id</code>, <code>gender</code>, <code>age_estimate</code>, <code>dwell_seconds</code>, <code>has_bag</code>.</li>
+<li><strong>Supervision des Files (<code>queue_state_snapshots</code>)</strong> : Captures régulières de la file d'attente toutes les 10 secondes.</li>
+<li><em>Champs</em> : <code>timestamp</code> (TIMESTAMPTZ), <code>camera_id</code>, <code>queue_count</code>, <code>active_lanes</code>, <code>avg_dwell_sec</code>, <code>max_dwell_sec</code>.</li>
+<li><strong>Événements de Caisse (<code>service_events</code>)</strong> : Enregistre la durée finale de service/transaction de chaque client en caisse.</li>
+<li><em>Champs</em> : <code>timestamp</code> (TIMESTAMPTZ), <code>camera_id</code>, <code>track_id</code>, <code>total_dwell_sec</code>.</li>
 </ul>
 </div>
 <div class="right-col">
@@ -655,7 +668,7 @@
 </ul>
 </div>
 <div class="right-col">
-<div class="slide-image-container"><img src="simulator_websocket_schema.jpg" alt="Simulateur Architecture"></div>
+<div class="slide-image-container"><img src="simulator_layout_view.jpg" alt="Simulateur Architecture"></div>
 </div>
 </div>
 </div>
@@ -691,61 +704,6 @@
 <div class="slide-image-container"><img src="roadmap_checklist_graphic.jpg" alt="Roadmap"></div>
 </div>
 </div>
-</div>
-<div class="slide">
-<h2>22. Annexe : Prompts de Génération - Partie 1</h2>
-<ul>
-<li><strong>Couverture &amp; Titre (Slide 1) - <code>iqms_cover_card.png</code></strong> :</li>
-<li><code>A modern high-tech presentation title cover graphic. Large stylized letters 'IQMS' surrounded by glowing virtual particles, neural network nodes, and time-series line graphs. Sleek professional design, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Enjeux Opérationnels (Slide 2) - <code>retail_challenges_schema.jpg</code></strong> :</li>
-<li><code>A professional block diagram. Boxes show: Magasin (Flux Clients) -&gt; Attente en Caisse (Friction) -&gt; Ressources Optimisées (IQMS Pilotage). Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Objectifs Évaluation (Slide 3) - <code>poc_objectives_schema.jpg</code></strong> :</li>
-<li><code>A modern high-tech evaluation checklist infographic on a dark glass screen. Four glowing checkmarks in neon cyan and green next to text blocks: 1. Video Counting Accuracy, 2. Predictive Model Precision, 3. Stack Scalability, 4. Integrator Readiness. Cinematic lighting, photorealistic, 8k resolution, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Architecture Technique (Slide 3) - <code>iqms_system_architecture.jpg</code></strong> :</li>
-<li><code>A professional system architecture block diagram. At the top: an 'IP CAMERA (RTSP)' box. An arrow points down to a block labeled 'AI DETECTION (YOLOv9 + Norfair)'. An arrow points down to a database block labeled 'TIMESCALEDB / PostgreSQL'. From the database, arrows branch out to two bottom blocks: 'PREDICTION ENGINE' and 'STREAMLIT DASHBOARD'. Clean technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Caméra Perspective (Slide 4) - <code>camera_perspective_photorealistic.jpg</code></strong> :</li>
-<li><code>A professional, crisp photorealistic security dome camera mounted high on a clean white ceiling, looking down at a modern checkout lane and grocery queue in a beautifully lit, modern supermarket. Soft lighting, high detail, security monitoring perspective view, photorealism, professional CCTV, wide angle lens.</code></li>
-<li><strong>Caméra Exclusions (Slide 5) - <code>camera_constraints_schema.jpg</code></strong> :</li>
-<li><code>A professional technical schema diagram. Left box is 'CAMERA IP PERSPECTIVE [VALIDE]', right box is 'CAMERA 360 FISHEYE [EXCLU]' crossed out. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Inférence Head-Detector (Slide 6) - <code>head_detector_flow_schema.jpg</code></strong> :</li>
-<li><code>A professional technical system diagram. Flow goes left to right: 'RTSP Video Input' box -&gt; CPU/iGPU icon labeled 'OpenVINO ONNX Engine' -&gt; 'YOLOv9 Head Detector' box -&gt; 'ROI Head Coordinates' output. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Inférence Silhouette &amp; Face (Slide 7) - <code>body_detector_flow_schema.jpg</code></strong> :</li>
-<li><code>A professional technical system diagram. Flow goes left to right: 'RTSP Video Input' box -&gt; CPU icon labeled 'OpenVINO ONNX Engine' -&gt; 'YOLOv9 Body &amp; Face Detector' box -&gt; 'Uniface Classifier' box -&gt; 'Age, Gender &amp; Bag Status' output. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Suivi Norfair (Slide 8) - <code>norfair_tracking_schema.jpg</code></strong> :</li>
-<li><code>A professional technical data flow diagram. Flow goes left to right: 'Frame Detections' box -&gt; 'Norfair Tracker' box -&gt; 'Dwell Time Accumulator' box -&gt; decision diamond 'Track Ends?' -&gt; 'PostgreSQL DB Insert' database icon. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-</ul>
-</div>
-<div class="slide">
-<h2>23. Annexe : Prompts de Génération - Partie 2</h2>
-<ul>
-<li><strong>Détection Bilan (Slide 9) - <code>ia_performance_chart_schema.jpg</code></strong> :</li>
-<li><code>A line graph showing tracking reliability. Line stays high above a threshold at 98% representing very good results. Clean technical chart layout, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>TimescaleDB Router (Slide 10) - <code>timescaledb_hypertable_schema.jpg</code></strong> :</li>
-<li><code>A professional database architecture diagram. Dwell time events write to a central 'TimescaleDB Router' which partitions data into 'Time Chunks (Hypertables)' on disk. A background job 'Auto-Compression Policy' compresses older chunks. Technical blueprint style, modern tech database graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Structure Hypertables (Slide 11) - <code>db_tables_schema.jpg</code></strong> :</li>
-<li><code>A professional database schema diagram. Shows two tables: 'entrance_events' with columns (timestamp TIMESTAMPTZ, dwell_sec INT, gender TEXT, age INT, camera_id TEXT) and 'queue_state_snapshots' with columns (timestamp TIMESTAMPTZ, queue_count INT, active_lanes INT, avg_dwell_sec INT). Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><code>A professional technical flowchart. Flows from top to bottom: 'Live Client Dwell Event' -&gt; decision box 'Time since last write &gt; 2 seconds?' -&gt; branch YES: 'Convert to TIMESTAMPTZ' -&gt; 'Write to TimescaleDB' -&gt; branch NO: 'Ignore write (Throttled)'. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Décomposition Prophet (Slide 12) - <code>prophet_decomposition_schema.jpg</code></strong> :</li>
-<li><code>A professional machine learning mathematical decomposition diagram. Input 'Dwell Time Series' enters 'Prophet Decomposition Engine'. It splits the series into three additive parallel graph components: 'Trend Component', 'Weekly Seasonality', and 'Daily Rush Hour Seasonality'. These combine to form 'Additive Prophet Forecast'. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Modèle LSTM (Slide 13) - <code>lstm_neural_network_diagram.png</code></strong> :</li>
-<li><code>A professional sequence neural network block flow. Input data feeds into memory cells with loops showing hidden states recurrences leading to future wait predictions. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Modèle XGBoost (Slide 14) - <code>xgboost_decision_tree_diagram.png</code></strong> :</li>
-<li><code>A professional gradient boosting decision tree flow diagram. Root node splits into multiple child branches leading to terminal leaves correcting wait times. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Modèles en Ensemble (Slide 15) - <code>prediction_ensemble_schema.jpg</code></strong> :</li>
-<li><code>A professional system diagram for a machine learning model. Input data feeds into three parallel blocks: 'Prophet Model (Trends)', 'LSTM Model (Sequences)', and 'XGBoost Model (Context)'. Their outputs combine in a block labeled 'Ensemble Integrator', which outputs '60-Minute Forecast'. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Formule Temps d'Attente (Slide 16) - <code>dynamic_wait_formula_schema.jpg</code></strong> :</li>
-<li><code>A professional technical flow diagram for a supermarket queue management system. Inputs '4 Active Checkout Lanes', 'Current Shoppers in Queue', and 'Observed Dwell Time' feed into a central calculation block 'Queue Roll-Forward Projection Engine'. Output arrows branch to boxes: 'Wait Time Forecast (+15m)' and 'Wait Time Forecast (+30m)'. Clean technical blueprint style, dark mode, blue and green accent colors, retail setting, no cars, no roads, no device frame.</code></li>
-<li><strong>Dashboard Streamlit Monitor (Slide 17) - <code>streamlit_operator_dashboard.png</code></strong> :</li>
-<li><code>A sleek professional computer monitor mockup displaying Streamlit live metrics. Shows KPI cards (In Queue Now, Wait predictions, Entries today) and wait curves. Clean layout, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Dashboard Mobile (Slide 18) - <code>operator_dashboard_mobile.png</code></strong> :</li>
-<li><code>A high-quality, photorealistic close-up of a sleek mobile phone displaying the React Native queue monitoring app interface. Shows checkout line status card list. Design optimized in dark mode, neon cyan and green accents.</code></li>
-<li><strong>Visualisation 2D (Slide 19) - <code>simulator_websocket_schema.jpg</code></strong> :</li>
-<li><code>A professional network communication diagram. An 'Async WebSocket Server (Port 8080)' block communicates bidirectionally via dashed lines representing 'WebSockets JSON protocol' with an 'HTML5 Canvas Client (Port 8081)' showing a layout view. A side block 'Real DB Calibrator' feeds configuration to the server. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Planificateur Scheduler (Slide 20) - <code>prediction_scheduler_schema.jpg</code></strong> :</li>
-<li><code>A professional technical scheduler flow. A 'System Timer Loop' triggers 'run_scheduler.py' every '--interval 15' minutes. This spawns a subprocess executing 'ensemble_predict.py' which reads training history and writes predictions to 'queue_predictions' table. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
-<li><strong>Roadmap Checklist (Slide 21) - <code>roadmap_checklist_graphic.jpg</code></strong> :</li>
-<li><code>A horizontal roadmap checklist sequence flow displaying checkboxes next to phase milestones (Cameras, DB tables, OpenVINO, apps). Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
-</ul>
 </div>
             <div class="tips">Utilisez les touches ◄ / ► ou Espace pour naviguer</div>
         </div>

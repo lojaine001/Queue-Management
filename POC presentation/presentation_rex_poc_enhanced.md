@@ -1,6 +1,6 @@
 # REX POC — IQMS
 ## Système Intelligent de Gestion de File d'Attente
-**Rapport de Restitution & Guide d'Intégration — Juin 2026**
+**Retour d'Expérience — Juin 2026**
 
 ---
 
@@ -92,8 +92,8 @@ CAMÉRA IP (RTSP)
   * Calcul précis du temps de présence (dwell time)
   * Réduction des occlusions partielles
 
-**Caméras 360° : NON RECOMMANDÉES**
-Distorsions optiques incompatibles avec le tracking IA. Préférer des caméras IP standard RTSP H.264/H.265.
+**Caméras Panoramiques 360° : Perspectives Futures**
+Prévues initialement mais non déployées lors du POC pour des raisons techniques. Elles gardent un fort potentiel pour valider la présence des caissiers (ligne active) et suivre le flux de sortie global. Préférer les caméras IP standard pour le tracking unitaire en attendant.
 
 ![Schéma de perspective caméra](camera_perspective_photorealistic.jpg)
 
@@ -106,7 +106,7 @@ Distorsions optiques incompatibles avec le tracking IA. Préférer des caméras 
 | **Modèle** | YOLOv9 (têtes uniquement) | YOLOv9 + Uniface (corps complet) |
 | **Données** | Passage, durée | + Genre, âge, sacs |
 | **Cas d'usage** | Forte densité, flux rapide | Analyses marketing, caisses |
-| **Matériel** | GPU + TensorRT | CPU standard |
+| **Matériel** | CPU (Intel + OpenVINO) / GPU | CPU standard |
 | **Performance** | Rapide, léger | Riche, détaillé |
 
 ![Détecteurs de Tête et Silhouette](head_detector_flow_schema.jpg)
@@ -151,10 +151,11 @@ Distorsions optiques incompatibles avec le tracking IA. Préférer des caméras 
 * **Compression** : Réduction automatique des données anciennes (×10)
 * **Compatibilité** : Grafana natif, SQL standard
 
-**Tables principales** :
-* `entrance_events` — chaque passage client (horodatage, durée, attributs)
-* `queue_state_snapshots` — état de file toutes les 10 secondes
-* `queue_predictions` — prévisions générées par l'ensemble
+**Hypertables & Tables principales** :
+* `entrance_events` (Hypertable) — passages client (avec genre, âge, sacs, durée)
+* `queue_state_snapshots` (Hypertable) — captures de file d'attente (toutes les 10s)
+* `service_events` (Hypertable) — temps de service/transaction final en caisse
+* `queue_predictions` (Table) — historique des prévisions d'attente générées
 
 ---
 

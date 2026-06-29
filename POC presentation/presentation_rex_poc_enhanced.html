@@ -6,13 +6,13 @@
     <title>REX POC — IQMS Presentation</title>
     <style>
         :root {
-            --primary: #0071e3;
-            --background: #f5f5f7;
-            --slide-bg: #ffffff;
+            --primary: #0066cc;
+            --background: #f5f9fd;
+            --slide-bg: linear-gradient(135deg, #f5f9fd 0%, #e6f2fc 100%);
             --text: #1d1d1f;
-            --text-secondary: #86868b;
+            --text-secondary: #6e6e73;
             --border: #d2d2d7;
-            --code-bg: #f5f5f7;
+            --code-bg: rgba(0, 113, 227, 0.05);
         }
 
         * {
@@ -37,7 +37,11 @@
             width: 100vw;
             height: 100vh;
             position: relative;
-            background-color: var(--slide-bg);
+            background: var(--slide-bg);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(225, 238, 253, 0.6) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(200, 225, 252, 0.6) 0px, transparent 50%),
+                var(--slide-bg);
             overflow: hidden;
             display: flex;
             flex-direction: column;
@@ -334,7 +338,7 @@
             <div class="slide cover-slide">
 <h1>REX POC — IQMS</h1>
 <h2>Système Intelligent de Gestion de File d'Attente</h2>
-<p><strong>Rapport de Restitution &amp; Guide d'Intégration — Juin 2026</strong></p>
+<p><strong>Retour d'Expérience — Juin 2026</strong></p>
 </div>
 <div class="slide">
 <h2>Sommaire Exécutif</h2>
@@ -415,8 +419,8 @@
 <li>Calcul précis du temps de présence (dwell time)</li>
 <li>Réduction des occlusions partielles</li>
 </ul>
-<p><strong>Caméras 360° : NON RECOMMANDÉES</strong></p>
-<p>Distorsions optiques incompatibles avec le tracking IA. Préférer des caméras IP standard RTSP H.264/H.265.</p>
+<p><strong>Caméras Panoramiques 360° : Perspectives Futures</strong></p>
+<p>Prévues initialement mais non déployées lors du POC pour des raisons techniques. Elles gardent un fort potentiel pour valider la présence des caissiers (ligne active) et suivre le flux de sortie global. Préférer les caméras IP standard pour le tracking unitaire en attendant.</p>
 </div>
 <div class="right-col">
 <div class="slide-image-container"><img src="camera_perspective_photorealistic.jpg" alt="Schéma de perspective caméra"></div>
@@ -425,7 +429,7 @@
 </div>
 <div class="slide">
 <h2>5. Détection IA : Deux Options Selon le Besoin</h2>
-<table><tr><th>Critère</th><th>Option A : Head-Detector</th><th>Option B : Corps + Visage</th></tr><tr><td><strong>Modèle</strong></td><td>YOLOv9 (têtes uniquement)</td><td>YOLOv9 + Uniface (corps complet)</td></tr><tr><td><strong>Données</strong></td><td>Passage, durée</td><td>+ Genre, âge, sacs</td></tr><tr><td><strong>Cas d'usage</strong></td><td>Forte densité, flux rapide</td><td>Analyses marketing, caisses</td></tr><tr><td><strong>Matériel</strong></td><td>GPU + TensorRT</td><td>CPU standard</td></tr><tr><td><strong>Performance</strong></td><td>Rapide, léger</td><td>Riche, détaillé</td></tr></table>
+<table><tr><th>Critère</th><th>Option A : Head-Detector</th><th>Option B : Corps + Visage</th></tr><tr><td><strong>Modèle</strong></td><td>YOLOv9 (têtes uniquement)</td><td>YOLOv9 + Uniface (corps complet)</td></tr><tr><td><strong>Données</strong></td><td>Passage, durée</td><td>+ Genre, âge, sacs</td></tr><tr><td><strong>Cas d'usage</strong></td><td>Forte densité, flux rapide</td><td>Analyses marketing, caisses</td></tr><tr><td><strong>Matériel</strong></td><td>CPU (Intel + OpenVINO) / GPU</td><td>CPU standard</td></tr><tr><td><strong>Performance</strong></td><td>Rapide, léger</td><td>Riche, détaillé</td></tr></table>
 <div class="slide-image-container"><img src="head_detector_flow_schema.jpg" alt="Détecteurs de Tête et Silhouette"></div>
 </div>
 <div class="slide">
@@ -459,11 +463,12 @@
 <li><strong>Compression</strong> : Réduction automatique des données anciennes (×10)</li>
 <li><strong>Compatibilité</strong> : Grafana natif, SQL standard</li>
 </ul>
-<p><strong>Tables principales</strong> :</p>
+<p><strong>Hypertables &amp; Tables principales</strong> :</p>
 <ul>
-<li><code>entrance_events</code> — chaque passage client (horodatage, durée, attributs)</li>
-<li><code>queue_state_snapshots</code> — état de file toutes les 10 secondes</li>
-<li><code>queue_predictions</code> — prévisions générées par l'ensemble</li>
+<li><code>entrance_events</code> (Hypertable) — passages client (avec genre, âge, sacs, durée)</li>
+<li><code>queue_state_snapshots</code> (Hypertable) — captures de file d'attente (toutes les 10s)</li>
+<li><code>service_events</code> (Hypertable) — temps de service/transaction final en caisse</li>
+<li><code>queue_predictions</code> (Table) — historique des prévisions d'attente générées</li>
 </ul>
 </div>
 <div class="slide">

@@ -20,13 +20,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <title>REX POC — IQMS Presentation</title>
     <style>
         :root {{
-            --primary: #0071e3;
-            --background: #f5f5f7;
-            --slide-bg: #ffffff;
+            --primary: #0066cc;
+            --background: #f5f9fd;
+            --slide-bg: linear-gradient(135deg, #f5f9fd 0%, #e6f2fc 100%);
             --text: #1d1d1f;
-            --text-secondary: #86868b;
+            --text-secondary: #6e6e73;
             --border: #d2d2d7;
-            --code-bg: #f5f5f7;
+            --code-bg: rgba(0, 113, 227, 0.05);
         }}
 
         * {{
@@ -51,7 +51,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             width: 100vw;
             height: 100vh;
             position: relative;
-            background-color: var(--slide-bg);
+            background: var(--slide-bg);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(225, 238, 253, 0.6) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(200, 225, 252, 0.6) 0px, transparent 50%),
+                var(--slide-bg);
             overflow: hidden;
             display: flex;
             flex-direction: column;
