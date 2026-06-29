@@ -1,4 +1,5 @@
 import os
+import json
 import time as _time
 import subprocess
 import sys
@@ -55,6 +56,39 @@ from prediction.pipeline import load_lane_history_agg  # noqa: E402
 from prediction.dwell_modifier import compute_dwell_modifier_from_recent  # noqa: E402
 
 CAMERA_ID = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
+ARRIVAL_CALIB_PATH = Path(__file__).parent / "calibration.json"
+
+
+def _load_arrival_calibration_debug() -> dict[str, object]:
+    if not ARRIVAL_CALIB_PATH.exists():
+        return {
+            "loaded": False,
+            "path": str(ARRIVAL_CALIB_PATH),
+            "k_global": 1.0,
+            "k_by_hour": {},
+            "error": None,
+        }
+    try:
+        payload = json.loads(ARRIVAL_CALIB_PATH.read_text(encoding="utf-8"))
+        return {
+            "loaded": True,
+            "path": str(ARRIVAL_CALIB_PATH),
+            "k_global": float(payload.get("k_global", 1.0) or 1.0),
+            "k_by_hour": {
+                int(hour): float(value)
+                for hour, value in payload.get("k_by_hour", {}).items()
+            },
+            "trained_at_utc": payload.get("trained_at_utc"),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "loaded": False,
+            "path": str(ARRIVAL_CALIB_PATH),
+            "k_global": 1.0,
+            "k_by_hour": {},
+            "error": str(exc),
+        }
 
 def _today_hours():
     """Return (open_hour, open_min, close_hour, close_min, open_tot, close_tot) for today."""
@@ -65,7 +99,7 @@ WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
 PRED_SMOOTH_MIN = int(os.getenv("PRED_SMOOTH_MIN", 5))
-FORECAST_DISPLAY_MIN = int(os.getenv("FORECAST_DISPLAY_MIN", 15))
+FORECAST_DISPLAY_MIN = int(os.getenv("FORECAST_DISPLAY_MIN", 10))
 DEFAULT_LANES = int(os.getenv("DEFAULT_LANES", 2))
 MAX_LANES     = int(os.getenv("MAX_LANES", 4))
 SNAPSHOT_MAX_AGE_MIN = int(os.getenv("SNAPSHOT_MAX_AGE_MIN", 30))
@@ -73,6 +107,7 @@ BROWSING_GAP_MIN = int(os.getenv("BROWSING_GAP_MIN", 25))
 W_PROPHET = float(os.getenv("W_PROPHET", 0.40))
 W_LSTM = float(os.getenv("W_LSTM", 0.30))
 W_XGB = float(os.getenv("W_XGB", 0.30))
+PROPHET_DISPLAY_SHIFT_MIN = int(os.getenv("PROPHET_DISPLAY_SHIFT_MIN", 0))
 DWELL_MODEL_MODE_DEFAULT = os.getenv("DWELL_MODEL_MODE", "safe").strip().lower()
 DWELL_MIN_TRAIN_BUCKETS = int(os.getenv("DWELL_MIN_TRAIN_BUCKETS", 24))
 DWELL_MIN_TRAIN_EVENTS = int(os.getenv("DWELL_MIN_TRAIN_EVENTS", 60))
@@ -120,15 +155,43 @@ def _to_local_timestamp(value):
         return None
     ts = pd.Timestamp(value)
     if ts.tzinfo is not None:
-        return ts.tz_convert(LOCAL_TZ)
+        return ts.tz_convert(LOCAL_TZ).tz_localize(None)
     return ts
 
 
 def _to_local_series(series):
     local = pd.to_datetime(series)
     if getattr(local.dt, "tz", None) is not None:
-        local = local.dt.tz_convert(LOCAL_TZ)
+        local = local.dt.tz_convert(LOCAL_TZ).dt.tz_localize(None)
     return local
+
+
+def _now_local_ts() -> pd.Timestamp:
+    return pd.Timestamp.now(tz=LOCAL_TZ).tz_localize(None)
+
+
+def _as_local_naive_ts(value):
+    if value is None or pd.isna(value):
+        return pd.NaT
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        return ts.tz_convert(LOCAL_TZ).tz_localize(None)
+    return ts
+
+
+def _plotly_local_iso(value):
+    if value is None or pd.isna(value):
+        return None
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        ts = ts.tz_convert(LOCAL_TZ).tz_localize(None)
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _plotly_local_iso_series(values):
+    return [_plotly_local_iso(v) for v in values]
 
 
 def _build_dashboard_dwell_model(service_history: pd.DataFrame, mode: str):
@@ -299,8 +362,8 @@ def _insert_overnight_gaps(df: pd.DataFrame, ds_col: str = "ds", threshold_min: 
     for _c in df.columns:
         _gap_row[_c] = pd.NaT if pd.api.types.is_datetime64_any_dtype(df[_c]) else float("nan") if pd.api.types.is_float_dtype(df[_c]) else None
     for i in range(1, len(df)):
-        t0 = pd.Timestamp(df.loc[i - 1, ds_col])
-        t1 = pd.Timestamp(df.loc[i, ds_col])
+        t0 = _as_local_naive_ts(df.loc[i - 1, ds_col])
+        t1 = _as_local_naive_ts(df.loc[i, ds_col])
         if (t1 - t0).total_seconds() / 60 > threshold_min:
             parts.append(df.iloc[prev:i])
             parts.append(_gap_row)
@@ -313,7 +376,7 @@ def _snapshot_age_minutes(snapshot_ts):
     ts_local = _to_local_timestamp(snapshot_ts)
     if ts_local is None:
         return None, None
-    now_local = pd.Timestamp.now(tz=LOCAL_TZ)
+    now_local = _now_local_ts()
     age_min = max(0.0, (now_local - ts_local).total_seconds() / 60.0)
     return ts_local, age_min
 
@@ -327,8 +390,25 @@ def _is_live_lane_snapshot(snapshot):
     return age_min is not None and age_min <= SNAPSHOT_MAX_AGE_MIN
 
 
+WAIT_DISPLAY_CAP_MIN = 10
+
 def _format_wait(value):
     return f"{float(value):.1f} min" if value is not None else "Forecast pending"
+
+def _format_wait_capped(value):
+    if value is None:
+        return "Forecast pending"
+    if float(value) >= WAIT_DISPLAY_CAP_MIN:
+        return f"{WAIT_DISPLAY_CAP_MIN:.0f}+ min"
+    return f"{float(value):.1f} min"
+
+def _wait_card_value(value):
+    """HTML value string for a predicted-wait metric card, capped at WAIT_DISPLAY_CAP_MIN."""
+    if value is None:
+        return "—"
+    if value >= WAIT_DISPLAY_CAP_MIN:
+        return f"{WAIT_DISPLAY_CAP_MIN:.0f}+<span class='metric-unit'> min</span>"
+    return f"{value:.1f}<span class='metric-unit'> min</span>"
 
 
 def _format_metric_value(value, suffix=""):
@@ -490,6 +570,27 @@ def _apply_chart_layout(fig, *, height=260, y_suffix="", xaxis_type=None):
         showlegend=False,
         font=dict(color="#0f172a"),
     )
+
+
+_ARRIVAL_WEIGHT_BY_COL = {
+    "prophet_yhat": W_PROPHET,
+    "lstm_yhat": W_LSTM,
+    "xgb_yhat": W_XGB,
+}
+
+
+def _weighted_arrival_blend(frame: pd.DataFrame, cols: list[str]) -> pd.Series:
+    valid = [c for c in cols if c in frame.columns]
+    if not valid:
+        return pd.Series(0.0, index=frame.index)
+    weights = np.array([_ARRIVAL_WEIGHT_BY_COL.get(c, 1.0) for c in valid], dtype=float)
+    if float(weights.sum()) <= 0:
+        weights = np.ones(len(valid), dtype=float)
+    values = pd.concat([pd.to_numeric(frame[c], errors="coerce") for c in valid], axis=1)
+    weighted_values = values.mul(weights, axis=1)
+    available_weight = values.notna().mul(weights, axis=1).sum(axis=1)
+    blended = weighted_values.sum(axis=1, skipna=True)
+    return blended.div(available_weight.where(available_weight > 0), fill_value=np.nan)
 
 
 def _run_prediction_ui(data_span_days: int = 30):
@@ -661,27 +762,117 @@ def _forecast_display_frame(pf):
 
 @st.cache_data(ttl=REFRESH_SEC)
 def load_service_time() -> float:
-    """Return median checkout service time from service_events; fall back to config."""
+    """Return median pure service time from service_events (7 days).
+
+    Priority:
+    1. Rows where active_head_tracks_in_lane = 0 (person was alone → dwell ≈ service time).
+    2. Fallback JOIN with entrance_events for historical rows lacking the column.
+    3. All rows median if neither source has enough data.
+    4. Config/env default.
+    """
     try:
-        conn = _conn()  # type: ignore[assignment]
-        df = pd.read_sql(  # type: ignore[call-overload]
-            """
-            SELECT total_dwell_sec / 60.0 AS service_min
-            FROM service_events
-            WHERE total_dwell_sec > 0
-              AND timestamp >= NOW() - INTERVAL '7 days'
-            """,
-            conn,  # type: ignore[arg-type]
-        )
-        conn.close()  # type: ignore[union-attr]
-        if not df.empty:
-            vals = pd.to_numeric(df["service_min"], errors="coerce").dropna()
-            vals = vals[vals >= DWELL_MIN_FLOOR]
-            if not vals.empty:
-                return float(min(max(float(vals.median()), DWELL_MIN_FLOOR), 10.0))
+        with _conn() as conn:
+            # Path 1: new column present and populated
+            df = pd.read_sql(
+                """
+                SELECT total_dwell_sec / 60.0 AS service_min
+                FROM service_events
+                WHERE total_dwell_sec > 0
+                  AND active_head_tracks_in_lane = 0
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                """,
+                conn,
+            )
+            if not df.empty and len(df) >= 10:
+                vals = pd.to_numeric(df["service_min"], errors="coerce").dropna()
+                vals = vals[vals >= DWELL_MIN_FLOOR]
+                if not vals.empty:
+                    return float(min(max(float(vals.median()), DWELL_MIN_FLOOR), 10.0))
+
+            # Path 2: historical rows — join with entrance_events
+            df = pd.read_sql(
+                """
+                SELECT se.total_dwell_sec / 60.0 AS service_min
+                FROM service_events se
+                JOIN entrance_events ee ON ee.track_id = se.track_id
+                WHERE se.total_dwell_sec > 0
+                  AND ee.active_head_tracks_in_lane = 0
+                  AND se.timestamp >= NOW() - INTERVAL '7 days'
+                """,
+                conn,
+            )
+            if not df.empty and len(df) >= 10:
+                vals = pd.to_numeric(df["service_min"], errors="coerce").dropna()
+                vals = vals[vals >= DWELL_MIN_FLOOR]
+                if not vals.empty:
+                    return float(min(max(float(vals.median()), DWELL_MIN_FLOOR), 10.0))
+
+            # Path 3: not enough solo events — fall back to all events
+            df = pd.read_sql(
+                """
+                SELECT total_dwell_sec / 60.0 AS service_min
+                FROM service_events
+                WHERE total_dwell_sec > 0
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                """,
+                conn,
+            )
+            if not df.empty:
+                vals = pd.to_numeric(df["service_min"], errors="coerce").dropna()
+                vals = vals[vals >= DWELL_MIN_FLOOR]
+                if not vals.empty:
+                    return float(min(max(float(vals.median()), DWELL_MIN_FLOOR), 10.0))
     except Exception:
         pass
     return float(os.getenv("CHECKOUT_SERVICE_MIN", DEFAULT_DWELL_MIN))
+
+
+@st.cache_data(ttl=REFRESH_SEC)
+def load_service_time_per_lane() -> dict:
+    """Return per-lane median pure service time (minutes) keyed by lane_id.
+    Uses solo events (active_head_tracks_in_lane = 0) to exclude wait time.
+    Falls back to JOIN with entrance_events for historical rows, then all events."""
+    try:
+        with _conn() as conn:
+            # Path 1: new column
+            df = pd.read_sql(
+                """
+                SELECT lane_id, total_dwell_sec / 60.0 AS service_min
+                FROM service_events
+                WHERE total_dwell_sec > 0
+                  AND lane_id IS NOT NULL
+                  AND active_head_tracks_in_lane = 0
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                """,
+                conn,
+            )
+            if df.empty or df.groupby("lane_id").size().min() < 5:
+                # Path 2: historical JOIN
+                df2 = pd.read_sql(
+                    """
+                    SELECT se.lane_id, se.total_dwell_sec / 60.0 AS service_min
+                    FROM service_events se
+                    JOIN entrance_events ee ON ee.track_id = se.track_id
+                    WHERE se.total_dwell_sec > 0
+                      AND se.lane_id IS NOT NULL
+                      AND ee.active_head_tracks_in_lane = 0
+                      AND se.timestamp >= NOW() - INTERVAL '7 days'
+                    """,
+                    conn,
+                )
+                df = pd.concat([df, df2], ignore_index=True).drop_duplicates()
+
+            if not df.empty:
+                result = {}
+                for lane_id, group in df.groupby("lane_id"):
+                    vals = pd.to_numeric(group["service_min"], errors="coerce").dropna()
+                    vals = vals[vals >= DWELL_MIN_FLOOR]
+                    if not vals.empty:
+                        result[int(lane_id)] = float(min(max(float(vals.median()), DWELL_MIN_FLOOR), 10.0))
+                return result
+    except Exception:
+        pass
+    return {}
 
 
 def _estimated_service_minutes(_snapshot):
@@ -787,7 +978,8 @@ def load_queue_history(hours):
     with _conn() as conn:
         df = pd.read_sql(
             f"""
-            SELECT timestamp, queue_count, avg_dwell_sec
+            SELECT timestamp, queue_count, avg_dwell_sec,
+                   COALESCE(active_lanes, 1) AS active_lanes
             FROM queue_state_snapshots
             WHERE timestamp >= NOW() - INTERVAL '{int(hours)} hours'
             ORDER BY timestamp ASC
@@ -979,16 +1171,16 @@ def load_status_breakdown():
 
 @st.cache_data(ttl=REFRESH_SEC)
 def load_model_breakdown():
-    """Per-model yhat for the most recent prediction run's upcoming slots (next 15 min)."""
+    """Per-model yhat for the most recent prediction run's upcoming slots (next display horizon)."""
     with _conn() as conn:
         try:
             df = pd.read_sql(
-                """
+                f"""
                 SELECT prediction_for AS ds,
                        prophet_yhat, lstm_yhat, xgb_yhat, ensemble_yhat
                 FROM queue_predictions
                 WHERE prediction_for >= NOW()
-                  AND prediction_for <= NOW() + INTERVAL '15 minutes'
+                  AND prediction_for <= NOW() + INTERVAL '{FORECAST_DISPLAY_MIN} minutes'
                   AND predicted_at = (SELECT MAX(predicted_at) FROM queue_predictions)
                 ORDER BY prediction_for
                 """,
@@ -1076,6 +1268,32 @@ def load_service_history(days: int):
 
 
 _LANE_INFER_WINDOW_MIN = 15  # shorter window reduces overcounting from accumulated events
+_LANE_COUNT_WINDOW_MIN = 30  # longer window for lane-count stability (avoids flicker when a lane is quiet)
+
+
+@st.cache_data(ttl=REFRESH_SEC)
+def load_active_lane_count(window_min: int = _LANE_COUNT_WINDOW_MIN) -> "int | None":
+    """Count distinct active lanes from service_events over the last window_min minutes.
+    Uses a longer window than the throughput estimator so a temporarily quiet lane
+    does not cause the displayed lane count to flicker down."""
+    try:
+        with _conn() as conn:
+            df = pd.read_sql(
+                f"""
+                SELECT COUNT(DISTINCT lane_id) AS lane_count
+                FROM service_events
+                WHERE lane_id IS NOT NULL
+                  AND total_dwell_sec > {DWELL_MIN_FLOOR * 60}
+                  AND timestamp >= NOW() - INTERVAL '{int(window_min)} minutes'
+                """,
+                conn,
+            )
+        if not df.empty:
+            val = int(df.iloc[0]["lane_count"])
+            return min(val, 5) if val > 0 else None
+    except Exception:
+        pass
+    return None
 
 
 @st.cache_data(ttl=REFRESH_SEC)
@@ -1464,6 +1682,9 @@ else:
 if "pred_smooth_min" not in st.session_state:
     st.session_state["pred_smooth_min"] = PRED_SMOOTH_MIN
 
+if "calibration_enabled" not in st.session_state:
+    st.session_state["calibration_enabled"] = True
+
 if "dwell_model_mode" not in st.session_state:
     _qp_dwell_mode = st.query_params.get("dwell_mode", DWELL_MODEL_MODE_DEFAULT)
     st.session_state["dwell_model_mode"] = (
@@ -1479,6 +1700,9 @@ else:
     if not _sanitized_dwell_models:
         _sanitized_dwell_models = list(_DWELL_FORECAST_MODEL_DEFAULT)
     st.session_state["dwell_forecast_models"] = _sanitized_dwell_models
+
+if "show_live_wait_ref" not in st.session_state:
+    st.session_state["show_live_wait_ref"] = False
 
 if "training_span_days" not in st.session_state:
     _qp_days_init = st.query_params.get("training_days", None)
@@ -1541,30 +1765,37 @@ _dwell_model_meta = st.session_state.get(_dwell_meta_cache_key, {})
 live_lane_source = _is_live_lane_snapshot(snap)
 detected_lanes = int(snap["active_lanes"]) if live_lane_source else DEFAULT_LANES
 
-# Infer active lanes from recent service_events throughput (overrides snapshot if available)
+# Infer active lanes from recent service_events (overrides snapshot if available).
+# Lane *count* uses a 30-min window so a temporarily quiet lane doesn't cause flicker.
+# Throughput fallback still uses the user-selected shorter window.
 _lane_window = int(st.session_state.get("lane_infer_window_min", _LANE_INFER_WINDOW_MIN))
 _svc_recent = load_recent_service_events(_lane_window)
 _inferred_lanes: "int | None" = None
-if not _svc_recent.empty:
-    _svc_ok = _svc_recent[
-        pd.to_numeric(_svc_recent["total_dwell_sec"], errors="coerce").fillna(0)
-        > DWELL_MIN_FLOOR * 60
-    ]
-    if not _svc_ok.empty:
-        if "lane_id" in _svc_ok.columns:
-            _valid_lane_ids = _svc_ok["lane_id"].dropna()
-            if not _valid_lane_ids.empty:
-                _inferred_lanes = int(min(_valid_lane_ids.nunique(), 5))
-        if _inferred_lanes is None:
+_inferred_lanes_source: str = ""
+# Path 1: stable lane count from distinct lane_ids over 30 min
+_stable_lane_count = load_active_lane_count(_LANE_COUNT_WINDOW_MIN)
+if _stable_lane_count is not None:
+    _inferred_lanes = _stable_lane_count
+    _inferred_lanes_source = "lane_id"
+else:
+    # Path 2: throughput-based estimate (no lane_id data) over shorter window
+    if not _svc_recent.empty:
+        _svc_ok = _svc_recent[
+            pd.to_numeric(_svc_recent["total_dwell_sec"], errors="coerce").fillna(0)
+            > DWELL_MIN_FLOOR * 60
+        ]
+        if not _svc_ok.empty:
             _svc_min = load_service_time()
             _cap = _lane_window / max(_svc_min, 0.5)
             _inferred_lanes = int(min(max(round(len(_svc_ok) / max(_cap, 1)), 1), 5))
+            _inferred_lanes_source = "throughput"
 
 if _inferred_lanes is not None:
     detected_lanes = _inferred_lanes
 queue_count = int(snap["queue_count"]) if snap is not None and pd.notna(snap["queue_count"]) else 0
 snapshot_ts_local, snapshot_age_min = _snapshot_age_minutes(snap["timestamp"] if snap is not None else None)
 service_minutes = _estimated_service_minutes(snap)
+service_minutes_per_lane = load_service_time_per_lane()
 
 # Apply fuzzy dwell modifier: adjusts service_minutes based on current
 # queue demographics (age, equipment type, group size).
@@ -1616,16 +1847,26 @@ wait_45m = None
 lane_waits = {}
 forecast_waits = pd.DataFrame(columns=["ds", "wait_min"])
 pred_future = pd.DataFrame(columns=["ds", "arrivals"])
+_arrival_calib = _load_arrival_calibration_debug()
+_arrival_calib_note = ""
+_arrival_calib_debug_rows: list[dict[str, str]] = []
+_arrival_cols_used: list[str] = []
+_arrival_models_selected: list[str] = []
+_arrival_calib_active = False
 
 _arrivals_capped = False
 _pred_mean = _pred_min = _pred_max = float("nan")
 _dwell_per_slot = None
 _dwell_per_slot_base = None
 _dwell_pred_by_model: dict[str, list[float]] = {}
+_model_col_map = {"ensemble": "ensemble_yhat", "prophet": "prophet_yhat",
+                  "lstm": "lstm_yhat", "xgboost": "xgb_yhat"}
+_selected_models = st.session_state.get("arrival_models") or ["prophet", "lstm", "xgboost"]
 if not pred_df.empty:
     _model_col_map = {"ensemble": "ensemble_yhat", "prophet": "prophet_yhat",
                       "lstm": "lstm_yhat", "xgboost": "xgb_yhat"}
     _selected_models = st.session_state.get("arrival_models") or ["prophet", "lstm", "xgboost"]
+    _arrival_models_selected = list(_selected_models)
     _valid_cols = [_model_col_map[m] for m in _selected_models
                    if _model_col_map.get(m) in pred_df.columns]
     if not _valid_cols:
@@ -1633,18 +1874,34 @@ if not pred_df.empty:
             if _fb in pred_df.columns:
                 _valid_cols = [_fb]
                 break
+    _arrival_cols_used = list(_valid_cols)
+    _arrival_calib_active = any(col == "ensemble_yhat" for col in _valid_cols)
     _pred_ds_local = _to_local_series(pred_df["ds"])
     _open_pred_mask = _pred_ds_local.apply(lambda t: is_open(pd.Timestamp(t)))
     pred_df = pred_df[_open_pred_mask].reset_index(drop=True)
     pred_future = pred_df[["ds"]].copy()
     pred_future["ds"] = _to_local_series(pred_future["ds"])
     if _valid_cols:
-        _cols_num = pd.concat(
-            [pd.to_numeric(pred_df[c], errors="coerce") for c in _valid_cols], axis=1
-        )
-        pred_future["arrivals"] = _cols_num.mean(axis=1)
+        pred_future["arrivals"] = _weighted_arrival_blend(pred_df, _valid_cols)
     else:
         pred_future["arrivals"] = 0.0
+
+    # Apply calibration to non-ensemble blends. ensemble_yhat already has k baked in
+    # from ensemble_predict.py; prophet/lstm/xgb raw columns do not.
+    _cal_enabled = bool(st.session_state.get("calibration_enabled", True))
+    _cal_global_pre  = float(_arrival_calib.get("k_global", 1.0) or 1.0)
+    _cal_hourly_pre  = _arrival_calib.get("k_by_hour", {}) or {}
+    if _cal_enabled and not _arrival_calib_active and _arrival_calib.get("loaded") and not pred_future.empty:
+        _k_per_slot = [
+            float(_cal_hourly_pre.get(str(int(pd.Timestamp(t).hour)), _cal_global_pre))
+            for t in pred_future["ds"]
+        ]
+        pred_future["arrivals"] = (
+            (pred_future["arrivals"] * pd.Series(_k_per_slot, index=pred_future.index))
+            .clip(lower=0)
+        )
+        _arrival_calib_active = True
+
     _actual_rate = (entries_delta[0] if entries_delta else 0) / max(1.0, 60.0 / BUCKET_MIN)
     if _actual_rate > 0 and pred_future["arrivals"].mean() > _actual_rate * 5:
         pred_future["arrivals"] = pred_future["arrivals"].clip(upper=_actual_rate * 5)
@@ -1656,11 +1913,55 @@ if not pred_df.empty:
         .mean()
     )
     # Compute stats AFTER capping and smoothing — must match the chart bars
-    _display_cutoff = pd.Timestamp.now(tz=LOCAL_TZ) + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
+    _display_cutoff = _now_local_ts() + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
     _pred_display = pred_future[pred_future["ds"] <= _display_cutoff]["arrivals"]
     _pred_mean = _pred_display.mean(skipna=True) if not _pred_display.empty else pred_future["arrivals"].mean(skipna=True)
     _pred_min  = _pred_display.min(skipna=True) if not _pred_display.empty else pred_future["arrivals"].min(skipna=True)
     _pred_max  = _pred_display.max(skipna=True) if not _pred_display.empty else pred_future["arrivals"].max(skipna=True)
+    _cal_hour = int(pd.Timestamp(pred_future.iloc[0]["ds"]).hour) if not pred_future.empty else int(_now_local_ts().hour)
+    _cal_global = float(_arrival_calib.get("k_global", 1.0) or 1.0)
+    _cal_hourly_map = _arrival_calib.get("k_by_hour", {}) or {}
+    _cal_hour_k = float(_cal_hourly_map.get(_cal_hour, _cal_global))
+    _cal_mode = (
+        f"hour {str(_cal_hour).zfill(2)} override"
+        if _cal_hour in _cal_hourly_map else
+        "global only"
+    )
+    if _arrival_calib.get("error"):
+        _arrival_calib_note = (
+            f"Arrival calibration file could not be read ({_arrival_calib.get('error')}). "
+            "Saved arrival forecasts are shown without dashboard-side calibration metadata."
+        )
+    elif _arrival_calib.get("loaded"):
+        _cols_label = ', '.join(_arrival_cols_used) if _arrival_cols_used else 'raw model columns'
+        _src_label  = "ensemble_yhat (baked in at save time)" if any("ensemble" in c for c in _arrival_cols_used) else f"{_cols_label} (applied in dashboard)"
+        if _cal_enabled:
+            _arrival_calib_note = (
+                f"Arrival calibration active: <code>k={_cal_hour_k:.4f}</code> ({_cal_mode}, "
+                f"k_global={_cal_global:.4f}) applied to <code>{_src_label}</code>."
+            )
+        else:
+            _arrival_calib_note = (
+                f"Arrival calibration is <b>OFF</b>. <code>calibration.json</code> is loaded "
+                f"(k_global={_cal_global:.4f}), but arrivals are shown uncorrected."
+            )
+    else:
+        _arrival_calib_note = (
+            "No <code>calibration.json</code> file is loaded, so saved arrival forecasts are being used without "
+            "any multiplicative arrival calibration."
+        )
+    _arrival_calib_debug_rows = [
+        {"Field": "Calibration file", "Value": str(_arrival_calib.get("path", ARRIVAL_CALIB_PATH))},
+        {"Field": "Loaded", "Value": "yes" if _arrival_calib.get("loaded") else "no"},
+        {"Field": "Selected models", "Value": ", ".join(_arrival_models_selected) if _arrival_models_selected else "—"},
+        {"Field": "Saved columns used", "Value": ", ".join(_arrival_cols_used) if _arrival_cols_used else "—"},
+        {"Field": "Calibration enabled", "Value": "yes" if _cal_enabled else "no"},
+        {"Field": "Calibration active here", "Value": "yes" if _arrival_calib_active else "no"},
+        {"Field": "k_global", "Value": f"{_cal_global:.4f}"},
+        {"Field": "Current forecast hour", "Value": f"{_cal_hour:02d}:00"},
+        {"Field": "Current k", "Value": f"{_cal_hour_k:.4f} ({_cal_mode})"},
+        {"Field": "Hourly overrides", "Value": str(len(_cal_hourly_map))},
+    ]
     _in_service = min(queue_count, selected_lanes)
     _waiting_backlog = max(0.0, float(queue_count - selected_lanes))
 
@@ -1894,10 +2195,16 @@ else:
     lane_source_label = "Default lanes"
 
 if _inferred_lanes is not None:
-    lane_source_note = (
-        f"Detected queue state is {_lane_phrase(detected_lanes)} open "
-        f"(inferred from service throughput in the last {_lane_window} min)."
-    )
+    if _inferred_lanes_source == "lane_id":
+        lane_source_note = (
+            f"Detected queue state is {_lane_phrase(detected_lanes)} open "
+            f"({detected_lanes} distinct lane{'s' if detected_lanes != 1 else ''} with service completions in the last {_LANE_COUNT_WINDOW_MIN} min)."
+        )
+    else:
+        lane_source_note = (
+            f"Detected queue state is {_lane_phrase(detected_lanes)} open "
+            f"(estimated from service throughput in the last {_lane_window} min — no per-lane data yet)."
+        )
 elif live_lane_source:
     lane_source_note = f"Detected queue state is {_lane_phrase(detected_lanes)} open."
 else:
@@ -1911,8 +2218,8 @@ lane_parameter_note = (
     else f"Forecast parameter overrides the detected state: {_lane_phrase(selected_lanes)} selected."
 )
 status_text = (
-    f"{status_label} - Predicted wait with {_lane_phrase(selected_lanes)}: {_format_wait(wait_15m)}"
-    if wait_15m is not None
+    f"{status_label} - Predicted wait with {_lane_phrase(selected_lanes)}: {_format_wait_capped(wait_10m)}"
+    if wait_10m is not None
     else f"{status_label} - Waiting for the next lane-aware forecast"
 )
 
@@ -2059,6 +2366,12 @@ with action_model:
         key="arrival_models",
         on_change=_guard_arrival_models,
     )
+    st.toggle(
+        "Apply arrival calibration",
+        key="calibration_enabled",
+        value=True,
+        help="Multiply arrivals by the k learned from accuracy_eval.py (calibration.json).",
+    )
 with action_smooth:
     st.select_slider(
         "Prediction smoothing",
@@ -2163,7 +2476,7 @@ with _col_hint:
 
 _section_title("Live Operations", "current queue, lane-aware waits, near-term trend")
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3, c4, c6 = st.columns(5)
 
 with c1:
     st.markdown(
@@ -2181,7 +2494,7 @@ with c2:
     st.markdown(
         _metric_card_html(
             "Predicted Wait (now)",
-            f"{wait_0m:.1f}<span class='metric-unit'> min</span>" if wait_0m is not None else "—",
+            _wait_card_value(wait_0m),
             tone=_wait_tone(wait_0m),
             supporting_text=f"Next slot · {_lane_phrase(selected_lanes)}.",
         ),
@@ -2192,7 +2505,7 @@ with c3:
     st.markdown(
         _metric_card_html(
             "Predicted Wait (+5 min)",
-            f"{wait_5m:.1f}<span class='metric-unit'> min</span>" if wait_5m is not None else "—",
+            _wait_card_value(wait_5m),
             tone=_wait_tone(wait_5m),
             supporting_text=f"~{round(5 / BUCKET_MIN) * BUCKET_MIN} min ahead · {_lane_phrase(selected_lanes)}.",
         ),
@@ -2203,20 +2516,9 @@ with c4:
     st.markdown(
         _metric_card_html(
             "Predicted Wait (+10 min)",
-            f"{wait_10m:.1f}<span class='metric-unit'> min</span>" if wait_10m is not None else "—",
+            _wait_card_value(wait_10m),
             tone=_wait_tone(wait_10m),
             supporting_text=f"~{round(10 / BUCKET_MIN) * BUCKET_MIN} min ahead · {_lane_phrase(selected_lanes)}.",
-        ),
-        unsafe_allow_html=True,
-    )
-
-with c5:
-    st.markdown(
-        _metric_card_html(
-            "Predicted Wait (+15 min)",
-            f"{wait_15m:.1f}<span class='metric-unit'> min</span>" if wait_15m is not None else "—",
-            tone=_wait_tone(wait_15m),
-            supporting_text=f"~{round(15 / BUCKET_MIN) * BUCKET_MIN} min ahead · {_lane_phrase(selected_lanes)}.",
         ),
         unsafe_allow_html=True,
     )
@@ -2288,11 +2590,18 @@ with st.expander("How was this predicted? (model inputs & simulation trace)"):
 
         st.markdown("**Simulation inputs**")
         _svc_source = "service_events median (7d)" if service_minutes != DEFAULT_DWELL_MIN else "config fallback"
+        _has_per_lane = bool(service_minutes_per_lane)
+        _svc_source_full = f"{_svc_source} — per-lane breakdown available" if _has_per_lane else _svc_source
         _mod_label = f"{_dwell_mod:.2f}×  (age + equipment + group)" if abs(_dwell_mod - 1.0) > 0.01 else "1.00×  (no adjustment — no recent data)"
+        _per_lane_str = "  |  ".join(
+            f"Lane {lid + 1}: {svc:.1f} min"
+            for lid, svc in sorted(service_minutes_per_lane.items())
+        ) if _has_per_lane else "no per-lane data yet"
         inputs_df = pd.DataFrame([
             {"Input": "Current queue (backlog)", "Value": str(_waiting_backlog if not pred_df.empty else queue_count)},
             {"Input": "Active lanes", "Value": str(selected_lanes)},
-            {"Input": "Avg service time", "Value": f"{service_minutes:.1f} min/customer  ({_svc_source})"},
+            {"Input": "Avg service time (global)", "Value": f"{service_minutes:.1f} min/customer  ({_svc_source_full})"},
+            {"Input": "Service time per lane", "Value": _per_lane_str},
             {"Input": "Demographic modifier", "Value": _mod_label},
             {"Input": "Service capacity", "Value": f"{selected_lanes * BUCKET_MIN / service_minutes:.1f} customers per {BUCKET_MIN}-min bucket"},
             {"Input": "Browsing gap", "Value": f"{BROWSING_GAP_MIN} min  (entrance → checkout shift)"},
@@ -2365,8 +2674,8 @@ with _display_range_note_col:
         unsafe_allow_html=True,
     )
 history_range_hours = int(st.session_state["history_range_hours"])
-_chart_x_start = pd.Timestamp.now(tz=LOCAL_TZ) - pd.Timedelta(hours=history_range_hours)
-_chart_x_end   = pd.Timestamp.now(tz=LOCAL_TZ) + pd.Timedelta(hours=2)
+_chart_x_start = _now_local_ts() - pd.Timedelta(hours=history_range_hours)
+_chart_x_end   = _now_local_ts() + pd.Timedelta(hours=2)
 
 # ── Model comparison chart ─────────────────────────────────────────────────────
 
@@ -2390,8 +2699,9 @@ _pred_source_note = (
 )
 st.markdown(
     f'<div class="detail-note">{_pred_source_note}'
-    'Prophet uses the saved training-fit curve from the latest run when available. '
-    'LSTM/XGBoost lines still come from saved <code>queue_predictions</code> forecast rows.</div>',
+    f'Prophet display shift: {PROPHET_DISPLAY_SHIFT_MIN} min. '
+    'Model lines in this chart come from saved <code>queue_predictions</code> rows across the visible time window. '
+    'The green combination line is blended from those same visible curves.</div>',
     unsafe_allow_html=True,
 )
 
@@ -2424,7 +2734,7 @@ if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_
         )
         ra = _insert_overnight_gaps(ra)
         fig_cmp.add_trace(go.Scatter(
-            x=ra["ds"],
+            x=_plotly_local_iso_series(ra["ds"]),
             y=ra["arrivals"],
             mode="lines",
             name="Raw data (15 min median)",
@@ -2434,32 +2744,27 @@ if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_
             hovertemplate="%{x|%d/%m %H:%M}<br>Raw arrivals (15 min): %{y:.1f}<extra></extra>",
         ))
 
-    # ── Prophet in-sample training fit from the latest run ───────────────────
-    if "prophet" in _cmp_active_models and not prophet_training_fit.empty:
-        pfit = prophet_training_fit.copy()
-        pfit["ds"] = _to_local_series(pfit["ds"])
-        pfit["yhat"] = pd.to_numeric(pfit["yhat"], errors="coerce").clip(lower=0)
-        pfit = pfit[pfit["ds"].apply(lambda t: is_open(pd.Timestamp(t)))]
-        pfit = _insert_overnight_gaps(pfit[["ds", "yhat"]])
-        fig_cmp.add_trace(go.Scatter(
-            x=pfit["ds"],
-            y=pfit["yhat"],
-            mode="lines",
-            name="Prophet fit",
-            line=dict(color=_COLORS["prophet"], width=2),
-            hovertemplate="%{x|%d/%m %H:%M}<br>Prophet fit: %{y:.1f}<extra></extra>",
-        ))
-
     # ── Per-model saved forecasts (LSTM/XGBoost + fallback Prophet) ──────────
     if not full_model_preds.empty:
         fmp = full_model_preds.copy()
         fmp["ds"] = _to_local_series(fmp["ds"])
+        _prophet_shift_df = fmp[["ds", "prophet_yhat"]].copy()
+        _prophet_shift_df["ds"] = _prophet_shift_df["ds"] + pd.Timedelta(minutes=PROPHET_DISPLAY_SHIFT_MIN)
+        _prophet_shift_df["_plot_prophet_yhat"] = pd.to_numeric(_prophet_shift_df["prophet_yhat"], errors="coerce")
+        _prophet_shift_df = _prophet_shift_df[["ds", "_plot_prophet_yhat"]]
+        fmp = fmp[(fmp["ds"] >= _chart_x_start) & (fmp["ds"] <= _chart_x_end)].copy()
+        _prophet_shift_df = _prophet_shift_df[
+            (_prophet_shift_df["ds"] >= _chart_x_start) & (_prophet_shift_df["ds"] <= _chart_x_end)
+        ].copy()
+        fmp = fmp.drop(columns=["_plot_prophet_yhat"], errors="ignore").merge(_prophet_shift_df, on="ds", how="left")
 
         _cmp_col_map = {
-            "prophet":  ("prophet_yhat",  "Prophet",  _COLORS["prophet"],  "solid", 2),
-            "lstm":     ("lstm_yhat",     "LSTM",     _COLORS["lstm"],     "dot",   2),
-            "xgboost":  ("xgb_yhat",      "XGBoost",  _COLORS["xgboost"],  "dash",  2),
+            "prophet":  ("_plot_prophet_yhat",  "Prophet",  _COLORS["prophet"],  "solid", 2),
+            "lstm":     ("_plot_lstm_yhat",     "LSTM",     _COLORS["lstm"],     "dot",   2),
+            "xgboost":  ("_plot_xgb_yhat",      "XGBoost",  _COLORS["xgboost"],  "dash",  2),
         }
+        fmp["_plot_lstm_yhat"] = pd.to_numeric(fmp.get("lstm_yhat"), errors="coerce")
+        fmp["_plot_xgb_yhat"] = pd.to_numeric(fmp.get("xgb_yhat"), errors="coerce")
         # Apply prediction smoothing per-day to prevent cross-day boundary blending
         _cmp_smooth_win = max(1, round(int(st.session_state.get("pred_smooth_min", PRED_SMOOTH_MIN)) / BUCKET_MIN))
         if _cmp_smooth_win > 1:
@@ -2476,29 +2781,30 @@ if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_
                     )
             fmp = fmp.drop(columns=["_date"])
 
-        # Compute dynamic ensemble from selected models (row-wise mean)
+        _base_model_keys = ["prophet", "lstm", "xgboost"]
         _sel_cols = [_cmp_col_map[m][0] for m in _cmp_active_models
-                     if m in _cmp_col_map and _cmp_col_map[m][0] in fmp.columns]
+                     if m in _base_model_keys and _cmp_col_map[m][0] in fmp.columns]
         if _sel_cols:
-            _ens_vals = pd.concat(
-                [pd.to_numeric(fmp[c], errors="coerce") for c in _sel_cols], axis=1
-            ).mean(axis=1)
-            fmp["_dynamic_ensemble"] = _ens_vals
+            fmp["_dynamic_ensemble"] = _weighted_arrival_blend(fmp, _sel_cols)
+            _dynamic_ensemble_label = (
+                "Weighted blend (" +
+                " + ".join(_cmp_model_labels.get(m, m) for m in _cmp_active_models if m in _base_model_keys) +
+                ")"
+            )
+        else:
+            _dynamic_ensemble_label = None
 
         fmp = _insert_overnight_gaps(fmp)
-
         # Individual selected-model traces
         for m in _cmp_active_models:
             if m not in _cmp_col_map:
-                continue
-            if m == "prophet" and not prophet_training_fit.empty:
                 continue
             col, label, color, dash, width = _cmp_col_map[m]
             if col not in fmp.columns:
                 continue
             y_vals = pd.to_numeric(fmp[col], errors="coerce")
             fig_cmp.add_trace(go.Scatter(
-                x=fmp["ds"],
+                x=_plotly_local_iso_series(fmp["ds"]),
                 y=y_vals,
                 mode="lines",
                 name=label,
@@ -2506,12 +2812,12 @@ if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_
                 hovertemplate=f"%{{x|%H:%M}}<br>{label}: %{{y:.1f}}<extra></extra>",
             ))
 
-        # Dynamic ensemble trace (average of selected models)
-        if "_dynamic_ensemble" in fmp.columns and len(_sel_cols) > 1:
-            _ens_label = "Ensemble (" + " + ".join(_cmp_model_labels.get(m, m) for m in _cmp_active_models if m in _cmp_col_map) + ")"
+        # Dynamic ensemble trace (blend of selected visible model curves)
+        if "_dynamic_ensemble" in fmp.columns and len(_sel_cols) > 1 and _dynamic_ensemble_label:
+            _ens_label = _dynamic_ensemble_label
             fig_cmp.add_trace(go.Scatter(
-                x=fmp["ds"],
-                y=fmp["_dynamic_ensemble"],
+                x=_plotly_local_iso_series(fmp["ds"]),
+                y=pd.to_numeric(fmp["_dynamic_ensemble"], errors="coerce"),
                 mode="lines",
                 name=_ens_label,
                 line=dict(color=_COLORS["ensemble"], width=3, dash="solid"),
@@ -2522,13 +2828,26 @@ if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_
             pass
 
     # ── "Now" separator ───────────────────────────────────────────────────────
-    _now_local = pd.Timestamp.now(tz=LOCAL_TZ)
-    fig_cmp.add_vline(
-        x=_now_local.timestamp() * 1000,
+    _now_local = _now_local_ts()
+    fig_cmp.add_shape(
+        type="line",
+        x0=_now_local,
+        x1=_now_local,
+        y0=0,
+        y1=1,
+        xref="x",
+        yref="paper",
         line=dict(color="#0f172a", width=1.5, dash="dot"),
-        annotation_text="Now",
-        annotation_position="top",
-        annotation_font=dict(color="#0f172a", size=11),
+    )
+    fig_cmp.add_annotation(
+        x=_now_local,
+        y=1,
+        xref="x",
+        yref="paper",
+        text="Now",
+        showarrow=False,
+        yshift=8,
+        font=dict(color="#0f172a", size=11),
     )
 
     fig_cmp.update_layout(
@@ -2554,8 +2873,8 @@ if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_
             tickfont=dict(size=11, color="#475569"),
             autorange=False,
             range=[
-                _chart_x_start.strftime("%Y-%m-%d %H:%M:%S"),
-                _chart_x_end.strftime("%Y-%m-%d %H:%M:%S"),
+                _plotly_local_iso(_chart_x_start),
+                _plotly_local_iso(_chart_x_end),
             ],
         ),
         yaxis=dict(
@@ -2576,10 +2895,21 @@ else:
 _dwell_forecast_label = {"xgboost": "XGBoost", "lstm": "LSTM"}
 _dwell_forecast_label_str = " + ".join(_dwell_forecast_label.get(m, m) for m in _dwell_forecast_models)
 _section_title("Service Dwell Time", f"last {_hour_phrase(history_range_hours)} · {_dwell_forecast_label_str} forecast")
+_per_lane_dwell_note = (
+    " Per-lane median (7d): "
+    + ", ".join(f"Lane {lid + 1} = {svc:.1f} min" for lid, svc in sorted(service_minutes_per_lane.items()))
+    + "."
+) if service_minutes_per_lane else ""
 st.markdown(
     '<div class="detail-note">Observed checkout dwell times (15-min median) from <code>service_events</code>. '
-    'Selected dwell forecast models learn recent service-time patterns and forecast the expected '
-    'service time for upcoming buckets — used as the capacity input in the wait simulation.</div>',
+    'Only <strong>solo-lane events</strong> (person alone in the lane when they left) are used to estimate pure service time — '
+    'this removes queue wait time from the signal. '
+    'Historical rows without this flag are recovered via a join with <code>entrance_events</code>; '
+    'all events are used as a last fallback. '
+    'The dwell forecast models learn how service time varies across the day and feed the result '
+    'into the wait simulation as the per-lane capacity.'
+    + (' ' + _per_lane_dwell_note if _per_lane_dwell_note else '')
+    + '</div>',
     unsafe_allow_html=True,
 )
 _dwell_mode_label = "Safe" if _dwell_mode == "safe" else "Legacy"
@@ -2633,13 +2963,12 @@ if not service_history.empty:
     if _dwell_models.get("xgboost") is not None:
         _model_x: list = []
         _model_y: list = []
-        _now_local  = pd.Timestamp.now(tz=LOCAL_TZ)
+        _now_local  = _now_local_ts()
         _grid_start = _chart_x_start
         _all_slots  = pd.date_range(
             start=_grid_start.floor("15min"),
             end=_now_local,
             freq="15min",
-            tz=LOCAL_TZ,
         )
         _open_slots = [t for t in _all_slots if is_open(pd.Timestamp(t))]
         if not pred_future.empty:
@@ -2652,7 +2981,7 @@ if not service_history.empty:
             _grid_df["dwell_pred"] = _dwell_models["xgboost"].predict(_gf[_DWELL_FEAT]).clip(DWELL_MIN_FLOOR, DWELL_MAX_CAP)
             _prev_t = None
             for _, _gr in _grid_df.iterrows():
-                _t = pd.Timestamp(_gr["ds"])
+                _t = _as_local_naive_ts(_gr["ds"])
                 if _prev_t is not None and (_t - _prev_t).total_seconds() > 30 * 60:
                     # Gap: midpoint timestamp with None y (don't put None in x)
                     _gap_t = _prev_t + (_t - _prev_t) / 2
@@ -2760,6 +3089,17 @@ else:
 _model_labels = {"ensemble": "Ensemble", "prophet": "Prophet", "lstm": "LSTM", "xgboost": "XGBoost"}
 _active_models = st.session_state.get("arrival_models", ["prophet", "lstm", "xgboost"]) or ["prophet", "lstm", "xgboost"]
 _active_model_label = " + ".join(_model_labels.get(m, m) for m in _active_models)
+_show_live_wait_ref = st.checkbox(
+    "Show live queue wait reference on forecast chart",
+    value=st.session_state.get("show_live_wait_ref", False),
+    key="show_live_wait_ref",
+    help=(
+        "Draws a horizontal reference line at (queue/lanes − 1) × service_time — "
+        "the expected wait for someone joining the queue right now. "
+        "Compare against the simulation forecast at t=0 to detect drift."
+    ),
+)
+_live_wait_ref_min = max(0.0, (queue_count / max(selected_lanes, 1) - 1.0) * service_minutes)
 _section_title(f"Predicted Wait - Next {FORECAST_DISPLAY_MIN} Min", f"{_active_model_label} arrivals · {_lane_phrase(selected_lanes)} open")
 # Use base dwell (no residual correction) for all display values — correction only affects simulation
 _eff_dwell = float(_dwell_per_slot_base[0]) if _dwell_per_slot_base else service_minutes
@@ -2786,22 +3126,48 @@ elif _net_flow < -1.0:
     _flow_label = f"{_net_flow:.1f}/bucket below capacity — queue shrinking"
 else:
     _flow_label = "arrivals ≈ capacity — balanced"
+_per_lane_svc_note = (
+    "Per-lane service time (7d median): "
+    + ", ".join(f"Lane {lid + 1} = {svc:.1f} min" for lid, svc in sorted(service_minutes_per_lane.items()))
+    + "."
+) if service_minutes_per_lane else "Per-lane service time: no data yet (snapshot interval now 3 s — data will accumulate)."
 _arrivals_note = (
     f"Forecast arrivals — mean: {_pred_mean:.1f} (range {_pred_min:.1f}–{_pred_max:.1f}) per {BUCKET_MIN}-min bucket. "
-    f"Each lane handles {_capacity_per_lane:.1f} customers/slot (avg service: {_dwell_label}). "
+    f"Each lane handles {_capacity_per_lane:.1f} customers/slot (global avg service: {_dwell_label}). "
     f"{selected_lanes} lane{'s' if selected_lanes != 1 else ''} → {_capacity_per_bucket:.1f}/bucket"
     + (f" + {_in_service} in service = {_effective_cap:.1f} effective capacity. " if _in_service > 0 else ". ")
     + f"Net flow: {_flow_label}. "
-    f"Waiting: {int(max(0, queue_count - selected_lanes))} · In service: {_in_service}."
+    f"Waiting: {int(max(0, queue_count - selected_lanes))} · In service: {_in_service}. "
+    + _per_lane_svc_note
     + (" Arrivals capped to observed rate." if _arrivals_capped else "")
 ) if not pred_df.empty else ""
 st.markdown(
     f'<div class="detail-note">{lane_source_note} {lane_parameter_note} The trend below is recalculated in the dashboard '
     f'from the saved arrival forecast and current queue state.'
     + (f" {_arrivals_note}" if _arrivals_note else "")
+    + (f" {_arrival_calib_note}" if _arrival_calib_note else "")
     + '</div>',
     unsafe_allow_html=True,
 )
+
+with st.expander("Arrival calibration debug", expanded=False):
+    if _arrival_calib_debug_rows:
+        st.dataframe(pd.DataFrame(_arrival_calib_debug_rows), width="stretch", hide_index=True)
+        if _arrival_calib_active:
+            st.markdown(
+                '<div class="detail-note">Current arrivals are using the calibrated saved ensemble forecast from '
+                '<code>queue_predictions.ensemble_yhat</code>.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="detail-note">Current arrivals are blended directly from the selected saved model columns, '
+                'so any coefficient in <code>calibration.json</code> only affects this view if '
+                '<code>ensemble_yhat</code> is the column being used.</div>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("No arrival forecast has been loaded yet.")
 
 if not pred_df.empty:
     pf_raw = pred_future.copy()
@@ -2811,7 +3177,7 @@ if not pred_df.empty:
     else:
         pf_raw["wait_min"] = float("nan")
     # Clip to display horizon
-    _forecast_cutoff = pd.Timestamp.now(tz=LOCAL_TZ) + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
+    _forecast_cutoff = _now_local_ts() + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
     pf_raw = pf_raw[pf_raw["ds"] <= _forecast_cutoff]
     pf = _forecast_display_frame(pf_raw)
     # Smooth pf arrivals so singleton 5-min groups (1 raw bucket) don't show raw peak values
@@ -2825,78 +3191,75 @@ if not pred_df.empty:
             _pred_mean = float(_pf_arr.mean())
             _pred_min  = float(_pf_arr.min())
             _pred_max  = float(_pf_arr.max())
-    if not pf.empty:
-        fig_wait = go.Figure()
-        # Historical actual wait approximation from queue snapshots
-        if not queue_hist.empty:
-            _qh_raw = queue_hist.copy()
-            _qh_raw["timestamp"] = _to_local_series(_qh_raw["timestamp"])
-            _qh_raw["queue_count"] = pd.to_numeric(_qh_raw["queue_count"], errors="coerce").fillna(0)
-            _qh_raw["actual_wait"] = (_qh_raw["queue_count"] * service_minutes / max(detected_lanes, 1)).clip(lower=0)
-            _qh_raw["actual_wait"] = _qh_raw["actual_wait"].where(
-                _qh_raw["timestamp"].apply(lambda t: is_open(pd.Timestamp(t))),
-                None,
-            )
-            fig_wait.add_trace(go.Scatter(
-                x=_qh_raw["timestamp"],
-                y=_qh_raw["actual_wait"],
-                mode="lines",
-                name="Actual raw",
-                line=dict(color="#cbd5e1", width=1, dash="dot"),
-                hovertemplate="%{x|%H:%M}<br>Raw wait (est.): %{y:.1f} min<extra></extra>",
-            ))
-            _qh = _qh_raw.copy()
-            _qh["actual_wait"] = (
-                _qh_raw["actual_wait"]
-                .rolling(window=20, center=True, min_periods=1)
+    # Build wait chart — history always shown; future forecast trace only when pf has data
+    fig_wait = go.Figure()
+    # Historical actual wait approximation from queue snapshots
+    if not queue_hist.empty:
+        _qh_raw = queue_hist.copy()
+        _qh_raw["timestamp"] = _to_local_series(_qh_raw["timestamp"])
+        _qh_raw["queue_count"] = pd.to_numeric(_qh_raw["queue_count"], errors="coerce").fillna(0)
+        _qh_raw["actual_wait"] = (_qh_raw["queue_count"] * service_minutes / max(detected_lanes, 1)).clip(lower=0)
+        _qh_raw["actual_wait"] = _qh_raw["actual_wait"].where(
+            _qh_raw["timestamp"].apply(lambda t: is_open(pd.Timestamp(t))),
+            None,
+        )
+        fig_wait.add_trace(go.Scatter(
+            x=_qh_raw["timestamp"],
+            y=_qh_raw["actual_wait"],
+            mode="lines",
+            name="Actual raw",
+            line=dict(color="#cbd5e1", width=1, dash="dot"),
+            hovertemplate="%{x|%H:%M}<br>Raw wait (est.): %{y:.1f} min<extra></extra>",
+        ))
+        _qh = _qh_raw.copy()
+        _qh["actual_wait"] = (
+            _qh_raw["actual_wait"]
+            .rolling(window=20, center=True, min_periods=1)
+            .mean()
+        )
+        fig_wait.add_trace(go.Scatter(
+            x=_qh["timestamp"],
+            y=_qh["actual_wait"],
+            mode="lines",
+            name="Actual (smoothed)",
+            line=dict(color="#94a3b8", width=2),
+            fill="tozeroy",
+            fillcolor="rgba(148,163,184,0.10)",
+            hovertemplate="%{x|%H:%M}<br>Actual wait (smoothed): %{y:.1f} min<extra></extra>",
+        ))
+    # Historical forecast trace — derived from full_model_preds (past slots only)
+    if not full_model_preds.empty:
+        _hwp = full_model_preds.copy()
+        _hwp["ds"] = _to_local_series(_hwp["ds"])
+        _hwp = _hwp[_hwp["ds"] < _now_local_ts()].copy()
+        _hwp_cols = [_model_col_map[m] for m in _selected_models
+                     if _model_col_map.get(m) in _hwp.columns]
+        if not _hwp_cols:
+            for _fb in ["ensemble_yhat", "prophet_yhat", "lstm_yhat", "xgb_yhat"]:
+                if _fb in _hwp.columns:
+                    _hwp_cols = [_fb]
+                    break
+        if _hwp_cols:
+            _hwp_arr = _weighted_arrival_blend(_hwp, _hwp_cols)
+            _hwp["wait_min"] = (_hwp_arr * service_minutes / max(selected_lanes, 1)).clip(lower=0)
+            _hwp = _hwp.sort_values("ds")
+            _hwp["wait_min"] = (
+                _hwp["wait_min"]
+                .rolling(window=max(1, round(PRED_SMOOTH_MIN / BUCKET_MIN)),
+                          center=True, min_periods=1)
                 .mean()
             )
+            _hwp = _insert_overnight_gaps(_hwp)
             fig_wait.add_trace(go.Scatter(
-                x=_qh["timestamp"],
-                y=_qh["actual_wait"],
+                x=_hwp["ds"],
+                y=_hwp["wait_min"],
                 mode="lines",
-                name="Actual (smoothed)",
-                line=dict(color="#94a3b8", width=2),
-                fill="tozeroy",
-                fillcolor="rgba(148,163,184,0.10)",
-                hovertemplate="%{x|%H:%M}<br>Actual wait (smoothed): %{y:.1f} min<extra></extra>",
+                name="Forecast (past)",
+                line=dict(color="#2563eb", width=1.5, dash="dash"),
+                hovertemplate="%{x|%H:%M}<br>Predicted wait (past): %{y:.1f} min<extra></extra>",
             ))
-        # Historical forecast trace — derived from full_model_preds (past slots only)
-        # using the same formula as actual_wait so both traces share the same scale.
-        if not full_model_preds.empty:
-            _hwp = full_model_preds.copy()
-            _hwp["ds"] = _to_local_series(_hwp["ds"])
-            _hwp = _hwp[_hwp["ds"] < pd.Timestamp.now(tz=LOCAL_TZ)].copy()
-            # Use selected model(s), same logic as pred_future["arrivals"]
-            _hwp_cols = [_model_col_map[m] for m in _selected_models
-                         if _model_col_map.get(m) in _hwp.columns]
-            if not _hwp_cols:
-                for _fb in ["ensemble_yhat", "prophet_yhat", "lstm_yhat", "xgb_yhat"]:
-                    if _fb in _hwp.columns:
-                        _hwp_cols = [_fb]
-                        break
-            if _hwp_cols:
-                _hwp_arr = pd.concat(
-                    [pd.to_numeric(_hwp[c], errors="coerce") for c in _hwp_cols], axis=1
-                ).mean(axis=1)
-                # Same formula as actual_wait: arrivals × service_min / lanes
-                _hwp["wait_min"] = (_hwp_arr * service_minutes / max(selected_lanes, 1)).clip(lower=0)
-                _hwp = _hwp.sort_values("ds")
-                _hwp["wait_min"] = (
-                    _hwp["wait_min"]
-                    .rolling(window=max(1, round(PRED_SMOOTH_MIN / BUCKET_MIN)),
-                              center=True, min_periods=1)
-                    .mean()
-                )
-                _hwp = _insert_overnight_gaps(_hwp)
-                fig_wait.add_trace(go.Scatter(
-                    x=_hwp["ds"],
-                    y=_hwp["wait_min"],
-                    mode="lines",
-                    name="Forecast (past)",
-                    line=dict(color="#2563eb", width=1.5, dash="dash"),
-                    hovertemplate="%{x|%H:%M}<br>Predicted wait (past): %{y:.1f} min<extra></extra>",
-                ))
+    # Future forecast trace — only when current predictions exist
+    if not pf.empty:
         fig_wait.add_trace(
             go.Scatter(
                 x=pf["ds"],
@@ -2909,44 +3272,55 @@ if not pred_df.empty:
                 hovertemplate="%{x|%H:%M}<br>Predicted wait: %{y:.1f} min<br>Lanes: " + str(selected_lanes) + "<extra></extra>",
             )
         )
-        fig_wait.add_vline(
-            x=pd.Timestamp.now(tz=LOCAL_TZ).timestamp() * 1000,
-            line=dict(color="#0f172a", width=1.5, dash="dot"),
-            annotation_text="Now",
-            annotation_position="top right",
-            annotation_font=dict(size=10, color="#0f172a"),
-        )
+    fig_wait.add_vline(
+        x=_now_local_ts().timestamp() * 1000,
+        line=dict(color="#0f172a", width=1.5, dash="dot"),
+        annotation_text="Now",
+        annotation_position="top right",
+        annotation_font=dict(size=10, color="#0f172a"),
+    )
+    fig_wait.add_hline(
+        y=WAIT_BUSY_MIN,
+        line=dict(color="#ea580c", width=1.5, dash="dot"),
+        annotation_text=f"Queue building (>{WAIT_BUSY_MIN} min wait)",
+        annotation_position="top right",
+        annotation_font=dict(color="#c2410c", size=11),
+    )
+    fig_wait.add_hline(
+        y=WAIT_ALERT_MIN,
+        line=dict(color="#dc2626", width=1.5, dash="dot"),
+        annotation_text=f"Open a lane (>{WAIT_ALERT_MIN} min wait)",
+        annotation_position="top right",
+        annotation_font=dict(color="#b91c1c", size=11),
+    )
+    if _show_live_wait_ref and _live_wait_ref_min > 0:
         fig_wait.add_hline(
-            y=WAIT_BUSY_MIN,
-            line=dict(color="#ea580c", width=1.5, dash="dot"),
-            annotation_text=f"Queue building (>{WAIT_BUSY_MIN} min wait)",
-            annotation_position="top right",
-            annotation_font=dict(color="#c2410c", size=11),
+            y=_live_wait_ref_min,
+            line=dict(color="#0891b2", width=2, dash="dashdot"),
+            annotation_text=f"Live queue ref: {_live_wait_ref_min:.1f} min ((N/lanes−1)×svc)",
+            annotation_position="bottom right",
+            annotation_font=dict(color="#0e7490", size=10),
         )
-        fig_wait.add_hline(
-            y=WAIT_ALERT_MIN,
-            line=dict(color="#dc2626", width=1.5, dash="dot"),
-            annotation_text=f"Open a lane (>{WAIT_ALERT_MIN} min wait)",
-            annotation_position="top right",
-            annotation_font=dict(color="#b91c1c", size=11),
-        )
-        _apply_chart_layout(fig_wait, height=260, y_suffix=" min", xaxis_type="date")
-        fig_wait.update_layout(
-            xaxis=dict(
-                autorange=False,
-                range=[
-                    _chart_x_start.strftime("%Y-%m-%d %H:%M:%S"),
-                    _chart_x_end.strftime("%Y-%m-%d %H:%M:%S"),
-                ],
-            ),
-            showlegend=True,
-            legend=dict(orientation="h", y=1.08, x=0, font=dict(size=11)),
-        )
-        st.plotly_chart(fig_wait, width='stretch')
+    _apply_chart_layout(fig_wait, height=260, y_suffix=" min", xaxis_type="date")
+    fig_wait.update_layout(
+        xaxis=dict(
+            autorange=False,
+            range=[
+                _chart_x_start.strftime("%Y-%m-%d %H:%M:%S"),
+                _chart_x_end.strftime("%Y-%m-%d %H:%M:%S"),
+            ],
+        ),
+        showlegend=True,
+        legend=dict(orientation="h", y=1.08, x=0, font=dict(size=11)),
+    )
+    st.plotly_chart(fig_wait, width='stretch')
+
+    if not pf.empty:
 
         # ── Service capacity vs arrival rate chart ──────────────────────────
-        # Each bar = mean arrivals for its 5-min group (from pf). Stats also from pf → note range matches bars.
-        _cap_arr_df = pf.copy() if not pf.empty else pf_raw.copy()
+        # Use raw 3-min buckets so bar count always matches FORECAST_DISPLAY_MIN / BUCKET_MIN (e.g. 3 bars).
+        # 5-min grouping caused 2 or 3 bars unpredictably when buckets straddle 5-min boundaries.
+        _cap_arr_df = pf_raw.copy() if not pf_raw.empty else pf.copy()
 
         # Per-bar capacity: average _dwell_per_slot_base over the 3-min buckets in each 5-min group
         # This keeps capacity consistent with the note (which also uses _dwell_per_slot_base)
@@ -3027,6 +3401,8 @@ if not pred_df.empty:
         _cap_arr_max = float(_cap_arr_df["arrivals"].max(skipna=True)) if not _cap_arr_df.empty else 0.0
         _y_max_cap = max(_cap_arr_max, max(_bar_cap_vals) if _bar_cap_vals else _effective_cap) * 1.25
         _apply_chart_layout(fig_cap, height=220, y_suffix=" arrivals", xaxis_type="date")
+        _cap_x_start = _now_local_ts()
+        _cap_x_end   = _cap_x_start + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
         fig_cap.update_layout(
             showlegend=True,
             legend=dict(orientation="h", y=1.08, x=0, font=dict(size=11)),
@@ -3036,6 +3412,10 @@ if not pred_df.empty:
                 x=0, y=0.98,
             ),
             yaxis=dict(range=[0, _y_max_cap]),
+            xaxis=dict(range=[
+                _cap_x_start.strftime("%Y-%m-%d %H:%M:%S"),
+                _cap_x_end.strftime("%Y-%m-%d %H:%M:%S"),
+            ]),
             yaxis2=dict(
                 overlaying="y",
                 side="right",
@@ -3066,7 +3446,7 @@ if not pred_df.empty:
             # ── Re-simulate bucket by bucket to capture queue depth ────────────
             _sim_full = pred_future.merge(forecast_waits, on="ds", how="left").copy()
             _sim_full["arrivals"] = pd.to_numeric(_sim_full["arrivals"], errors="coerce").fillna(0)
-            _sim_cutoff = pd.Timestamp.now(tz=LOCAL_TZ) + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
+            _sim_cutoff = _now_local_ts() + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
             _sim = _sim_full[_sim_full["ds"] <= _sim_cutoff].copy()
             _q = float(_waiting_backlog)
             _qdepths = []
@@ -3373,9 +3753,27 @@ _section_title(
     f"Live Queue And Dwell - Last {_hour_phrase(history_range_hours).title()}",
     "people in queue and average dwell time",
 )
+_dwell_correction_on = st.checkbox(
+    "Show corrected dwell estimate ((queue − 1) × service time)",
+    value=st.session_state.get("dwell_correction_on", False),
+    key="dwell_correction_on",
+    help=(
+        "Overlays an estimate of expected wait per lane: (queue/lanes − 1) × service_time. "
+        "Divides total queue by active lanes to get per-lane depth, then subtracts "
+        "the person already at the till (in service, not waiting)."
+    ),
+)
+_service_sec = service_minutes * 60.0
+
+_dwell_note_correction = (
+    f" A corrected estimate ((queue / lanes − 1) × {service_minutes:.1f} min) is overlaid as a dashed line — "
+    "divides queue by active lanes, then subtracts the person already at the till."
+    if _dwell_correction_on else ""
+)
 st.markdown(
     f'<div class="detail-note">Showing the last {_hour_phrase(history_range_hours)} of queue snapshots. '
-    'Top panel shows queue depth in people. Bottom panel shows average dwell time in minutes from the same live snapshots, so you can see whether congestion is coming from more people, slower service, or both.</div>',
+    'Top panel shows queue depth in people. Bottom panel shows average dwell time in seconds from the same live snapshots, so you can see whether congestion is coming from more people, slower service, or both.'
+    f'{_dwell_note_correction}</div>',
     unsafe_allow_html=True,
 )
 
@@ -3386,17 +3784,34 @@ if not queue_hist.empty:
     qh["queue_count"] = pd.to_numeric(qh["queue_count"], errors="coerce")
     qh["avg_dwell_sec"] = pd.to_numeric(qh["avg_dwell_sec"], errors="coerce")
     qh = qh.set_index("timestamp").resample("1min").mean().dropna(subset=["queue_count"], how="all").reset_index()
-    qh["avg_dwell_min"] = qh["avg_dwell_sec"] / 60.0
+    # Apply global prediction smoothing per-day to avoid cross-day boundary blending
+    _qh_smooth_win = max(1, int(st.session_state.get("pred_smooth_min", PRED_SMOOTH_MIN)))
+    if _qh_smooth_win > 1:
+        qh = qh.sort_values("timestamp").reset_index(drop=True)
+        qh["_date"] = qh["timestamp"].dt.date
+        for _qh_col in ("queue_count", "avg_dwell_sec"):
+            if _qh_col in qh.columns:
+                qh[_qh_col] = (
+                    qh.groupby("_date", sort=False)[_qh_col]
+                    .transform(lambda x: x.rolling(window=_qh_smooth_win, center=True, min_periods=1).mean())
+                )
+        qh = qh.drop(columns=["_date"])
+
+    if _dwell_correction_on:
+        _lanes_snap = qh["active_lanes"].fillna(selected_lanes).clip(lower=1) if "active_lanes" in qh.columns else selected_lanes
+        qh["corrected_dwell_sec"] = ((qh["queue_count"].fillna(0) / _lanes_snap - 1).clip(lower=0) * _service_sec).clip(lower=0)
+
     qh = _insert_overnight_gaps(qh, ds_col="timestamp")
 
-    has_dwell = qh["avg_dwell_min"].notna().any()
+    has_dwell = qh["avg_dwell_sec"].notna().any()
+    _show_legend = has_dwell and _dwell_correction_on
     fig_q = make_subplots(
         rows=2 if has_dwell else 1,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.10,
         row_heights=[0.66, 0.34] if has_dwell else None,
-        subplot_titles=["Queue depth (people)", "Average dwell (min)"] if has_dwell else ["Queue depth (people)"],
+        subplot_titles=["Queue depth (people)", "Average dwell (sec)"] if has_dwell else ["Queue depth (people)"],
     )
     fig_q.add_trace(
         go.Scatter(
@@ -3416,16 +3831,30 @@ if not queue_hist.empty:
         fig_q.add_trace(
             go.Scatter(
                 x=qh["timestamp"],
-                y=qh["avg_dwell_min"],
+                y=qh["avg_dwell_sec"],
+                name="Observed avg dwell",
                 mode="lines",
                 line=dict(color="#7c3aed", width=2.5),
                 fill="tozeroy",
                 fillcolor="rgba(124, 58, 237, 0.12)",
-                hovertemplate="%{x|%H:%M}<br>Avg dwell: %{y:.2f} min<extra></extra>",
+                hovertemplate="%{x|%H:%M}<br>Avg dwell: %{y:.0f} sec<extra></extra>",
             ),
             row=2,
             col=1,
         )
+        if _dwell_correction_on and "corrected_dwell_sec" in qh.columns:
+            fig_q.add_trace(
+                go.Scatter(
+                    x=qh["timestamp"],
+                    y=qh["corrected_dwell_sec"],
+                    name=f"Corrected estimate ((N/lanes−1) × {service_minutes:.1f} min)",
+                    mode="lines",
+                    line=dict(color="#ea580c", width=2, dash="dash"),
+                    hovertemplate="%{x|%H:%M}<br>Corrected dwell: %{y:.0f} sec<extra></extra>",
+                ),
+                row=2,
+                col=1,
+            )
 
     fig_q.update_layout(
         height=380 if has_dwell else 240,
@@ -3433,7 +3862,8 @@ if not queue_hist.empty:
         plot_bgcolor="white",
         paper_bgcolor="white",
         hovermode="x unified",
-        showlegend=False,
+        showlegend=_show_legend,
+        legend=dict(orientation="h", y=-0.08, x=0, font=dict(size=11)) if _show_legend else {},
         font=dict(color="#0f172a"),
     )
     fig_q.update_xaxes(
@@ -3454,7 +3884,7 @@ if not queue_hist.empty:
     if has_dwell:
         fig_q.update_yaxes(
             gridcolor="#e2e8f0",
-            title="Min",
+            title="Sec",
             zeroline=False,
             tickfont=dict(size=11, color="#475569"),
             row=2,

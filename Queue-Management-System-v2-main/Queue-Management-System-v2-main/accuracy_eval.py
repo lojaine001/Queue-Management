@@ -10,8 +10,10 @@ Outputs:
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +30,7 @@ load_dotenv(find_dotenv(usecwd=True))
 CAMERA_ID  = os.getenv("CAM_ID",          "Bosch_Camera_Entrance")
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
 EVAL_DAYS  = 14   # how many past days to evaluate
+CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
 
 DB_CONFIG = dict(
     host     = os.getenv("DB_HOST",     "localhost"),
@@ -40,6 +43,30 @@ DB_CONFIG = dict(
 
 def _conn():
     return psycopg2.connect(**DB_CONFIG)
+
+
+def _write_calibration_json(merged: pd.DataFrame) -> tuple[float, dict[int, float]]:
+    """Compute and save multiplicative arrival calibration coefficients."""
+    pred_sum = float(merged["predicted_arrivals"].sum())
+    k_global = (float(merged["actual_arrivals"].sum()) / pred_sum) if pred_sum > 0 else 1.0
+
+    k_by_hour: dict[int, float] = {}
+    for hour, group in merged.groupby("hour"):
+        if len(group) < 5:
+            continue
+        hour_pred_sum = float(group["predicted_arrivals"].sum())
+        if hour_pred_sum <= 0:
+            continue
+        k_by_hour[int(hour)] = float(group["actual_arrivals"].sum()) / hour_pred_sum
+
+    payload = {
+        "k_global": round(k_global, 4),
+        "k_by_hour": {str(hour): round(value, 4) for hour, value in sorted(k_by_hour.items())},
+        "trained_at_utc": datetime.now(timezone.utc).isoformat(),
+        "bucket_minutes": BUCKET_MIN,
+    }
+    CALIBRATION_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return k_global, k_by_hour
 
 
 # ── 1-3. Load and join in SQL (avoids timezone alignment issues) ──────────────
@@ -107,6 +134,15 @@ print("[4/4] Computing metrics...")
 merged["error"]     = merged["predicted_arrivals"] - merged["actual_arrivals"]
 merged["abs_error"] = merged["error"].abs()
 merged["sq_error"]  = merged["error"] ** 2
+
+# Learn multiplicative calibration coefficient from full history.
+# If you want a true holdout evaluation, learn this on train_df only.
+pred_sum = float(merged["predicted_arrivals"].sum())
+coeff = (float(merged["actual_arrivals"].sum()) / pred_sum) if pred_sum > 0 else 1.0
+merged["corrected_predicted_arrivals"] = merged["predicted_arrivals"] * coeff
+merged["corrected_error"] = merged["corrected_predicted_arrivals"] - merged["actual_arrivals"]
+merged["corrected_abs_error"] = merged["corrected_error"].abs()
+merged["corrected_sq_error"] = merged["corrected_error"] ** 2
 
 # Time helpers
 merged["hour"]       = merged["prediction_for"].dt.hour
@@ -213,6 +249,9 @@ print(f"  {'MAE':<20} {mae:.3f} arrivals / {BUCKET_MIN}-min bucket")
 print(f"  {'RMSE':<20} {rmse:.3f} arrivals / {BUCKET_MIN}-min bucket")
 print(f"  {'MAPE':<20} {mape:.1f}%  (non-zero buckets only)")
 print(f"  {'Bias':<20} {bias:+.3f}  ({'over' if bias > 0 else 'under'}-predicting on average)")
+print(f"  {'Calibration k':<20} {coeff:.4f}")
+print(f"  {'Corrected MAE':<20} {merged['corrected_abs_error'].mean():.3f} arrivals / {BUCKET_MIN}-min bucket")
+print(f"  {'Corrected Bias':<20} {merged['corrected_error'].mean():+.3f}")
 print()
 print("  BY HOUR OF DAY")
 print(f"  {'Hour':<8} {'n':>5} {'Actual':>8} {'Pred':>8} {'MAE':>8} {'RMSE':>8} {'Bias':>8}")
@@ -243,8 +282,9 @@ print("=" * W)
 
 out_cols = [
     "prediction_for", "predicted_at", "lead_minutes",
-    "predicted_arrivals", "actual_arrivals",
-    "error", "abs_error", "predicted_wait_min", "status",
+    "predicted_arrivals", "corrected_predicted_arrivals", "actual_arrivals",
+    "error", "abs_error", "corrected_error", "corrected_abs_error",
+    "predicted_wait_min", "status",
     "hour", "day_of_week", "date",
 ]
 merged[out_cols].to_csv("accuracy_results.csv", index=False)
@@ -253,8 +293,13 @@ by_lead.to_csv("accuracy_by_leadtime.csv", index=False)
 by_day.to_csv("accuracy_by_day.csv",       index=False)
 
 print()
+k_global, k_by_hour = _write_calibration_json(merged)
 print("Saved:")
 print("  accuracy_results.csv")
 print("  accuracy_by_hour.csv")
 print("  accuracy_by_leadtime.csv")
+print(f"  {CALIBRATION_PATH}")
+print(
+    f"\n[CALIB] k_global={k_global:.4f}, {len(k_by_hour)} hourly slots written -> {CALIBRATION_PATH.name}"
+)
 print("  accuracy_by_day.csv")

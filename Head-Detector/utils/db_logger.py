@@ -150,6 +150,19 @@ class DBLogger:
                 migrate_data  => TRUE);
         """)
 
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'queue_state_snapshots'
+                    AND column_name = 'lane_counts'
+                ) THEN
+                    ALTER TABLE queue_state_snapshots
+                    ADD COLUMN lane_counts JSONB DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+
         # ── service_events ───────────────────────────────────────────────────
         # Reserved for exit-ROI events (track lost / customer served)
         self.cursor.execute("""
@@ -186,6 +199,19 @@ class DBLogger:
                 ) THEN
                     ALTER TABLE service_events
                     ADD COLUMN equipment_type VARCHAR(30) DEFAULT 'none';
+                END IF;
+            END $$;
+        """)
+
+        self.cursor.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'service_events'
+                    AND column_name = 'active_head_tracks_in_lane'
+                ) THEN
+                    ALTER TABLE service_events
+                    ADD COLUMN active_head_tracks_in_lane INT DEFAULT NULL;
                 END IF;
             END $$;
         """)
@@ -243,29 +269,39 @@ class DBLogger:
         except Exception as e:
             print(f"[DB] Update error: {e}")
 
-    def log_queue_snapshot(self, camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes=2):
+    def log_queue_snapshot(self, camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes=2, lane_counts=None):
         """Insert a periodic queue-state snapshot used by ensemble_predict for dynamic wait estimation."""
         if not self.enabled:
             return
         try:
+            import json
             self.cursor.execute("""
                 INSERT INTO queue_state_snapshots
-                    (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes))
+                    (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes, lane_counts)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes,
+                  json.dumps(lane_counts) if lane_counts is not None else None))
         except Exception as e:
             print(f"[DB] Snapshot error: {e}")
 
-    def log_service_event(self, camera_id, track_id, total_dwell_sec, lane_id=None, equipment_type="none"):
-        """Record a service completion (customer leaves)."""
+    def log_service_event(self, camera_id, track_id, total_dwell_sec, lane_id=None,
+                          equipment_type="none", active_head_tracks_in_lane=None):
+        """Record a service completion (customer leaves).
+
+        active_head_tracks_in_lane: number of OTHER confirmed tracks in the same lane
+        at the moment this track died. 0 means the person was alone → dwell ≈ pure
+        service time. NULL for historical rows predating this column.
+        """
         if not self.enabled:
             return
         try:
             self.cursor.execute("""
                 INSERT INTO service_events
-                    (camera_id, track_id, total_dwell_sec, lane_id, equipment_type)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (camera_id, track_id, total_dwell_sec, lane_id, equipment_type))
+                    (camera_id, track_id, total_dwell_sec, lane_id, equipment_type,
+                     active_head_tracks_in_lane)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (camera_id, track_id, total_dwell_sec, lane_id, equipment_type,
+                  active_head_tracks_in_lane))
         except Exception as e:
             print(f"[DB] Service event error: {e}")
 

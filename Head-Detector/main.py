@@ -57,7 +57,7 @@ import time
 import numpy as np
 
 LIVE_SNAP_DIR = Path(__file__).resolve().parent.parent / "Queue-Management-System-v2-main" / "Queue-Management-System-v2-main" / "snapshots"
-LIVE_SNAP_INTERVAL = 60.0
+LIVE_SNAP_INTERVAL = 5.0
 import requests
 import argparse
 from datetime import datetime
@@ -1000,7 +1000,9 @@ def main():
                 queue_count = len(long_dwells)
                 avg_dwell = float(sum(long_dwells) / len(long_dwells)) if long_dwells else 0.0
                 max_dwell = float(max(long_dwells)) if long_dwells else 0.0
-                db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell)
+                # Persist the per-lane counts already computed for the overlay.
+                db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell,
+                                      lane_counts=lane_active_counts)
                 last_snapshot_time = current_time
 
             # ── Caddy dataset collection (raw frame, low framerate) ───────────
