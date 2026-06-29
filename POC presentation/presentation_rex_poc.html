@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>REX POC — IQMS Presentation</title>
+    <style>
+        :root {
+            --primary: #0071e3;
+            --background: #f5f5f7;
+            --slide-bg: #ffffff;
+            --text: #1d1d1f;
+            --text-secondary: #86868b;
+            --border: #d2d2d7;
+            --code-bg: #f5f5f7;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--background);
+            color: var(--text);
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        /* Slide Deck Container */
+        .deck-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            background-color: var(--slide-bg);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Slide Viewport */
+        .slide-viewport {
+            flex: 1;
+            position: relative;
+            padding: 50px 80px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        /* Slide Content Rules */
+        .slide {
+            display: none;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+            animation: fadeIn 0.3s forwards;
+        }
+
+        .slide.active {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            opacity: 1;
+        }
+
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+
+        /* Typography */
+        h1 {
+            font-size: 3.2rem;
+            color: var(--primary);
+            margin-bottom: 25px;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        h2 {
+            font-size: 2.4rem;
+            color: var(--text);
+            margin-bottom: 20px;
+            font-weight: 700;
+        }
+
+        p {
+            font-size: 1.45rem;
+            line-height: 1.7;
+            margin-bottom: 15px;
+        }
+
+        ul {
+            margin-left: 30px;
+            margin-bottom: 20px;
+        }
+
+        li {
+            font-size: 1.45rem;
+            line-height: 1.7;
+            margin-bottom: 12px;
+        }
+
+        strong {
+            font-weight: 600;
+        }
+
+        code {
+            font-family: "Courier New", Courier, monospace;
+            background-color: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+            margin-bottom: 15px;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            font-size: 0.85em;
+            line-height: 1.4;
+        }
+
+        /* Cover Slide Specifics */
+        .cover-slide {
+            text-align: left;
+            align-items: stretch;
+            justify-content: center;
+        }
+
+        .cover-slide h1 {
+            font-size: 2.8rem;
+            margin-bottom: 15px;
+            color: var(--primary);
+        }
+
+        .cover-slide h2 {
+            font-size: 1.5rem;
+            color: var(--text-secondary);
+            font-weight: 400;
+            margin-bottom: 25px;
+        }
+
+        .cover-slide p {
+            font-size: 1.1rem;
+            color: var(--text-secondary);
+        }
+
+        /* Two Column Layout Grid */
+        .two-col {
+            display: grid;
+            grid-template-columns: 1.1fr 0.9fr;
+            gap: 50px;
+            align-items: center;
+            width: 100%;
+            margin-top: 10px;
+            flex: 1;
+        }
+
+        .left-col {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .right-col {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Image Display */
+        .slide-image-container {
+            display: flex;
+            justify-content: center;
+            width: 100%;
+        }
+
+        .slide-image-container img {
+            max-width: 100%;
+            max-height: 520px;
+            object-fit: contain;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        }
+
+        .cover-slide .slide-image-container img {
+            max-height: 520px;
+            max-width: 100%;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            margin-bottom: 15px;
+        }
+
+        th, td {
+            padding: 10px 14px;
+            text-align: left;
+            font-size: 0.95rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background-color: var(--primary);
+            color: white;
+            font-weight: 600;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+        }
+
+        tr:nth-child(even) td {
+            background-color: var(--code-bg);
+        }
+
+        /* Footer Controls */
+        .footer {
+            height: 48px;
+            border-top: 1px solid #e5e5e7;
+            padding: 0 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #fafafa;
+        }
+
+        .footer-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .footer-title span {
+            color: var(--text-secondary);
+            font-weight: 400;
+            margin-left: 10px;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .control-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--primary);
+            transition: background-color 0.2s;
+        }
+
+        .control-btn:hover {
+            background-color: #e8f2fc;
+        }
+
+        .control-btn:disabled {
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            background: none;
+        }
+
+        .counter {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        /* Progress Bar */
+        .progress-bar-container {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background-color: #e5e5e7;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background-color: var(--primary);
+            transition: width 0.3s ease;
+        }
+
+        /* Keyboard Tips overlay */
+        .tips {
+            position: absolute;
+            bottom: 60px;
+            right: 30px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.5s;
+        }
+
+        .deck-container:hover .tips {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="deck-container">
+        <div class="slide-viewport">
+            <div class="slide cover-slide">
+<div class="two-col">
+<div class="left-col">
+<h1>REX POC — Système Intelligent de Gestion de File d'Attente (IQMS)</h1>
+<h2>Rapport Complet de Restitution et Guide d'Intégration</h2>
+<p><strong>Juin 2026</strong></p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="iqms_cover_card.png" alt="Cover Graphic"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>1. Contexte &amp; Enjeux Opérationnels</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Expérience client en magasin</strong> : L'attente en caisse est le principal point de friction du parcours d'achat.</li>
+<li><strong>Optimisation des ressources</strong> : Ajuster la présence des hôtes de caisse en fonction de l'affluence réelle.</li>
+<li><strong>Pilotage par la donnée</strong> : Passer d'une gestion réactive (subir la file) à une gestion proactive (anticiper la file).</li>
+<li><strong>Le POC IQMS</strong> : Expérimentation sur site réel pour valider les briques technologiques IA, base de données et prédiction.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="retail_challenges_schema.jpg" alt="Enjeux"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>2. Objectifs de l'Évaluation Pilote (POC)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Fiabilité du comptage vidéo</strong> : Mesurer l'exactitude de la détection et du suivi individuel des clients.</li>
+<li><strong>Précision des algorithmes prédictifs</strong> : Valider la capacité à anticiper la charge à 15, 30 et 60 minutes.</li>
+<li><strong>Industrialisation de la stack</strong> : Évaluer la stabilité de la base de données temporelle sous flux continu.</li>
+<li><strong>Facilité d'intégration</strong> : Identifier les bonnes pratiques de déploiement pour le partenaire intégrateur.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="poc_objectives_schema.jpg" alt="Objectifs Pilote"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>3. Architecture Technique du Système</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li>Un flux asynchrone qui sépare le traitement vidéo de la base de données.</li>
+<li>Une couche prédictive décorrélée pour ne pas ralentir la supervision en temps réel.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="iqms_system_architecture.jpg" alt="Architecture Technique"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>4. Placement Caméra : L'Importance de la Perspective</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Recommandation principale</strong> : Installer les caméras avec un angle de vue en <strong>perspective</strong> (vue semi-plongeante).</li>
+<li><strong>Avantages métiers</strong> :</li>
+<li>Permet de distinguer les clients alignés les uns derrière les autres.</li>
+<li>Améliore la précision du calcul des temps de présence (dwell time).</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="camera_perspective_photorealistic.jpg" alt="Schéma Perspective"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>5. Placement Caméra : Contraintes et Limites</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Exclusion des caméras 360°</strong> :</li>
+<li>Technologie non disponible et non prise en charge par le système de détection actuel.</li>
+<li>Les distorsions optiques des caméras 360° altèrent la précision du tracking IA.</li>
+<li><strong>Préconisation d'installation</strong> : Utiliser des caméras IP standard avec un flux RTSP haute définition stable pour chaque zone de passage.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="camera_constraints_schema.jpg" alt="Contraintes Caméra"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>6. Analyse Vidéo IA : Option A (Head-Detector)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Mécanisme</strong> : Détection ciblée des têtes des clients (modèle YOLOv9 spécialisé).</li>
+<li><strong>Points forts</strong> :</li>
+<li>Très efficace dans les environnements à forte densité et de passage rapide.</li>
+<li>Moins sensible aux masquages partiels du corps.</li>
+<li><strong>Matériel recommandé</strong> : Serveurs équipés de cartes graphiques dédiées (GPU) supportant l'accélération matérielle TensorRT.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="head_detector_flow_schema.jpg" alt="Détection Têtes"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>7. Analyse Vidéo IA : Option B (Silhouette &amp; Face)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Mechanism</strong> : Détection complète du corps combinée à une analyse des attributs (âge, genre, sacs).</li>
+<li><strong>Points forts</strong> :</li>
+<li>Fournit des données démographiques riches pour les analyses marketing.</li>
+<li>Idéal pour les caméras placées face aux caisses ou aux entrées principales.</li>
+<li><strong>Matériel recommandé</strong> : Processeurs standards (CPU) optimisés ou serveurs légers.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="body_detector_flow_schema.jpg" alt="Détection Corps"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>8. Analyse Vidéo IA : Le Moteur de Suivi (Tracker)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Technologie embarquée</strong> : Utilisation du tracker Norfair pour associer les détections d'une image à l'autre.</li>
+<li><strong>Logique de validation (Insert-at-death)</strong> :</li>
+<li>Aucun événement n'est écrit en base lors de la première apparition.</li>
+<li>L'enregistrement final en base de données s'effectue uniquement lorsque le client quitte définitivement la zone d'analyse.</li>
+<li>Garantit l'exactitude du calcul de la durée de présence globale (dwell time).</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="norfair_tracking_schema.jpg" alt="Suivi Norfair"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>9. Analyse Vidéo IA : Bilan des Performances</h2>
+<div class="two-col">
+<div class="left-col">
+<p>Les fonctions d'analyse vidéo ont donné de <strong>très bons résultats (VERY Good Results)</strong> lors du POC :</p>
+<ul>
+<li><strong>Comptage précis</strong> : Taux de détection et de suivi individuel supérieur aux attentes du pilote.</li>
+<li><strong>Robustesse opérationnelle</strong> : Le système maintient la cohésion des trajectoires individuelles même en cas d'arrêts prolongés des clients en file.</li>
+<li><strong>Résilience</strong> : Excellente tolérance aux variations lumineuses du magasin.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="ia_performance_chart_schema.jpg" alt="Performances"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>10. Base de Données : Le Choix de TimescaleDB</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Technologie retenue</strong> : PostgreSQL couplé à l'extension temporelle <strong>TimescaleDB</strong>.</li>
+<li><strong>Pourquoi ce choix ?</strong></li>
+<li>Spécialement conçu pour ingérer d'importants volumes de données de séries temporelles.</li>
+<li>Performances de requêtage élevées pour alimenter le dashboard en temps réel.</li>
+<li>Fonctionnalités de compression automatique des données historiques pour économiser l'espace disque.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="timescaledb_hypertable_schema.jpg" alt="TimescaleDB Hypertables"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>11. Base de Données : Structure des Hypertables</h2>
+<div class="two-col">
+<div class="left-col">
+<p>L'organisation des données repose sur des hypertables optimisées par plages de temps :</p>
+<ul>
+<li><strong>Table des événements de passage (<code>entrance_events</code>)</strong> : Stocke chaque entrée/sortie de client avec son horodatage et sa durée de présence.</li>
+<li><strong>Table des états de file (<code>queue_state_snapshots</code>)</strong> : Enregistre toutes les 10 secondes le nombre de personnes en file et les caisses actives pour servir de point de repère.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="db_tables_schema.jpg" alt="Tables Schema"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>12. Moteur de Prévision : Modèle 1 (Prophet)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Rôle</strong> : Analyse statistique des tendances globales.</li>
+<li><strong>Fonctionnement</strong> :</li>
+<li>Détecte les variations saisonnières régulières (heures de repas, jours de la semaine, week-ends).</li>
+<li>Établit la ligne directrice de la prévision à long terme en se basant sur l'historique des semaines précédentes.</li>
+<li><strong>Bénéfice</strong> : Capture les grands rendez-vous de fréquentation du magasin.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="prophet_decomposition_schema.jpg" alt="Prophet Decomposition"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>13. Moteur de Prévision : Modèle 2 (LSTM)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Rôle</strong> : Réseau de neurones récurrents (Deep Learning) pour l'analyse des séquences.</li>
+<li><strong>Fonctionnement</strong> :</li>
+<li>Analyse l'évolution immédiate de la file minute par minute.</li>
+<li>Capture les changements brusques de dynamique à très court terme (ex : arrivée soudaine d'un groupe de clients).</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="lstm_neural_network_diagram.png" alt="LSTM Sequence"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>14. Moteur de Prévision : Modèle 3 (XGBoost)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Rôle</strong> : Algorithme d'apprentissage automatique basé sur des arbres de décision.</li>
+<li><strong>Fonctionnement</strong> :</li>
+<li>Corrige les prévisions en croisant les données temporelles avec des variables contextuelles (ex : nombre de caisses actuellement ouvertes).</li>
+<li><strong>Bénéfice</strong> : Adapte la prévision à la configuration opérationnelle instantanée du magasin.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="xgboost_decision_tree_diagram.png" alt="XGBoost Trees"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>15. Moteur de Prévision : L'Approche d'Ensemble</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Synergie des modèles</strong> : Les prévisions individuelles de Prophet, LSTM et XGBoost sont combinées pour générer une courbe prédictive unique et équilibrée.</li>
+<li><strong>Optimisation des ressources serveur</strong> :</li>
+<li>Les modèles lourds (LSTM, XGBoost) sont persistés sur disque.</li>
+<li>Ils sont rechargés automatiquement sans réentraînement systématique à chaque cycle, ce qui divise par 10 la consommation CPU du serveur.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="prediction_ensemble_schema.jpg" alt="Approche d'Ensemble"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>16. Formule Dynamique du Temps d'Attente</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Calcul classique</strong> : Simple ratio statique basé sur le volume historique d'entrées.</li>
+<li><strong>Calcul dynamique mis en place</strong> :</li>
+</ul>
+<p>1. Lecture de l'instantané de l'état de la file (<code>queue_state_snapshots</code>).</p>
+<p>2. Prise en compte du nombre de caisses actives réelles.</p>
+<p>3. Projection temporelle pour estimer les temps d'attente à court terme (<code>wait_15m</code> et <code>wait_30m</code>).</p>
+<ul>
+<li><strong>Intérêt opérationnel</strong> : Une vision proactive pour ouvrir les caisses avant la saturation.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="dynamic_wait_formula_schema.jpg" alt="Formule Dynamique"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>17. Web App Opérateur : Le Dashboard Live (Streamlit)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Accès local</strong> : Dashboard consultable via navigateur à l'adresse <code>http://localhost:8501</code>.</li>
+<li><strong>Indicateurs affichés</strong> :</li>
+<li><strong>IN QUEUE NOW</strong> : Nombre estimé de personnes en file (mis à jour toutes les 10 secondes).</li>
+<li><strong>EST. WAIT (+15m, +30m, +45m)</strong> : Temps d'attente estimé pour les clients à venir.</li>
+<li><strong>ENTRIES TODAY</strong> : Nombre total d'entrées depuis minuit.</li>
+<li><strong>Indicateur de statut</strong> : Code couleur intuitif pour le manager (OK - Vert &lt; 5m, BUSY - Orange 5-10m, ALERT - Rouge &gt;= 10m).</li>
+<li><strong>Onglet historique</strong> : Visualisation du volume d'entrées sur 30 jours et taux de port de sacs.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="streamlit_operator_dashboard.png" alt="Dashboard Streamlit"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>18. L'Application Mobile Opérateur (React Native + Expo)</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Technologie cible</strong> : Application multi-plateforme compilée sous <strong>React Native (Expo)</strong> (<code>IQMSManager</code>).</li>
+<li><strong>Usage sur le terrain</strong> :</li>
+<li>Compagnon mobile pour le manager ou le personnel en rayon (permet de s'affranchir d'un écran fixe).</li>
+<li>Design moderne optimisé en mode sombre pour une visibilité accrue.</li>
+<li><strong>Affichage des caisses</strong> : Statut précis par ligne de caisse (OPEN, CLOSED, BUSY, BUSY_HIGH).</li>
+<li><strong>Communication API</strong> : Connexion temps réel avec le serveur via un tunnel sécurisé ngrok.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="operator_dashboard_mobile.png" alt="Tableau de Bord Opérateur (Rendu Réaliste UI)"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>19. Le Simulateur &amp; Visualisation 2D au Sol</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Moteur de simulation</strong> : Simulation d'événements physiques via serveur WebSocket local (port 8080).</li>
+<li><strong>Rendu visuel interactif</strong> :</li>
+<li>Visualisation 2D animée du plan du magasin (dessinée sur Canvas HTML5, servie sur le port 8081).</li>
+<li>Permet de simuler des rushs clients (déjeuner, soir) et de voir le comportement de la file d'attente.</li>
+<li><strong>Utilité</strong> : Tester la robustesse opérationnelle de la stack complète avant raccordement des caméras physiques.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="simulator_websocket_schema.jpg" alt="Simulateur Architecture"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>20. Ordonnancement : Automatisation des Prédictions</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Script d'ordonnancement (<code>run_scheduler.py</code>)</strong> :</li>
+<li>Tâche de fond à lancer à côté de la base de données.</li>
+<li>Déclenche automatiquement l'ensemble prédictif (<code>ensemble_predict.py</code>) toutes les 15 minutes.</li>
+<li><strong>Flexibilité technique</strong> :</li>
+<li>Permet de configurer facilement la taille de l'historique d'entraînement (ex : lookback de 14 ou 30 jours).</li>
+<li>Permet de filtrer la source des caméras (REAL pour la production, SIM pour le mode test).</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="prediction_scheduler_schema.jpg" alt="Planificateur de Prédiction"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>21. Feuille de Route d'Intégration (Checklist)</h2>
+<div class="two-col">
+<div class="left-col">
+<p>1. <strong>Caméras</strong> : Fixer les caméras standards (pas de 360°) en perspective et calibrer les polygones de détection (ROI).</p>
+<p>2. <strong>Base de Données</strong> : Déployer PostgreSQL + TimescaleDB et configurer les hypertables d'événements et snapshots.</p>
+<p>3. <strong>Moteur IA &amp; OpenVINO</strong> : Activer OpenVINO pour booster l'inférence YOLOv9 en FP32 sur matériel standard.</p>
+<p>4. <strong>Services d'Affichage</strong> : Configurer et démarrer le scheduler de prédiction (<code>run_scheduler.py</code>), la console Streamlit et l'application mobile Expo (<code>IQMSManager</code>).</p>
+<p>5. <strong>Supervision</strong> : Connecter le tableau de bord Grafana de production aux tables pour la supervision globale.</p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="roadmap_checklist_graphic.jpg" alt="Roadmap"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>22. Annexe : Prompts de Génération - Partie 1</h2>
+<ul>
+<li><strong>Couverture &amp; Titre (Slide 1) - <code>iqms_cover_card.png</code></strong> :</li>
+<li><code>A modern high-tech presentation title cover graphic. Large stylized letters 'IQMS' surrounded by glowing virtual particles, neural network nodes, and time-series line graphs. Sleek professional design, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Enjeux Opérationnels (Slide 2) - <code>retail_challenges_schema.jpg</code></strong> :</li>
+<li><code>A professional block diagram. Boxes show: Magasin (Flux Clients) -&gt; Attente en Caisse (Friction) -&gt; Ressources Optimisées (IQMS Pilotage). Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Objectifs Évaluation (Slide 3) - <code>poc_objectives_schema.jpg</code></strong> :</li>
+<li><code>A modern high-tech evaluation checklist infographic on a dark glass screen. Four glowing checkmarks in neon cyan and green next to text blocks: 1. Video Counting Accuracy, 2. Predictive Model Precision, 3. Stack Scalability, 4. Integrator Readiness. Cinematic lighting, photorealistic, 8k resolution, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Architecture Technique (Slide 3) - <code>iqms_system_architecture.jpg</code></strong> :</li>
+<li><code>A professional system architecture block diagram. At the top: an 'IP CAMERA (RTSP)' box. An arrow points down to a block labeled 'AI DETECTION (YOLOv9 + Norfair)'. An arrow points down to a database block labeled 'TIMESCALEDB / PostgreSQL'. From the database, arrows branch out to two bottom blocks: 'PREDICTION ENGINE' and 'STREAMLIT DASHBOARD'. Clean technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Caméra Perspective (Slide 4) - <code>camera_perspective_photorealistic.jpg</code></strong> :</li>
+<li><code>A professional, crisp photorealistic security dome camera mounted high on a clean white ceiling, looking down at a modern checkout lane and grocery queue in a beautifully lit, modern supermarket. Soft lighting, high detail, security monitoring perspective view, photorealism, professional CCTV, wide angle lens.</code></li>
+<li><strong>Caméra Exclusions (Slide 5) - <code>camera_constraints_schema.jpg</code></strong> :</li>
+<li><code>A professional technical schema diagram. Left box is 'CAMERA IP PERSPECTIVE [VALIDE]', right box is 'CAMERA 360 FISHEYE [EXCLU]' crossed out. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Inférence Head-Detector (Slide 6) - <code>head_detector_flow_schema.jpg</code></strong> :</li>
+<li><code>A professional technical system diagram. Flow goes left to right: 'RTSP Video Input' box -&gt; CPU/iGPU icon labeled 'OpenVINO ONNX Engine' -&gt; 'YOLOv9 Head Detector' box -&gt; 'ROI Head Coordinates' output. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Inférence Silhouette &amp; Face (Slide 7) - <code>body_detector_flow_schema.jpg</code></strong> :</li>
+<li><code>A professional technical system diagram. Flow goes left to right: 'RTSP Video Input' box -&gt; CPU icon labeled 'OpenVINO ONNX Engine' -&gt; 'YOLOv9 Body &amp; Face Detector' box -&gt; 'Uniface Classifier' box -&gt; 'Age, Gender &amp; Bag Status' output. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Suivi Norfair (Slide 8) - <code>norfair_tracking_schema.jpg</code></strong> :</li>
+<li><code>A professional technical data flow diagram. Flow goes left to right: 'Frame Detections' box -&gt; 'Norfair Tracker' box -&gt; 'Dwell Time Accumulator' box -&gt; decision diamond 'Track Ends?' -&gt; 'PostgreSQL DB Insert' database icon. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+</ul>
+</div>
+<div class="slide">
+<h2>23. Annexe : Prompts de Génération - Partie 2</h2>
+<ul>
+<li><strong>Détection Bilan (Slide 9) - <code>ia_performance_chart_schema.jpg</code></strong> :</li>
+<li><code>A line graph showing tracking reliability. Line stays high above a threshold at 98% representing very good results. Clean technical chart layout, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>TimescaleDB Router (Slide 10) - <code>timescaledb_hypertable_schema.jpg</code></strong> :</li>
+<li><code>A professional database architecture diagram. Dwell time events write to a central 'TimescaleDB Router' which partitions data into 'Time Chunks (Hypertables)' on disk. A background job 'Auto-Compression Policy' compresses older chunks. Technical blueprint style, modern tech database graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Structure Hypertables (Slide 11) - <code>db_tables_schema.jpg</code></strong> :</li>
+<li><code>A professional database schema diagram. Shows two tables: 'entrance_events' with columns (timestamp TIMESTAMPTZ, dwell_sec INT, gender TEXT, age INT, camera_id TEXT) and 'queue_state_snapshots' with columns (timestamp TIMESTAMPTZ, queue_count INT, active_lanes INT, avg_dwell_sec INT). Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><code>A professional technical flowchart. Flows from top to bottom: 'Live Client Dwell Event' -&gt; decision box 'Time since last write &gt; 2 seconds?' -&gt; branch YES: 'Convert to TIMESTAMPTZ' -&gt; 'Write to TimescaleDB' -&gt; branch NO: 'Ignore write (Throttled)'. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Décomposition Prophet (Slide 12) - <code>prophet_decomposition_schema.jpg</code></strong> :</li>
+<li><code>A professional machine learning mathematical decomposition diagram. Input 'Dwell Time Series' enters 'Prophet Decomposition Engine'. It splits the series into three additive parallel graph components: 'Trend Component', 'Weekly Seasonality', and 'Daily Rush Hour Seasonality'. These combine to form 'Additive Prophet Forecast'. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Modèle LSTM (Slide 13) - <code>lstm_neural_network_diagram.png</code></strong> :</li>
+<li><code>A professional sequence neural network block flow. Input data feeds into memory cells with loops showing hidden states recurrences leading to future wait predictions. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Modèle XGBoost (Slide 14) - <code>xgboost_decision_tree_diagram.png</code></strong> :</li>
+<li><code>A professional gradient boosting decision tree flow diagram. Root node splits into multiple child branches leading to terminal leaves correcting wait times. Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Modèles en Ensemble (Slide 15) - <code>prediction_ensemble_schema.jpg</code></strong> :</li>
+<li><code>A professional system diagram for a machine learning model. Input data feeds into three parallel blocks: 'Prophet Model (Trends)', 'LSTM Model (Sequences)', and 'XGBoost Model (Context)'. Their outputs combine in a block labeled 'Ensemble Integrator', which outputs '60-Minute Forecast'. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Formule Temps d'Attente (Slide 16) - <code>dynamic_wait_formula_schema.jpg</code></strong> :</li>
+<li><code>A professional technical flow diagram for a supermarket queue management system. Inputs '4 Active Checkout Lanes', 'Current Shoppers in Queue', and 'Observed Dwell Time' feed into a central calculation block 'Queue Roll-Forward Projection Engine'. Output arrows branch to boxes: 'Wait Time Forecast (+15m)' and 'Wait Time Forecast (+30m)'. Clean technical blueprint style, dark mode, blue and green accent colors, retail setting, no cars, no roads, no device frame.</code></li>
+<li><strong>Dashboard Streamlit Monitor (Slide 17) - <code>streamlit_operator_dashboard.png</code></strong> :</li>
+<li><code>A sleek professional computer monitor mockup displaying Streamlit live metrics. Shows KPI cards (In Queue Now, Wait predictions, Entries today) and wait curves. Clean layout, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Dashboard Mobile (Slide 18) - <code>operator_dashboard_mobile.png</code></strong> :</li>
+<li><code>A high-quality, photorealistic close-up of a sleek mobile phone displaying the React Native queue monitoring app interface. Shows checkout line status card list. Design optimized in dark mode, neon cyan and green accents.</code></li>
+<li><strong>Visualisation 2D (Slide 19) - <code>simulator_websocket_schema.jpg</code></strong> :</li>
+<li><code>A professional network communication diagram. An 'Async WebSocket Server (Port 8080)' block communicates bidirectionally via dashed lines representing 'WebSockets JSON protocol' with an 'HTML5 Canvas Client (Port 8081)' showing a layout view. A side block 'Real DB Calibrator' feeds configuration to the server. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Planificateur Scheduler (Slide 20) - <code>prediction_scheduler_schema.jpg</code></strong> :</li>
+<li><code>A professional technical scheduler flow. A 'System Timer Loop' triggers 'run_scheduler.py' every '--interval 15' minutes. This spawns a subprocess executing 'ensemble_predict.py' which reads training history and writes predictions to 'queue_predictions' table. Technical blueprint style, modern tech graphics, dark mode, blue and green accent colors, no device frame.</code></li>
+<li><strong>Roadmap Checklist (Slide 21) - <code>roadmap_checklist_graphic.jpg</code></strong> :</li>
+<li><code>A horizontal roadmap checklist sequence flow displaying checkboxes next to phase milestones (Cameras, DB tables, OpenVINO, apps). Clean technical blueprint style, dark mode, blue and green accent colors, no device frame.</code></li>
+</ul>
+</div>
+            <div class="tips">Utilisez les touches ◄ / ► ou Espace pour naviguer</div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-title">
+                REX POC — Système Intelligent de Gestion de File d'Attente (IQMS) <span>| Synthèse d'Intégration & REX</span>
+            </div>
+            <div class="controls">
+                <button id="prev-btn" class="control-btn" onclick="prevSlide()">Précédent</button>
+                <div class="counter" id="counter">1 / X</div>
+                <button id="next-btn" class="control-btn" onclick="nextSlide()">Suivant</button>
+            </div>
+        </div>
+
+        <div class="progress-bar-container">
+            <div class="progress-bar" id="progress"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentSlideIdx = 0;
+        const slides = document.querySelectorAll('.slide');
+        const counter = document.getElementById('counter');
+        const progressBar = document.getElementById('progress');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+
+        function updateDeck() {
+            slides.forEach((slide, idx) => {
+                if (idx === currentSlideIdx) {
+                    slide.classList.add('active');
+                } else {
+                    slide.classList.remove('active');
+                }
+            });
+
+            counter.innerText = `${currentSlideIdx + 1} / ${slides.length}`;
+            
+            const pct = ((currentSlideIdx + 1) / slides.length) * 100;
+            progressBar.style.width = `${pct}%`;
+
+            prevBtn.disabled = currentSlideIdx === 0;
+            nextBtn.disabled = currentSlideIdx === slides.length - 1;
+        }
+
+        function nextSlide() {
+            if (currentSlideIdx < slides.length - 1) {
+                currentSlideIdx++;
+                updateDeck();
+            }
+        }
+
+        function prevSlide() {
+            if (currentSlideIdx > 0) {
+                currentSlideIdx--;
+                updateDeck();
+            }
+        }
+
+        // Keyboard Navigation
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'Enter') {
+                nextSlide();
+            } else if (e.key === 'ArrowLeft' || e.key === 'Backspace') {
+                prevSlide();
+            }
+        });
+
+        // Initialize presentation
+        updateDeck();
+    </script>
+</body>
+</html>

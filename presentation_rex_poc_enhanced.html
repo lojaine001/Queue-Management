@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>REX POC — IQMS Presentation</title>
+    <style>
+        :root {
+            --primary: #0071e3;
+            --background: #f5f5f7;
+            --slide-bg: #ffffff;
+            --text: #1d1d1f;
+            --text-secondary: #86868b;
+            --border: #d2d2d7;
+            --code-bg: #f5f5f7;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--background);
+            color: var(--text);
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        /* Slide Deck Container */
+        .deck-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            background-color: var(--slide-bg);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Slide Viewport */
+        .slide-viewport {
+            flex: 1;
+            position: relative;
+            padding: 40px 60px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        /* Slide Content Rules */
+        .slide {
+            display: none;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+            animation: fadeIn 0.3s forwards;
+        }
+
+        .slide.active {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            opacity: 1;
+        }
+
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+
+        /* Typography */
+        h1 {
+            font-size: 2.6rem;
+            color: var(--primary);
+            margin-bottom: 20px;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        h2 {
+            font-size: 2.0rem;
+            color: var(--text);
+            margin-bottom: 15px;
+            font-weight: 600;
+        }
+
+        p {
+            font-size: 1.25rem;
+            line-height: 1.6;
+            margin-bottom: 12px;
+        }
+
+        ul {
+            margin-left: 25px;
+            margin-bottom: 15px;
+        }
+
+        li {
+            font-size: 1.25rem;
+            line-height: 1.6;
+            margin-bottom: 8px;
+        }
+
+        strong {
+            font-weight: 600;
+        }
+
+        code {
+            font-family: "Courier New", Courier, monospace;
+            background-color: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+            margin-bottom: 15px;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            font-size: 0.85em;
+            line-height: 1.4;
+        }
+
+        /* Cover Slide Specifics */
+        .cover-slide {
+            text-align: center;
+            align-items: center;
+        }
+
+        .cover-slide h1 {
+            font-size: 2.8rem;
+            margin-bottom: 15px;
+        }
+
+        .cover-slide h2 {
+            font-size: 1.4rem;
+            color: var(--text-secondary);
+            font-weight: 400;
+            margin-bottom: 30px;
+        }
+
+        .cover-slide p {
+            font-size: 1.1rem;
+            color: var(--text-secondary);
+        }
+
+        /* Two Column Layout Grid */
+        .two-col {
+            display: grid;
+            grid-template-columns: 1.15fr 0.85fr;
+            gap: 40px;
+            align-items: center;
+            width: 100%;
+            margin-top: 10px;
+            flex: 1;
+        }
+
+        .left-col {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .right-col {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Image Display */
+        .slide-image-container {
+            display: flex;
+            justify-content: center;
+            width: 100%;
+        }
+
+        .slide-image-container img {
+            max-width: 100%;
+            max-height: 480px;
+            object-fit: contain;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        }
+
+        .cover-slide .slide-image-container img {
+            max-height: 320px;
+            max-width: 85%;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+            margin-bottom: 15px;
+        }
+
+        th, td {
+            padding: 10px 14px;
+            text-align: left;
+            font-size: 0.95rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background-color: var(--primary);
+            color: white;
+            font-weight: 600;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+        }
+
+        tr:nth-child(even) td {
+            background-color: var(--code-bg);
+        }
+
+        /* Footer Controls */
+        .footer {
+            height: 48px;
+            border-top: 1px solid #e5e5e7;
+            padding: 0 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background-color: #fafafa;
+        }
+
+        .footer-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .footer-title span {
+            color: var(--text-secondary);
+            font-weight: 400;
+            margin-left: 10px;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .control-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--primary);
+            transition: background-color 0.2s;
+        }
+
+        .control-btn:hover {
+            background-color: #e8f2fc;
+        }
+
+        .control-btn:disabled {
+            color: var(--text-secondary);
+            cursor: not-allowed;
+            background: none;
+        }
+
+        .counter {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        /* Progress Bar */
+        .progress-bar-container {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background-color: #e5e5e7;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background-color: var(--primary);
+            transition: width 0.3s ease;
+        }
+
+        /* Keyboard Tips overlay */
+        .tips {
+            position: absolute;
+            bottom: 60px;
+            right: 30px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.5s;
+        }
+
+        .deck-container:hover .tips {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="deck-container">
+        <div class="slide-viewport">
+            <div class="slide cover-slide">
+<h1>Système Intelligent de Gestion de File d'Attente</h1>
+<p><strong>Rapport de Restitution &amp; Guide d'Intégration — Juin 2026</strong></p>
+</div>
+<div class="slide">
+<h2>Sommaire Exécutif</h2>
+<div class="two-col">
+<div class="left-col">
+<ul>
+<li><strong>Projet</strong> : Évaluation pilote d'un système de gestion intelligente des files d'attente par analyse vidéo IA.</li>
+<li><strong>Résultat</strong> : Succès — tous les objectifs techniques atteints ou dépassés.</li>
+<li><strong>Technologies</strong> : YOLOv9, Norfair, TimescaleDB, Prophet, LSTM, XGBoost, Streamlit.</li>
+<li><strong>Livrables</strong> : Moteur IA opérationnel, base de données temps réel, dashboard de supervision, simulateur physique.</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="iqms_cover_card.png" alt="Cover Graphic"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>1. Contexte &amp; Enjeux</h2>
+<p><strong>Le point de friction numéro 1 en magasin : l'attente en caisse.</strong></p>
+<table><tr><th>Enjeu</th><th>Défi Actuel</th><th>Impact</th></tr><tr><td>Expérience Client</td><td>Attente perçue comme interminable</td><td>Baisse de satisfaction, paniers abandonnés</td></tr><tr><td>Ressources Humaines</td><td>Ouverture de caisses en retard</td><td>Surcharge du personnel, coûts opportunité</td></tr><tr><td>Pilotage</td><td>Décisions basées sur l'intuition</td><td>Réactivité seulement, pas de prévention</td></tr></table>
+<p><strong>La promesse IQMS</strong> : Transformer la vidéosurveillance existante en données actionnables pour anticiper les embouteillages avant qu'ils ne surviennent.</p>
+</div>
+<div class="slide">
+<h2>2. Objectifs du POC</h2>
+<table><tr><th>Objectif</th><th>Cible</th><th>Statut</th></tr><tr><td>Fiabilité du comptage vidéo</td><td>Taux de détection &gt; 95%</td><td>Atteint</td></tr><tr><td>Précision prédictive</td><td>Anticiper à +15, +30, +45 min</td><td>Atteint</td></tr><tr><td>Stabilité de la stack</td><td>7 jours de flux continu sans incident</td><td>Atteint</td></tr><tr><td>Facilité d'intégration</td><td>Documenter le déploiement pour intégrateur</td><td>Atteint</td></tr></table>
+</div>
+<div class="slide">
+<h2>3. Architecture Technique</h2>
+<div class="two-col">
+<div class="left-col">
+<pre><code>CAMÉRA IP (RTSP)
+       │
+       ▼
+┌─────────────────────────────────────────┐
+│  DÉTECTION &amp; SUIVI IA (Python/OpenCV)   │
+│  • YOLOv9 (détection)                   │
+│  • Norfair (tracking multi-objets)      │
+└──────────────┬──────────────────────────┘
+               │ Événements anonymisés
+               ▼
+┌─────────────────────────────────────────┐
+│  TIMESCALEDB (PostgreSQL)               │
+│  • entrance_events — passages clients   │
+│  • queue_state_snapshots — état file    │
+│  • queue_predictions — prévisions       │
+└───────┬─────────────────┬───────────────┘
+        │                 │
+        ▼                 ▼
+┌──────────────┐  ┌──────────────────────┐
+│  SIMULATEUR  │  │  DASHBOARD STREAMLIT │
+│  2D Canvas   │  │  http://localhost:   │
+│  WebSocket   │  │       8501           │
+└──────────────┘  └──────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────┐
+│  MOTEUR PRÉDICTION (Ensemble)           │
+│  Prophet 40% + LSTM 30% + XGBoost 30%   │
+│  Entraînement auto, persistence modèles │
+└─────────────────────────────────────────┘</code></pre>
+<p><strong>Principe clé</strong> : Traitement vidéo asynchrone, préparation décorrélée de la supervision temps réel.</p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="iqms_system_architecture.jpg" alt="Architecture Technique"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>4. Caméra : Perspective &amp; Positionnement</h2>
+<div class="two-col">
+<div class="left-col">
+<p><strong>Règle d'or</strong> : Vue en plongée légère (30–45°) pour distinguer les clients alignés.</p>
+<ul>
+<li>Avantages métiers :</li>
+<li>Séparation physique des individus en file</li>
+<li>Calcul précis du temps de présence (dwell time)</li>
+<li>Réduction des occlusions partielles</li>
+</ul>
+<p><strong>Caméras 360° : NON RECOMMANDÉES</strong></p>
+<p>Distorsions optiques incompatibles avec le tracking IA. Préférer des caméras IP standard RTSP H.264/H.265.</p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="camera_perspective_photorealistic.jpg" alt="Schéma de perspective caméra"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>5. Détection IA : Deux Options Selon le Besoin</h2>
+<table><tr><th>Critère</th><th>Option A : Head-Detector</th><th>Option B : Corps + Visage</th></tr><tr><td><strong>Modèle</strong></td><td>YOLOv9 (têtes uniquement)</td><td>YOLOv9 + Uniface (corps complet)</td></tr><tr><td><strong>Données</strong></td><td>Passage, durée</td><td>+ Genre, âge, sacs</td></tr><tr><td><strong>Cas d'usage</strong></td><td>Forte densité, flux rapide</td><td>Analyses marketing, caisses</td></tr><tr><td><strong>Matériel</strong></td><td>GPU + TensorRT</td><td>CPU standard</td></tr><tr><td><strong>Performance</strong></td><td>Rapide, léger</td><td>Riche, détaillé</td></tr></table>
+<div class="slide-image-container"><img src="head_detector_flow_schema.jpg" alt="Détecteurs de Tête et Silhouette"></div>
+</div>
+<div class="slide">
+<h2>6. Tracker Norfair &amp; Logique Insert-at-Death</h2>
+<div class="two-col">
+<div class="left-col">
+<p><strong>Le problème</strong> : Les trackers traditionnels écrivent à la première détection, créant des doublons si l'objet disparaît brièvement.</p>
+<p><strong>La solution IQMS</strong> :</p>
+<p>1. <strong>Détection</strong> → Le client entre dans la zone ROI</p>
+<p>2. <strong>Suivi continu</strong> → Accumulation des données (genre, âge, sacs) frame par frame</p>
+<p>3. <strong>Validation</strong> → Écriture en base UNIQUEMENT quand le track disparaît définitivement</p>
+<p>4. <strong>Résultat</strong> : Un seul enregistrement par client, avec durée de présence exacte</p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="norfair_tracking_schema.jpg" alt="Tracker Norfair"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>7. Résultats du POC — Performance IA</h2>
+<table><tr><th>Métrique</th><th>Résultat</th><th>Commentaire</th></tr><tr><td>Taux de détection</td><td>&gt; 95%</td><td>Supérieur aux attentes</td></tr><tr><td>Cohérence tracking</td><td>Excellente</td><td>Même en cas d'arrêts prolongés en file</td></tr><tr><td>Tolérance lumineuse</td><td>Élevée</td><td>Variations jour/née gérées</td></tr><tr><td>Charge CPU (GPU)</td><td>&lt; 30%</td><td>Optimisation TensorRT efficace</td></tr><tr><td>Latence bout-en-bout</td><td>&lt; 2s</td><td>De la caméra au dashboard</td></tr></table>
+<p><strong>Verdict</strong> : L'analyse vidéo est prête pour la production.</p>
+</div>
+<div class="slide">
+<h2>8. Base de Données : TimescaleDB</h2>
+<p><strong>Pourquoi PostgreSQL + TimescaleDB ?</strong></p>
+<ul>
+<li><strong>Hypertables</strong> : Partitionnement automatique par plages temporelles</li>
+<li><strong>Ingestion</strong> : 10 000+ événements/seconde supportés</li>
+<li><strong>Requêtes temps réel</strong> : Agrégations par fenêtres glissantes optimisées</li>
+<li><strong>Compression</strong> : Réduction automatique des données anciennes (×10)</li>
+<li><strong>Compatibilité</strong> : Grafana natif, SQL standard</li>
+</ul>
+<p><strong>Tables principales</strong> :</p>
+<ul>
+<li><code>entrance_events</code> — chaque passage client (horodatage, durée, attributs)</li>
+<li><code>queue_state_snapshots</code> — état de file toutes les 10 secondes</li>
+<li><code>queue_predictions</code> — prévisions générées par l'ensemble</li>
+</ul>
+</div>
+<div class="slide">
+<h2>9. Moteur de Prédiction : Triple Approche</h2>
+<div class="two-col">
+<div class="left-col">
+<p><strong>Combinaison optimale</strong> : Prophet + LSTM + XGBoost ensemblés</p>
+<table><tr><th>Modèle</th><th>Poids</th><th>Rôle</th><th>Fréquence</th></tr><tr><td><strong>Prophet</strong></td><td>40%</td><td>Tendances saisonnières (heures, jours, week-ends)</td><td>Entraîné toutes les 24h</td></tr><tr><td><strong>LSTM</strong></td><td>30%</td><td>Séquences temporelles, réactivité aux changements brusques</td><td>Entraîné toutes les 24h</td></tr><tr><td><strong>XGBoost</strong></td><td>30%</td><td>Variables contextuelles (caisses ouvertes, lag temporel)</td><td>Entraîné toutes les 24h</td></tr></table>
+<p><strong>Optimisation</strong> : Les modèles sont persistés sur disque et rechargés sans réentraînement systématique, divisant la consommation CPU par 10.</p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="prediction_ensemble_schema.jpg" alt="Moteur de Prévision en Ensemble"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>10. Calcul Dynamique du Temps d'Attente</h2>
+<div class="two-col">
+<div class="left-col">
+<p><strong>Formule classique</strong> (statique) : <code>Temps d'attente = Clients en file / Débit horaire</code></p>
+<p><strong>Formule IQMS</strong> (dynamique) :</p>
+<p>1. Lecture instantanée de l'état réel (<code>queue_state_snapshots</code>)</p>
+<p>2. Prise en compte du nombre de caisses actives</p>
+<p>3. Projection Prophet/LSTM/XGBoost sur +15, +30, +45 minutes</p>
+<p>4. Estimation temps d'attente avec file d'attente virtuelle</p>
+<p><strong>Seuils d'alerte</strong> :</p>
+<ul>
+<li>Vert (OK) : &lt; 5 min | Orange (BUSY) : 5–10 min | Rouge (ALERT) : ≥ 10 min</li>
+</ul>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="dynamic_wait_formula_schema.jpg" alt="Formule de Calcul Dynamique"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>11. Dashboard Opérateur — Vue d'Ensemble</h2>
+<div class="two-col">
+<div class="left-col">
+<p><strong>Interface web Streamlit</strong> accessible à <code>http://localhost:8501</code></p>
+<table><tr><th>Indicateur</th><th>Description</th><th>Fréquence</th></tr><tr><td>IN QUEUE NOW</td><td>Personnes actuellement en file</td><td>10 secondes</td></tr><tr><td>EST. WAIT +15m/+30m/+45m</td><td>Temps d'attente estimé</td><td>Toutes les 15 min</td></tr><tr><td>ENTRIES TODAY</td><td>Total entrées depuis minuit</td><td>Temps réel</td></tr><tr><td>STATUT</td><td>OK / BUSY / ALERT</td><td>Continu</td></tr></table>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="streamlit_operator_dashboard.png" alt="Dashboard Streamlit"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>12. Défis Rencontrés &amp; Solutions</h2>
+<table><tr><th>Défi</th><th>Symptôme</th><th>Solution Mise en Œuvre</th></tr><tr><td>Spam de réinsertion</td><td>644 entrées en 3 min (normal: 10-30)</td><td>Pattern insert-at-death : écriture unique à la disparition du track</td></tr><tr><td>Doublons historiques</td><td>Données de test contaminées la production</td><td>Préfixe SIM_* sur les caméras de test, filtres par source</td></tr><tr><td>Décalage horaire</td><td>Grafana ne détectait pas les timestamps</td><td>Migration globale vers TIMESTAMPTZ</td></tr><tr><td>Granularité mixte</td><td>Buckets 1 min (réel) vs 5 min (sim)</td><td>Uniformisation à 3 minutes pour tous</td></tr><tr><td>Surcharge disque</td><td>Écritures continues toutes les secondes</td><td>Limitation à toutes les 2 secondes réelles</td></tr></table>
+</div>
+<div class="slide">
+<h2>13. Simulateur &amp; Visualisation 2D</h2>
+<div class="two-col">
+<div class="left-col">
+<p><strong>Architecture triple service</strong> :</p>
+<ul>
+<li><strong>Moteur</strong> (port 8080) : Simulation d'événements physiques par WebSocket</li>
+<li><strong>Rendu</strong> (port 8081) : Canvas HTML5 animé du plan de magasin</li>
+<li><strong>Contrôle</strong> : Dashboard Streamlit intégré</li>
+</ul>
+<p><strong>Caractéristiques des clients simulés</strong> :</p>
+<ul>
+<li>Genre, âge, présence de sac/chariot, groupe/famille</li>
+<li>Temps de magasinage variable selon le contexte horaire</li>
+<li>Mode express (~25% des clients, 2-5 min)</li>
+</ul>
+<p><strong>Utilité</strong> : Tester la stack complète sans caméras physiques, valider les scénarios de rush.</p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="simulator_websocket_schema.png" alt="Architecture du Simulateur"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>14. Intégration &amp; Déploiement</h2>
+<p><strong>Stack technique complète</strong> :</p>
+<table><tr><th>Couche</th><th>Technologie</th><th>Version</th></tr><tr><td>Détection IA</td><td>YOLOv9 ONNX + Norfair</td><td>Latest</td></tr><tr><td>Accélération</td><td>OpenVINO / TensorRT</td><td>2024.x</td></tr><tr><td>Base de données</td><td>PostgreSQL + TimescaleDB</td><td>14+ / 2.x</td></tr><tr><td>Prédiction</td><td>Prophet + LSTM + XGBoost</td><td>Python 3.10+</td></tr><tr><td>Dashboard</td><td>Streamlit</td><td>1.28+</td></tr><tr><td>Visualisation</td><td>Grafana</td><td>10+</td></tr><tr><td>Mobile</td><td>React Native + Expo</td><td>SDK 50+</td></tr></table>
+</div>
+<div class="slide">
+<h2>15. Feuille de Route &amp; Prochaines Étapes</h2>
+<div class="two-col">
+<div class="left-col">
+<table><tr><th>Phase</th><th>Action</th><th>Délai Estimé</th></tr><tr><td>1. Matériel</td><td>Installer caméras IP en perspective, calibrer ROI</td><td>1/2 journée</td></tr><tr><td>2. Database</td><td>Déployer PostgreSQL + TimescaleDB, créer hypertables</td><td>2 heures</td></tr><tr><td>3. IA</td><td>Activer OpenVINO, charger modèle YOLOv9</td><td>1 heure</td></tr><tr><td>4. Services</td><td>Lancer scheduler Streamlit + prédiction</td><td>30 min</td></tr><tr><td>5. Supervision</td><td>Connecter Grafana, configurer alertes</td><td>1 heure</td></tr><tr><td>6. Mobile</td><td>Déployer application Expo IQMSManager</td><td>30 min</td></tr></table>
+<p><strong>Prêt pour la production en moins d'une journée.</strong></p>
+</div>
+<div class="right-col">
+<div class="slide-image-container"><img src="roadmap_checklist_graphic.jpg" alt="Feuille de Route et Checklist"></div>
+</div>
+</div>
+</div>
+<div class="slide">
+<h2>Contact &amp; Ressources</h2>
+<ul>
+<li><strong>Documentation complète</strong> : <code>IQMS_FULL_DOC.md</code> dans le repository</li>
+<li><strong>Guide développeur</strong> : <code>DEVELOPER_DOC.md</code></li>
+<li><strong>Guide utilisateur</strong> : <code>USER_GUIDE.md</code></li>
+<li><strong>Repository</strong> : <code>github.com/arnaudbastide/Queue-Management</code></li>
+</ul>
+<p><em>Juin 2026 — Document confidentiel</em></p>
+</div>
+            <div class="tips">Utilisez les touches ◄ / ► ou Espace pour naviguer</div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-title">
+                REX POC — Système Intelligent de Gestion de File d'Attente (IQMS) <span>| Synthèse d'Intégration & REX</span>
+            </div>
+            <div class="controls">
+                <button id="prev-btn" class="control-btn" onclick="prevSlide()">Précédent</button>
+                <div class="counter" id="counter">1 / X</div>
+                <button id="next-btn" class="control-btn" onclick="nextSlide()">Suivant</button>
+            </div>
+        </div>
+
+        <div class="progress-bar-container">
+            <div class="progress-bar" id="progress"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentSlideIdx = 0;
+        const slides = document.querySelectorAll('.slide');
+        const counter = document.getElementById('counter');
+        const progressBar = document.getElementById('progress');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+
+        function updateDeck() {
+            slides.forEach((slide, idx) => {
+                if (idx === currentSlideIdx) {
+                    slide.classList.add('active');
+                } else {
+                    slide.classList.remove('active');
+                }
+            });
+
+            counter.innerText = `${currentSlideIdx + 1} / ${slides.length}`;
+            
+            const pct = ((currentSlideIdx + 1) / slides.length) * 100;
+            progressBar.style.width = `${pct}%`;
+
+            prevBtn.disabled = currentSlideIdx === 0;
+            nextBtn.disabled = currentSlideIdx === slides.length - 1;
+        }
+
+        function nextSlide() {
+            if (currentSlideIdx < slides.length - 1) {
+                currentSlideIdx++;
+                updateDeck();
+            }
+        }
+
+        function prevSlide() {
+            if (currentSlideIdx > 0) {
+                currentSlideIdx--;
+                updateDeck();
+            }
+        }
+
+        // Keyboard Navigation
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'Enter') {
+                nextSlide();
+            } else if (e.key === 'ArrowLeft' || e.key === 'Backspace') {
+                prevSlide();
+            }
+        });
+
+        // Initialize presentation
+        updateDeck();
+    </script>
+</body>
+</html>
