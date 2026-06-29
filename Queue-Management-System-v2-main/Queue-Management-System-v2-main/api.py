@@ -293,14 +293,16 @@ def day_recap():
                     FROM entrance_events
                     WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
                 """)
                 total = int((cur.fetchone() or {}).get("total") or 0)
 
                 cur.execute(f"""
-                    SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS cnt
+                    SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour, COUNT(*) AS cnt
                     FROM entrance_events
                     WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
                     GROUP BY 1 ORDER BY 2 DESC LIMIT 1
                 """)
                 peak_row   = cur.fetchone()
@@ -475,27 +477,28 @@ def forecast_chart_3h():
 
 @app.get("/forecast-chart-12h")
 def forecast_chart_12h():
-    """Returns 12-hour time series of predicted arrivals and wait for the app chart."""
+    """Returns last 6 hours of actual entrance counts (3-min buckets) for the app chart."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0)    AS arrivals,
-                        COALESCE(est_wait_minutes, 0) AS wait_min
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW() - INTERVAL '6 hours'
-                      AND prediction_for <= NOW() + INTERVAL '6 hours'
-                    ORDER BY prediction_for ASC, predicted_at DESC
+                    SELECT
+                        time_bucket('3 minutes', timestamp) AS slot,
+                        COUNT(*) AS entries
+                    FROM entrance_events
+                    WHERE timestamp >= NOW() - INTERVAL '6 hours'
+                      AND timestamp <= NOW()
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                    GROUP BY 1
+                    ORDER BY 1 ASC
                 """)
                 rows = cur.fetchall()
         return {
             "slots": [
                 {
-                    "time":     row["prediction_for"].strftime("%H:%M"),
-                    "arrivals": round(float(row["arrivals"]), 1),
-                    "wait_min": round(float(row["wait_min"]), 1),
+                    "time":    row["slot"].strftime("%H:%M"),
+                    "entries": int(row["entries"]),
                 }
                 for row in rows
             ]
@@ -506,27 +509,28 @@ def forecast_chart_12h():
 
 @app.get("/forecast-chart-2d")
 def forecast_chart_2d():
-    """Returns 2-day history + forecast time series for the app chart."""
+    """Returns last 2 days of actual entrance counts (3-min buckets) for the app chart."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0)    AS arrivals,
-                        COALESCE(est_wait_minutes, 0) AS wait_min
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW() - INTERVAL '2 days'
-                      AND prediction_for <= NOW() + INTERVAL '12 hours'
-                    ORDER BY prediction_for ASC, predicted_at DESC
+                    SELECT
+                        time_bucket('3 minutes', timestamp) AS slot,
+                        COUNT(*) AS entries
+                    FROM entrance_events
+                    WHERE timestamp >= NOW() - INTERVAL '2 days'
+                      AND timestamp <= NOW()
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                    GROUP BY 1
+                    ORDER BY 1 ASC
                 """)
                 rows = cur.fetchall()
         return {
             "slots": [
                 {
-                    "time":     row["prediction_for"].strftime("%d/%m %H:%M"),
-                    "arrivals": round(float(row["arrivals"]), 1),
-                    "wait_min": round(float(row["wait_min"]), 1),
+                    "time":    row["slot"].strftime("%d/%m %H:%M"),
+                    "entries": int(row["entries"]),
                 }
                 for row in rows
             ]
