@@ -6,12 +6,15 @@ export default function CameraPlaceholder({ label, dataUrl }) {
         <span style={{ ...s.dot, background: hasImage ? '#3fb950' : '#484f58' }} />
         <span style={s.label}>{label}</span>
       </div>
-      <div style={s.frame}>
-        {hasImage ? (
-          <img src={dataUrl} alt={label} style={s.img} />
-        ) : (
-          <span style={s.icon}>▣</span>
-        )}
+      {/* Aspect-ratio box: always 16:9, scales with width */}
+      <div style={s.frameWrap}>
+        <div style={s.frame}>
+          {hasImage ? (
+            <img src={dataUrl} alt={label} style={s.img} />
+          ) : (
+            <span style={s.icon}>▣</span>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -22,7 +25,7 @@ const s = {
     flex: 1,
     background: '#161b22',
     border: '1px solid #30363d',
-    borderRadius: 8,
+    borderRadius: 10,
     overflow: 'hidden',
     minWidth: 0,
   },
@@ -30,12 +33,12 @@ const s = {
     display: 'flex',
     alignItems: 'center',
     gap: 6,
-    padding: '8px 10px',
+    padding: '8px 12px',
     borderBottom: '1px solid #30363d',
   },
   dot: {
-    width: 6,
-    height: 6,
+    width: 7,
+    height: 7,
     borderRadius: '50%',
     flexShrink: 0,
   },
@@ -46,9 +49,15 @@ const s = {
     letterSpacing: 0.8,
     textTransform: 'uppercase',
   },
+  frameWrap: {
+    position: 'relative',
+    width: '100%',
+    paddingBottom: '56.25%', /* 16:9 */
+  },
   frame: {
-    height: 130,
-    background: '#0d1117',
+    position: 'absolute',
+    inset: 0,
+    background: '#0a0d12',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -58,9 +67,10 @@ const s = {
     width: '100%',
     height: '100%',
     objectFit: 'cover',
+    display: 'block',
   },
   icon: {
-    fontSize: 32,
-    color: '#30363d',
+    fontSize: 40,
+    color: '#21262d',
   },
 };

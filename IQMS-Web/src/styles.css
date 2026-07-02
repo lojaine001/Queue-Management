@@ -139,3 +139,19 @@ button { cursor: pointer; font-family: inherit; }
   .live-grid { display: block; }
   .live-grid > * + * { margin-top: 12px; }
 }
+
+/* ── Camera grid ──────────────────────────────────────────── */
+/* Mobile: stacked full-width */
+.camera-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Desktop: side by side */
+@media (min-width: 900px) {
+  .camera-grid {
+    flex-direction: row;
+    gap: 12px;
+  }
+}

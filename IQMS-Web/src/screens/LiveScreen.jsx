@@ -111,7 +111,7 @@ export default function LiveScreen() {
           <div className="section-header">
             <span className="section-title">{t.liveCameras}</span>
           </div>
-          <div style={s.cameraRow}>
+          <div className="camera-grid">
             <CameraPlaceholder label="CAM 1 – ENTRÉE"  dataUrl={entranceSnap?.image} />
             <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
           </div>
@@ -150,7 +150,6 @@ const s = {
   snapValue: { fontSize: 26, fontWeight: 700, color: '#e6edf3' },
   snapLabel: { fontSize: 10, fontWeight: 700, color: '#8b949e', letterSpacing: 0.8, marginTop: 2, textTransform: 'uppercase' },
   snapSub: { fontSize: 11, color: '#484f58', marginTop: 2 },
-  cameraRow: { display: 'flex', gap: 10 },
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };
