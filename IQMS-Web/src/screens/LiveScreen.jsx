@@ -108,14 +108,16 @@ export default function LiveScreen() {
             </>
           )}
 
-          <div className="section-header">
-            <span className="section-title">{t.liveCameras}</span>
-          </div>
-          <div className="camera-grid">
-            <CameraPlaceholder label="CAM 1 – ENTRÉE"  dataUrl={entranceSnap?.image} />
-            <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
-          </div>
         </div>
+      </div>
+
+      {/* ── Cameras: full-width row on desktop, stacked on mobile ── */}
+      <div className="section-header">
+        <span className="section-title">{t.liveCameras}</span>
+      </div>
+      <div className="camera-grid">
+        <CameraPlaceholder label="CAM 1 – ENTRÉE"  dataUrl={entranceSnap?.image} />
+        <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
       </div>
     </div>
   );
