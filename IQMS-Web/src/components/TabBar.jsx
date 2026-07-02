@@ -1,19 +1,17 @@
-const TABS = [
-  { id: 'live',     label: 'En direct' },
-  { id: 'forecast', label: 'Prévision' },
-  { id: 'today',    label: "Aujourd'hui" },
-  { id: 'alerts',   label: 'Alertes' },
-];
+import { useLang } from '../context/LanguageContext';
+
+const TABS = ['live', 'forecast', 'today', 'alerts'];
 
 export default function TabBar({ active, onChange }) {
+  const { t } = useLang();
   return (
-    <div style={s.bar}>
-      {TABS.map(t => (
-        <button key={t.id} onClick={() => onChange(t.id)} style={s.btn}>
-          <span style={{ ...s.label, color: active === t.id ? '#3fb950' : '#8b949e' }}>
-            {t.label}
+    <div className="mobile-tabbar" style={s.bar}>
+      {TABS.map(id => (
+        <button key={id} onClick={() => onChange(id)} style={s.btn}>
+          <span style={{ ...s.label, color: active === id ? '#3fb950' : '#8b949e' }}>
+            {t.tabs[id]}
           </span>
-          {active === t.id && <div style={s.indicator} />}
+          {active === id && <div style={s.indicator} />}
         </button>
       ))}
     </div>
@@ -40,15 +38,6 @@ const s = {
     alignItems: 'center',
     gap: 10,
   },
-  label: {
-    fontSize: 13,
-    fontWeight: 500,
-    letterSpacing: 0.2,
-  },
-  indicator: {
-    height: 2,
-    width: '60%',
-    background: '#3fb950',
-    borderRadius: 1,
-  },
+  label: { fontSize: 13, fontWeight: 500 },
+  indicator: { height: 2, width: '60%', background: '#3fb950', borderRadius: 1 },
 };

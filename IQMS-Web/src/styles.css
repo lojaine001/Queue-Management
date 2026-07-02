@@ -8,13 +8,11 @@
   --text:     #e6edf3;
   --text-sub: #8b949e;
   --text-dim: #484f58;
-  --accent:   #f97316;
   --green:    #3fb950;
   --yellow:   #d29922;
   --orange:   #db6d28;
   --red:      #f85149;
   --blue:     #58a6ff;
-  --cyan:     #39d353;
 }
 
 html, body, #root {
@@ -27,9 +25,117 @@ html, body, #root {
 }
 
 button { cursor: pointer; font-family: inherit; }
-a { color: inherit; text-decoration: none; }
 
-/* scrollbar */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ── Shell ────────────────────────────────────────────────── */
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.app-main {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ── Screen page ──────────────────────────────────────────── */
+.screen-page {
+  padding: 16px 16px 80px;
+}
+
+/* ── Section header ───────────────────────────────────────── */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  margin-top: 18px;
+}
+
+.section-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-sub);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* ── Stat grid ────────────────────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+/* ── Desktop sidebar (hidden on mobile) ───────────────────── */
+.app-sidebar { display: none; }
+
+/* ── Mobile header / tabbar (hidden on desktop) ───────────── */
+.mobile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+/* ── Desktop breakpoint ───────────────────────────────────── */
+@media (min-width: 900px) {
+  .app-shell { flex-direction: row; }
+
+  .mobile-header { display: none; }
+  .mobile-tabbar  { display: none !important; }
+
+  .app-sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 220px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    padding: 20px 0;
+  }
+
+  .app-main { overflow-y: auto; }
+
+  .screen-page {
+    padding: 28px 36px 48px;
+    max-width: 1100px;
+  }
+
+  /* Today: chart + summary side by side */
+  .today-bottom {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    gap: 16px;
+    align-items: start;
+  }
+
+  /* Live: lanes left, stats+cams right */
+  .live-grid {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    gap: 16px;
+    align-items: start;
+  }
+}
+
+@media (max-width: 899px) {
+  .today-bottom { display: block; }
+  .today-bottom > * + * { margin-top: 12px; }
+  .live-grid { display: block; }
+  .live-grid > * + * { margin-top: 12px; }
+}
