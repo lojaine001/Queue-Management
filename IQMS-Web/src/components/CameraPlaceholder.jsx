@@ -1,14 +1,18 @@
-export default function CameraPlaceholder({ label, stat }) {
+export default function CameraPlaceholder({ label, dataUrl }) {
+  const hasImage = !!dataUrl;
   return (
     <div style={s.wrap}>
       <div style={s.header}>
-        <span style={s.dot} />
+        <span style={{ ...s.dot, background: hasImage ? '#3fb950' : '#484f58' }} />
         <span style={s.label}>{label}</span>
       </div>
       <div style={s.frame}>
-        <span style={s.icon}>▣</span>
+        {hasImage ? (
+          <img src={dataUrl} alt={label} style={s.img} />
+        ) : (
+          <span style={s.icon}>▣</span>
+        )}
       </div>
-      {stat && <div style={s.stat}>{stat}</div>}
     </div>
   );
 }
@@ -33,7 +37,7 @@ const s = {
     width: 6,
     height: 6,
     borderRadius: '50%',
-    background: '#484f58',
+    flexShrink: 0,
   },
   label: {
     fontSize: 11,
@@ -43,20 +47,20 @@ const s = {
     textTransform: 'uppercase',
   },
   frame: {
-    height: 110,
+    height: 130,
     background: '#0d1117',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  img: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
   },
   icon: {
     fontSize: 32,
     color: '#30363d',
-  },
-  stat: {
-    padding: '6px 10px',
-    fontSize: 11,
-    color: '#8b949e',
-    borderTop: '1px solid #30363d',
   },
 };

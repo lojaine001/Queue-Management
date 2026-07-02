@@ -3,6 +3,8 @@ import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
 import CameraPlaceholder from '../components/CameraPlaceholder';
 
+const SNAP_INTERVAL = 30000;
+
 const LANE_STATUS = {
   closed:    { color: '#484f58', label: 'CLOSED', bg: '#21262d' },
   open:      { color: '#3fb950', label: 'OPEN',   bg: '#1a2e22' },
@@ -49,6 +51,12 @@ export default function LiveScreen() {
     `${API_URL}/alerts`,
   ]);
   const [lanesData] = data;
+
+  const { data: snapData } = useApi([
+    `${API_URL}/snapshot/entrance`,
+    `${API_URL}/snapshot/checkout`,
+  ], SNAP_INTERVAL);
+  const [entranceSnap, checkoutSnap] = snapData;
 
   const lanes = lanesData?.lanes ?? [];
   const snapshot = lanesData?.snapshot ?? {};
@@ -104,8 +112,8 @@ export default function LiveScreen() {
             <span className="section-title">{t.liveCameras}</span>
           </div>
           <div style={s.cameraRow}>
-            <CameraPlaceholder label="CAM 1 – ENTRÉE" />
-            <CameraPlaceholder label="CAM 2 – CAISSES" />
+            <CameraPlaceholder label="CAM 1 – ENTRÉE"  dataUrl={entranceSnap?.image} />
+            <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
           </div>
         </div>
       </div>
