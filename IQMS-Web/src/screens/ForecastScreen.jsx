@@ -4,14 +4,16 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
-import { API_URL } from '../config';
+import { API_URL, HEADERS } from '../config';
 import { useLang } from '../context/LanguageContext';
+
+const SCENARIO_COLOR = { red: '#f85149', orange: '#db6d28', yellow: '#d29922', green: '#3fb950' };
 
 function CustomTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
     <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
-      <div style={{ color: '#8b949e', fontSize: 11 }}>{label} min</div>
+      <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
       <div style={{ color: '#58a6ff', fontWeight: 700 }}>{payload[0]?.value?.toFixed(1)} min</div>
     </div>
   );
@@ -19,28 +21,59 @@ function CustomTooltip({ active, payload, label }) {
 
 export default function ForecastScreen() {
   const { t } = useLang();
-  const [scenario, setScenario] = useState(null);
+  const [selected, setSelected] = useState(null);
 
-  const { data, loading, error } = useApi([
+  const { data, loading, error, refresh } = useApi([
     `${API_URL}/forecast`,
     `${API_URL}/forecast-chart`,
   ]);
   const [forecastData, chartData] = data;
 
-  const rec = forecastData?.recommendation;
-  const currentWait = forecastData?.current_wait_min;
-  const scenarios = forecastData?.scenarios ?? [];
+  const waitNow = forecastData?.wait_now_min;
+  const currentLanes = forecastData?.current_lanes ?? 1;
+  const scenarios = forecastData?.lane_scenarios ?? [];
 
-  const points = (chartData?.points ?? []).map((p, i) => ({
-    t: i * 5,
-    wait: p.wait_min ?? p,
-    upper: p.upper ?? null,
-    lower: p.lower ?? null,
+  const points = (chartData?.slots ?? []).map(sl => ({
+    t: sl.time,
+    wait: sl.wait_min,
   }));
 
-  const activeScenario = scenario != null
-    ? scenarios.find(s => s.open_lanes === scenario)
-    : null;
+  // Recommendation, computed client-side from the same data the lane scenarios use
+  // (the API has no "recommendation" field — dashboard_state only stores raw wait numbers).
+  const cw = waitNow ?? 0;
+  const betterScenario = scenarios.find(sc => sc.lanes > currentLanes && sc.est_wait_min < cw - 1);
+  const worseScenario  = scenarios.find(sc => sc.lanes < currentLanes && sc.est_wait_min <= 5);
+  let recText = null;
+  let recColor = '#8b949e';
+  if (cw <= 5 && worseScenario) {
+    recText = t.recLight(worseScenario.lanes);
+    recColor = '#3fb950';
+  } else if (cw > 5 && betterScenario) {
+    const saved = Math.round(cw - betterScenario.est_wait_min);
+    recText = t.recOpenMore(betterScenario.lanes - currentLanes, saved);
+    recColor = '#db6d28';
+  } else if (cw > 10) {
+    recText = t.recHighDemand;
+    recColor = '#f85149';
+  } else if (cw <= 5) {
+    recText = t.recOptimal;
+    recColor = '#3fb950';
+  }
+
+  const setLanes = async (n) => {
+    if (n === currentLanes) return;
+    setSelected(n);
+    try {
+      await fetch(`${API_URL}/set-lanes`, {
+        method: 'POST',
+        headers: { ...HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lanes: n }),
+      });
+      refresh();
+    } catch {
+      // fall through — next refresh cycle will show the real state either way
+    }
+  };
 
   return (
     <div className="screen-page">
@@ -56,29 +89,19 @@ export default function ForecastScreen() {
       {loading && <div style={s.hint}>{t.loading}</div>}
       {error && <div style={s.errorHint}>{error}</div>}
 
-      {rec && (
-        <div style={{
-          ...s.recCard,
-          background: rec.open_lanes > 0 ? '#1a2e22' : '#1c2128',
-          borderColor: rec.open_lanes > 0 ? '#3fb950' : '#30363d',
-        }}>
-          <span style={{ ...s.recArrow, color: rec.open_lanes > 0 ? '#3fb950' : '#8b949e' }}>
-            {rec.open_lanes > 0 ? '↑' : '✓'}
-          </span>
-          <span style={{ ...s.recText, color: rec.open_lanes > 0 ? '#3fb950' : '#e6edf3' }}>
-            {rec.open_lanes > 0
-              ? t.openMoreLanes(rec.open_lanes)
-              : t.optimalConditions}
-          </span>
+      {recText && (
+        <div style={{ ...s.recCard, background: recColor + '11', borderColor: recColor + '55' }}>
+          <span style={{ ...s.recArrow, color: recColor }}>{cw > 5 ? '↑' : '✓'}</span>
+          <span style={{ ...s.recText, color: recColor }}>{recText}</span>
         </div>
       )}
 
-      {currentWait != null && (
+      {waitNow != null && (
         <div style={s.waitRow}>
           <span style={s.waitDot}>⏱</span>
           <span style={s.waitText}>
             {t.estimatedWait} :{' '}
-            <strong style={{ color: '#e6edf3' }}>{Math.round(currentWait)} min</strong>
+            <strong style={{ color: '#e6edf3' }}>{Math.round(waitNow)} min</strong>
           </span>
         </div>
       )}
@@ -97,7 +120,7 @@ export default function ForecastScreen() {
               dataKey="t"
               tick={{ fill: '#8b949e', fontSize: 10 }}
               tickLine={false} axisLine={false}
-              label={{ value: 'MIN', position: 'insideBottom', offset: -2, fill: '#484f58', fontSize: 9 }}
+              minTickGap={30}
             />
             <YAxis
               tick={{ fill: '#8b949e', fontSize: 10 }}
@@ -106,20 +129,11 @@ export default function ForecastScreen() {
             />
             <Tooltip content={<CustomTooltip />} />
             <Line type="monotone" dataKey="wait" stroke="#58a6ff" strokeWidth={2.5} dot={false} />
-            {points[0]?.upper != null && (
-              <Line type="monotone" dataKey="upper" stroke="#58a6ff" strokeWidth={1} strokeDasharray="4 3" dot={false} />
-            )}
-            {points[0]?.lower != null && (
-              <Line type="monotone" dataKey="lower" stroke="#58a6ff" strokeWidth={1} strokeDasharray="4 3" dot={false} />
-            )}
           </LineChart>
         </ResponsiveContainer>
         <div style={s.legendRow}>
           <span style={s.legendItem}>
             <span style={{ ...s.legendLine, borderStyle: 'solid' }} /> {t.estimation}
-          </span>
-          <span style={s.legendItem}>
-            <span style={{ ...s.legendLine, borderStyle: 'dashed' }} /> {t.confidenceInterval}
           </span>
         </div>
       </div>
@@ -131,37 +145,31 @@ export default function ForecastScreen() {
       </div>
 
       <div style={s.scenarioRow}>
-        {[1, 2, 3].map(n => {
-          const sc = scenarios.find(s => s.open_lanes === n);
-          const active = scenario === n;
-          const delta = sc?.wait_delta_min;
+        {scenarios.map(sc => {
+          const isCurrent = sc.lanes === currentLanes;
+          const isSelected = selected === sc.lanes;
+          const color = SCENARIO_COLOR[sc.color] || '#8b949e';
           return (
             <button
-              key={n}
-              onClick={() => setScenario(active ? null : n)}
+              key={sc.lanes}
+              onClick={() => setLanes(sc.lanes)}
               style={{
                 ...s.scenBtn,
-                background: active ? '#1c2a3a' : '#161b22',
-                border: `1px solid ${active ? '#58a6ff' : '#30363d'}`,
-                color: active ? '#58a6ff' : '#e6edf3',
+                background: isSelected ? '#1c2a3a' : '#161b22',
+                border: `1px solid ${isSelected ? '#58a6ff' : '#30363d'}`,
+                color: isSelected ? '#58a6ff' : '#e6edf3',
               }}
             >
-              <span style={s.scenLabel}>{n} FILE{n > 1 ? 'S' : ''}</span>
-              {delta != null && (
-                <span style={{ fontSize: 12, fontWeight: 700, color: delta < 0 ? '#3fb950' : '#f85149' }}>
-                  {delta > 0 ? '+' : ''}{Math.round(delta)} min
-                </span>
-              )}
+              {isCurrent && <span style={s.currentDot} />}
+              <span style={s.scenLabel}>{t.laneLabel(sc.lanes)}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color }}>
+                {Math.round(sc.est_wait_min)} min
+              </span>
+              {isCurrent && <span style={s.currentBadge}>{t.openBadge}</span>}
             </button>
           );
         })}
       </div>
-
-      {activeScenario && (
-        <div style={s.scenDetail}>
-          {t.withLanes(activeScenario.open_lanes, Math.round(activeScenario.estimated_wait_min ?? 0))}
-        </div>
-      )}
     </div>
   );
 }
@@ -188,15 +196,17 @@ const s = {
   legendLine: { display: 'inline-block', width: 18, height: 0, border: '1.5px solid #58a6ff' },
   scenarioRow: { display: 'flex', gap: 10 },
   scenBtn: {
+    position: 'relative',
     flex: 1, padding: '12px 6px', borderRadius: 10,
     display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5,
     fontSize: 13, fontWeight: 700, transition: 'border-color 0.15s',
   },
   scenLabel: {},
-  scenDetail: {
-    marginTop: 10, background: '#1c2128', border: '1px solid #30363d',
-    borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#e6edf3',
+  currentDot: {
+    position: 'absolute', top: 6, right: 6, width: 7, height: 7,
+    borderRadius: '50%', background: '#3fb950',
   },
+  currentBadge: { fontSize: 9, fontWeight: 700, color: '#3fb950', letterSpacing: 0.5 },
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };
