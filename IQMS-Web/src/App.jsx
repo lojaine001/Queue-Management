@@ -53,7 +53,16 @@ export default function App() {
 }
 
 const s = {
-  logo: { fontSize: 18, fontWeight: 700, color: '#e6edf3', letterSpacing: 2 },
+  logo: {
+    display: 'inline-block',
+    fontSize: 15,
+    fontWeight: 800,
+    color: '#fff',
+    letterSpacing: 2,
+    background: '#f97316',
+    borderRadius: 8,
+    padding: '4px 12px',
+  },
   iconBtn: { background: 'none', border: 'none', color: '#8b949e', fontSize: 18, padding: 4 },
   langToggle: {
     background: '#1c2128',

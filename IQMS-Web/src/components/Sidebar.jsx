@@ -8,7 +8,9 @@ export default function Sidebar({ active, onChange }) {
   return (
     <aside className="app-sidebar">
       {/* Logo */}
-      <div style={s.logo}>IQMS</div>
+      <div style={s.logoWrap}>
+        <span style={s.logo}>IQMS</span>
+      </div>
 
       {/* Nav */}
       <nav style={s.nav}>
@@ -45,13 +47,19 @@ export default function Sidebar({ active, onChange }) {
 }
 
 const s = {
-  logo: {
-    fontSize: 20,
-    fontWeight: 700,
-    color: '#e6edf3',
-    letterSpacing: 3,
+  logoWrap: {
     padding: '0 20px 24px',
     borderBottom: '1px solid #30363d',
+  },
+  logo: {
+    display: 'inline-block',
+    fontSize: 16,
+    fontWeight: 800,
+    color: '#fff',
+    letterSpacing: 2,
+    background: '#f97316',
+    borderRadius: 8,
+    padding: '6px 14px',
   },
   nav: {
     flex: 1,
