@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer,
@@ -9,19 +8,22 @@ import { useLang } from '../context/LanguageContext';
 
 const SCENARIO_COLOR = { red: '#f85149', orange: '#db6d28', yellow: '#d29922', green: '#3fb950' };
 
-function CustomTooltip({ active, payload, label }) {
+function CustomTooltip({ active, payload, label, t }) {
   if (!active || !payload?.length) return null;
   return (
     <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
       <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
-      <div style={{ color: '#58a6ff', fontWeight: 700 }}>{payload[0]?.value?.toFixed(1)} min</div>
+      {payload.map(p => (
+        <div key={p.dataKey} style={{ color: p.color, fontWeight: 700 }}>
+          {p.dataKey === 'wait' ? t.waitLegend : t.arrivalsLegend}: {p.value?.toFixed(1)}{p.dataKey === 'wait' ? ' min' : ''}
+        </div>
+      ))}
     </div>
   );
 }
 
 export default function ForecastScreen() {
   const { t } = useLang();
-  const [selected, setSelected] = useState(null);
 
   const { data, loading, error, refresh } = useApi([
     `${API_URL}/forecast`,
@@ -36,6 +38,7 @@ export default function ForecastScreen() {
   const points = (chartData?.slots ?? []).map(sl => ({
     t: sl.time,
     wait: sl.wait_min,
+    arrivals: sl.arrivals,
   }));
 
   // Recommendation, computed client-side from the same data the lane scenarios use
@@ -62,7 +65,6 @@ export default function ForecastScreen() {
 
   const setLanes = async (n) => {
     if (n === currentLanes) return;
-    setSelected(n);
     try {
       await fetch(`${API_URL}/set-lanes`, {
         method: 'POST',
@@ -127,18 +129,22 @@ export default function ForecastScreen() {
               tickLine={false} axisLine={false}
               unit=" min"
             />
-            <Tooltip content={<CustomTooltip />} />
-            <Line type="monotone" dataKey="wait" stroke="#58a6ff" strokeWidth={2.5} dot={false} />
+            <Tooltip content={<CustomTooltip t={t} />} />
+            <Line type="monotone" dataKey="wait" stroke="#db6d28" strokeWidth={2.5} dot={false} />
+            <Line type="monotone" dataKey="arrivals" stroke="#58a6ff" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
         <div style={s.legendRow}>
           <span style={s.legendItem}>
-            <span style={{ ...s.legendLine, borderStyle: 'solid' }} /> {t.estimation}
+            <span style={{ ...s.legendDot, background: '#db6d28' }} /> {t.waitLegend}
+          </span>
+          <span style={s.legendItem}>
+            <span style={{ ...s.legendDot, background: '#58a6ff' }} /> {t.arrivalsLegend}
           </span>
         </div>
       </div>
 
-      {/* Scenarios */}
+      {/* Lanes — tap to open/close */}
       <div className="section-header">
         <span className="section-title">{t.laneScenarios}</span>
         <span style={s.sub}>{t.simulateScenarios}</span>
@@ -146,8 +152,7 @@ export default function ForecastScreen() {
 
       <div style={s.scenarioRow}>
         {scenarios.map(sc => {
-          const isCurrent = sc.lanes === currentLanes;
-          const isSelected = selected === sc.lanes;
+          const isOpen = sc.lanes <= currentLanes;
           const color = SCENARIO_COLOR[sc.color] || '#8b949e';
           return (
             <button
@@ -155,17 +160,19 @@ export default function ForecastScreen() {
               onClick={() => setLanes(sc.lanes)}
               style={{
                 ...s.scenBtn,
-                background: isSelected ? '#1c2a3a' : '#161b22',
-                border: `1px solid ${isSelected ? '#58a6ff' : '#30363d'}`,
-                color: isSelected ? '#58a6ff' : '#e6edf3',
+                background: isOpen ? '#1a2e22' : '#161b22',
+                border: `1px solid ${isOpen ? '#3fb950' : '#30363d'}`,
+                color: isOpen ? '#e6edf3' : '#8b949e',
               }}
             >
-              {isCurrent && <span style={s.currentDot} />}
+              {isOpen && <span style={s.currentDot} />}
               <span style={s.scenLabel}>{t.laneLabel(sc.lanes)}</span>
               <span style={{ fontSize: 12, fontWeight: 700, color }}>
                 {Math.round(sc.est_wait_min)} min
               </span>
-              {isCurrent && <span style={s.currentBadge}>{t.openBadge}</span>}
+              <span style={{ ...s.currentBadge, color: isOpen ? '#3fb950' : '#484f58' }}>
+                {isOpen ? t.openBadge : t.closedBadge}
+              </span>
             </button>
           );
         })}
@@ -193,7 +200,7 @@ const s = {
   },
   legendRow: { display: 'flex', gap: 18, marginTop: 8, paddingLeft: 12 },
   legendItem: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#8b949e' },
-  legendLine: { display: 'inline-block', width: 18, height: 0, border: '1.5px solid #58a6ff' },
+  legendDot: { display: 'inline-block', width: 8, height: 8, borderRadius: '50%' },
   scenarioRow: { display: 'flex', gap: 10 },
   scenBtn: {
     position: 'relative',
