@@ -52,14 +52,10 @@ const s = {
     borderBottom: '1px solid #30363d',
   },
   logo: {
-    display: 'inline-block',
-    fontSize: 16,
+    fontSize: 22,
     fontWeight: 800,
-    color: '#fff',
-    letterSpacing: 2,
-    background: '#f97316',
-    borderRadius: 8,
-    padding: '6px 14px',
+    color: '#e6edf3',
+    letterSpacing: 0.5,
   },
   nav: {
     flex: 1,
