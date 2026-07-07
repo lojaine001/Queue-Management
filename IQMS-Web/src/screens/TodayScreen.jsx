@@ -1,5 +1,5 @@
 import {
-  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
+  ComposedChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
@@ -47,21 +47,21 @@ export default function TodayScreen() {
   const { data, loading, error } = useApi([`${API_URL}/day-recap`]);
   const [recap] = data;
 
-  const totalCustomers = recap?.total_entries ?? recap?.total_customers;
+  const totalCustomers = recap?.total_customers;
   const peakHour = recap?.peak_hour;
-  const peakCount = recap?.peak_hour_count;
-  const peakPct = recap?.peak_hour_pct;
+  const peakCount = recap?.peak_count;
   const avgWait = recap?.avg_wait_min;
-  const maxWait = recap?.max_wait_min;
-  const avgLanes = recap?.avg_open_lanes;
-  const paniers = recap?.equipment?.store_basket ?? recap?.equipment?.basket;
-  const chariots = recap?.equipment?.trolley;
-  const vsYest = recap?.vs_yesterday;
+  const lanesToday = recap?.lanes_today;
+  const busiestLane = recap?.busiest_lane;
+  const alertMinutes = recap?.alert_minutes;
+  const equipment = recap?.equipment ?? [];
+  const paniers = equipment.find(e => e.type === 'store_basket')?.count;
+  const chariots = equipment.find(e => e.type === 'trolley')?.count;
 
-  const hourlyData = (recap?.hourly ?? []).map(h => ({
-    hour: h.hour != null ? `${String(h.hour).padStart(2, '0')}h` : h.label,
-    today: h.count ?? h.today ?? 0,
-    yesterday: h.yesterday ?? null,
+  const hourlyData = (recap?.entries_by_hour ?? []).map(h => ({
+    hour: h.hour,
+    count: h.count ?? 0,
+    isPeak: !!h.is_peak,
   }));
 
   return (
@@ -74,16 +74,13 @@ export default function TodayScreen() {
         <StatCard
           label={t.totalClients}
           value={totalCustomers != null ? totalCustomers.toLocaleString() : null}
-          sub={vsYest != null ? t.vsYesterday(vsYest) : undefined}
           valueColor="#e6edf3"
         />
         <StatCard
           label={t.peakHour}
           value={peakHour}
           valueColor="#58a6ff"
-          sub={peakCount != null
-            ? `${peakCount} ${t.clients}${peakPct != null ? ` · ${peakPct}%` : ''}`
-            : undefined}
+          sub={peakCount != null ? `${peakCount} ${t.clients}` : undefined}
         />
         <div style={{ ...s.statCard, gridColumn: 1 }}>
           <div style={s.statLabel}>{t.equipment}</div>
@@ -126,10 +123,11 @@ export default function TodayScreen() {
                   <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
                   <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} />
                   <Tooltip content={<ChartTooltip />} />
-                  <Bar dataKey="today" fill="#3fb950" radius={[3, 3, 0, 0]} name={t.today} />
-                  {hourlyData[0]?.yesterday != null && (
-                    <Line type="monotone" dataKey="yesterday" stroke="#484f58" strokeDasharray="4 3" dot={false} name={t.yesterday} />
-                  )}
+                  <Bar dataKey="count" radius={[3, 3, 0, 0]} name={t.entriesByHour}>
+                    {hourlyData.map((h, i) => (
+                      <Cell key={i} fill={h.isPeak ? '#f85149' : '#3fb950'} />
+                    ))}
+                  </Bar>
                 </ComposedChart>
               </ResponsiveContainer>
             ) : (
@@ -139,8 +137,8 @@ export default function TodayScreen() {
             )}
             <div style={s.legendRow}>
               <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#3fb950' }} /> {t.today}</span>
-              {hourlyData[0]?.yesterday != null && (
-                <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#484f58' }} /> {t.yesterday}</span>
+              {hourlyData.some(h => h.isPeak) && (
+                <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#f85149' }} /> {t.peakHour}</span>
               )}
             </div>
           </div>
@@ -158,14 +156,16 @@ export default function TodayScreen() {
               valueColor="#3fb950"
             />
             <SummaryRow
-              label={t.maxWaitTime}
-              value={maxWait != null ? `${Math.round(maxWait)} min` : null}
-              valueColor={maxWait > 15 ? '#f85149' : '#d29922'}
+              label={t.lanesUsed}
+              value={lanesToday != null
+                ? `${lanesToday}${busiestLane ? ` (${t.busiestLane(busiestLane)})` : ''}`
+                : null}
+              valueColor="#58a6ff"
             />
             <SummaryRow
-              label={t.avgOpenLanes}
-              value={avgLanes != null ? avgLanes.toFixed(1) : null}
-              valueColor="#58a6ff"
+              label={t.alertTime}
+              value={alertMinutes != null ? `${alertMinutes} min` : null}
+              valueColor={alertMinutes > 0 ? '#f85149' : '#3fb950'}
             />
           </div>
         </div>
