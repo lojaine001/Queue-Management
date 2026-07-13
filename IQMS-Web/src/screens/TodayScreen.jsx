@@ -23,7 +23,7 @@ function SummaryRow({ label, value, valueColor }) {
   return (
     <div style={s.summaryRow}>
       <span style={s.summaryLabel}>{label}</span>
-      <span style={{ fontWeight: 700, color: valueColor ?? '#3fb950' }}>{value ?? '—'}</span>
+      <span style={{ ...s.summaryValue, color: valueColor ?? '#3fb950' }}>{value ?? '—'}</span>
     </div>
   );
 }
@@ -121,7 +121,13 @@ export default function TodayScreen() {
                 <ComposedChart data={hourlyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
                   <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
-                  <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} />
+                  <YAxis
+                    domain={[0, 'dataMax']}
+                    allowDecimals={false}
+                    tickCount={6}
+                    tick={{ fill: '#8b949e', fontSize: 10 }}
+                    tickLine={false} axisLine={false}
+                  />
                   <Tooltip content={<ChartTooltip />} />
                   <Bar dataKey="count" radius={[3, 3, 0, 0]} name={t.entriesByHour}>
                     {hourlyData.map((h, i) => (
@@ -176,28 +182,29 @@ export default function TodayScreen() {
 
 const s = {
   statCard: {
-    background: '#161b22', border: '1px solid #30363d', borderRadius: 10, padding: '14px 12px',
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, padding: '18px 16px',
   },
-  statLabel: { fontSize: 9, fontWeight: 700, color: '#8b949e', letterSpacing: 0.8, marginBottom: 6, textTransform: 'uppercase' },
-  statValue: { fontSize: 28, fontWeight: 700, lineHeight: 1.1 },
-  statDash: { fontSize: 20, color: '#484f58', marginTop: 4 },
-  statSub: { fontSize: 11, color: '#3fb950', marginTop: 5 },
-  equipRow: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 },
+  statLabel: { fontSize: 9, fontWeight: 700, color: '#8b95a8', letterSpacing: 0.8, marginBottom: 8, textTransform: 'uppercase' },
+  statValue: { fontSize: 30, fontWeight: 700, lineHeight: 1.1, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  statDash: { fontSize: 20, color: '#484f58', marginTop: 4, fontFamily: 'var(--font-mono)' },
+  statSub: { fontSize: 11, color: '#3fb950', marginTop: 6 },
+  equipRow: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 },
   equipIcon: { fontSize: 18 },
-  equipCount: { fontSize: 18, fontWeight: 700, color: '#e6edf3', lineHeight: 1 },
-  equipName: { fontSize: 10, color: '#8b949e', marginTop: 1 },
-  chartCard: { background: '#161b22', border: '1px solid #30363d', borderRadius: 10, padding: '14px 10px 8px' },
-  legendRow: { display: 'flex', gap: 16, marginTop: 6, paddingLeft: 12 },
+  equipCount: { fontSize: 19, fontWeight: 700, color: '#e6edf3', lineHeight: 1, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  equipName: { fontSize: 10, color: '#8b949e', marginTop: 2 },
+  chartCard: { background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, padding: '18px 16px 12px' },
+  legendRow: { display: 'flex', gap: 16, marginTop: 8, paddingLeft: 12 },
   legendItem: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#8b949e' },
   legendSq: { display: 'inline-block', width: 10, height: 10, borderRadius: 2 },
   summaryCard: {
-    background: '#161b22', border: '1px solid #30363d', borderRadius: 10, overflow: 'hidden',
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, overflow: 'hidden',
   },
   summaryRow: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '13px 16px', borderBottom: '1px solid #30363d', fontSize: 13,
+    padding: '16px 18px', borderBottom: '1px solid var(--card-border)', fontSize: 13,
   },
   summaryLabel: { color: '#e6edf3' },
+  summaryValue: { fontWeight: 700, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };

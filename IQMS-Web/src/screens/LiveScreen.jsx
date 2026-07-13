@@ -22,9 +22,10 @@ function statusKey(lane) {
 function LaneCard({ lane, t }) {
   const key = statusKey(lane);
   const st = LANE_STATUS[key];
-  const count = lane.status === 'closed' ? 0 : (lane.queue_length ?? '—');
+  const isClosed = key === 'closed';
+  const hasCount = !isClosed && lane.queue_length != null;
   return (
-    <div style={{ ...s.laneCard, background: st.bg, borderColor: st.color + '44' }}>
+    <div style={{ ...s.laneCard, background: st.bg, borderColor: st.color + (isClosed ? '33' : '55') }}>
       <div style={s.laneLeft}>
         <div style={{ ...s.laneCircle, background: st.color + '22', border: `1.5px solid ${st.color}` }}>
           <span style={{ color: st.color, fontSize: 13 }}>👤</span>
@@ -36,8 +37,9 @@ function LaneCard({ lane, t }) {
       </div>
       <div style={s.laneRight}>
         <span style={{ ...s.laneStatusLabel, color: st.color }}>{st.label}</span>
-        <span style={s.laneCount}>
-          {count} <span style={s.laneCountSub}>{t.clients}</span>
+        <span style={{ ...s.laneCount, color: isClosed ? '#484f58' : '#e6edf3' }}>
+          {hasCount || isClosed ? (isClosed ? 0 : lane.queue_length) : <span style={s.laneDash}>—</span>}
+          {' '}<span style={s.laneCountSub}>{t.clients}</span>
         </span>
       </div>
     </div>
@@ -77,7 +79,7 @@ export default function LiveScreen() {
           </div>
           {loading && <div style={s.hint}>{t.loading}</div>}
           {error && <div style={s.errorHint}>{error}</div>}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {lanes.map(lane => <LaneCard key={lane.lane_id} lane={lane} t={t} />)}
             {lanes.length === 0 && !loading && (
               <div style={s.hint}>—</div>
@@ -131,27 +133,28 @@ const s = {
   },
   laneCard: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '13px 14px', border: '1px solid', borderRadius: 10,
+    padding: '16px 20px', border: '1px solid', borderRadius: 16,
   },
-  laneLeft: { display: 'flex', alignItems: 'center', gap: 12 },
+  laneLeft: { display: 'flex', alignItems: 'center', gap: 14 },
   laneCircle: {
     width: 36, height: 36, borderRadius: '50%',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
   },
   laneName: { fontSize: 14, fontWeight: 700, color: '#e6edf3' },
   laneSub: { fontSize: 11, color: '#8b949e', marginTop: 2 },
-  laneRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 },
+  laneRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 },
   laneStatusLabel: { fontSize: 11, fontWeight: 700, letterSpacing: 0.8 },
-  laneCount: { fontSize: 24, fontWeight: 700, color: '#e6edf3' },
-  laneCountSub: { fontSize: 12, fontWeight: 400, color: '#8b949e' },
-  snapshotRow: { display: 'flex', gap: 10, marginBottom: 4 },
+  laneCount: { fontSize: 26, fontWeight: 700, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  laneCountSub: { fontSize: 12, fontWeight: 400, fontFamily: 'var(--font-ui)', color: '#8b949e' },
+  laneDash: { color: '#484f58' },
+  snapshotRow: { display: 'flex', gap: 14, marginBottom: 4 },
   snapshotCard: {
-    flex: 1, background: '#161b22', border: '1px solid #30363d',
-    borderRadius: 8, padding: '12px 14px',
+    flex: 1, background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+    borderRadius: 16, padding: '16px 18px',
   },
-  snapValue: { fontSize: 26, fontWeight: 700, color: '#e6edf3' },
-  snapLabel: { fontSize: 10, fontWeight: 700, color: '#8b949e', letterSpacing: 0.8, marginTop: 2, textTransform: 'uppercase' },
-  snapSub: { fontSize: 11, color: '#484f58', marginTop: 2 },
+  snapValue: { fontSize: 28, fontWeight: 700, color: '#e6edf3', fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  snapLabel: { fontSize: 10, fontWeight: 700, color: '#8b95a8', letterSpacing: 0.8, marginTop: 6, textTransform: 'uppercase' },
+  snapSub: { fontSize: 11, color: '#484f58', marginTop: 4 },
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };

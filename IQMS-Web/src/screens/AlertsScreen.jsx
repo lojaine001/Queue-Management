@@ -63,7 +63,9 @@ export default function AlertsScreen() {
 
       {!loading && list.length === 0 && (
         <div style={s.emptyWrap}>
-          <div style={s.emptyIcon}>✓</div>
+          <div style={s.emptyBadge}>
+            <span style={s.emptyIcon}>✓</span>
+          </div>
           <div style={s.emptyText}>{t.noAlerts}</div>
           <div style={s.emptySub}>{t.allGood}</div>
         </div>
@@ -83,19 +85,24 @@ const s = {
     fontSize: 11, fontWeight: 700, color: '#f85149',
     background: '#2d1a1a', border: '1px solid #f85149', borderRadius: 10, padding: '2px 8px',
   },
-  card: { border: '1px solid', borderRadius: 10, padding: '13px 15px' },
-  cardTop: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  card: { background: 'var(--card-bg)', border: '1px solid', borderRadius: 16, padding: '18px 20px' },
+  cardTop: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   badge: { fontSize: 10, fontWeight: 700, letterSpacing: 0.8, border: '1px solid', borderRadius: 4, padding: '2px 6px' },
   time: { fontSize: 11, color: '#484f58' },
   message: { fontSize: 14, color: '#e6edf3', lineHeight: 1.4 },
-  lane: { fontSize: 11, color: '#8b949e', marginTop: 4 },
-  actions: { display: 'flex', gap: 8, marginTop: 10 },
+  lane: { fontSize: 11, color: '#8b949e', marginTop: 6 },
+  actions: { display: 'flex', gap: 8, marginTop: 12 },
   actionBtn: {
-    background: '#1c2128', border: '1px solid #30363d', borderRadius: 6,
-    padding: '6px 12px', color: '#e6edf3', fontSize: 12, fontWeight: 500,
+    background: '#1c2128', border: '1px solid #30363d', borderRadius: 8,
+    padding: '8px 14px', color: '#e6edf3', fontSize: 12, fontWeight: 500,
   },
-  emptyWrap: { display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '60px 20px', gap: 8 },
-  emptyIcon: { fontSize: 40, color: '#3fb950' },
+  emptyWrap: { display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '70px 20px', gap: 14 },
+  emptyBadge: {
+    width: 64, height: 64, borderRadius: '50%',
+    background: 'rgba(63, 185, 80, 0.12)', border: '1px solid rgba(63, 185, 80, 0.35)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+  },
+  emptyIcon: { fontSize: 28, color: '#3fb950', fontWeight: 700 },
   emptyText: { fontSize: 16, fontWeight: 600, color: '#e6edf3' },
   emptySub: { fontSize: 13, color: '#8b949e' },
   hint: { color: '#8b949e', fontSize: 13 },

@@ -7,8 +7,12 @@ export default function TabBar({ active, onChange }) {
   return (
     <div className="mobile-tabbar" style={s.bar}>
       {TABS.map(id => (
-        <button key={id} onClick={() => onChange(id)} style={s.btn}>
-          <span style={{ ...s.label, color: active === id ? '#3fb950' : '#8b949e' }}>
+        <button
+          key={id}
+          onClick={() => onChange(id)}
+          style={{ ...s.btn, background: active === id ? 'rgba(52, 211, 153, 0.08)' : 'none' }}
+        >
+          <span style={{ ...s.label, color: active === id ? '#34d399' : '#8b949e' }}>
             {t.tabs[id]}
           </span>
           {active === id && <div style={s.indicator} />}
@@ -39,5 +43,5 @@ const s = {
     gap: 10,
   },
   label: { fontSize: 13, fontWeight: 500 },
-  indicator: { height: 2, width: '60%', background: '#3fb950', borderRadius: 1 },
+  indicator: { height: 2, width: '60%', background: '#34d399', borderRadius: 1 },
 };

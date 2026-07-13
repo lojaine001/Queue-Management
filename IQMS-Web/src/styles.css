@@ -1,30 +1,65 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:       #0d1117;
-  --surface:  #161b22;
-  --surface2: #1c2128;
-  --border:   #30363d;
-  --text:     #e6edf3;
-  --text-sub: #8b949e;
-  --text-dim: #484f58;
-  --green:    #3fb950;
-  --yellow:   #d29922;
-  --orange:   #db6d28;
-  --red:      #f85149;
-  --blue:     #58a6ff;
+  --bg:         #0d1117;
+  --surface:    #161b22;
+  --surface2:   #1c2128;
+  --border:     #30363d;
+  --text:       #e6edf3;
+  --text-sub:   #8b949e;
+  --text-dim:   #484f58;
+  --green:      #3fb950;
+  --accent:     #34d399;
+  --yellow:     #d29922;
+  --orange:     #db6d28;
+  --red:        #f85149;
+  --blue:       #58a6ff;
+
+  /* Standardized card treatment */
+  --card-bg:     #12171f;
+  --card-border: rgba(255, 255, 255, 0.06);
+  --card-radius: 16px;
+  --card-pad:    20px;
+
+  /* Type hierarchy */
+  --label-color: #8b95a8;
+  --font-ui:   'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
 html, body, #root {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
 
 button { cursor: pointer; font-family: inherit; }
+
+/* ── Shared design system primitives ─────────────────────── */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  padding: var(--card-pad);
+}
+
+.metric {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--label-color);
+}
 
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
@@ -45,7 +80,7 @@ button { cursor: pointer; font-family: inherit; }
 
 /* ── Screen page ──────────────────────────────────────────── */
 .screen-page {
-  padding: 16px 16px 80px;
+  padding: 20px 16px 80px;
 }
 
 /* ── Section header ───────────────────────────────────────── */
@@ -53,14 +88,14 @@ button { cursor: pointer; font-family: inherit; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
-  margin-top: 18px;
+  margin-bottom: 14px;
+  margin-top: 24px;
 }
 
 .section-title {
   font-size: 11px;
   font-weight: 700;
-  color: var(--text-sub);
+  color: var(--label-color);
   letter-spacing: 1px;
   text-transform: uppercase;
 }
@@ -69,7 +104,7 @@ button { cursor: pointer; font-family: inherit; }
 .stat-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 10px;
+  gap: 14px;
   margin-top: 8px;
 }
 
@@ -112,7 +147,7 @@ button { cursor: pointer; font-family: inherit; }
   .app-main { overflow-y: auto; }
 
   .screen-page {
-    padding: 28px 36px 48px;
+    padding: 32px 40px 48px;
     max-width: 1100px;
   }
 
@@ -120,7 +155,7 @@ button { cursor: pointer; font-family: inherit; }
   .today-bottom {
     display: grid;
     grid-template-columns: 3fr 2fr;
-    gap: 16px;
+    gap: 20px;
     align-items: start;
   }
 
@@ -128,16 +163,16 @@ button { cursor: pointer; font-family: inherit; }
   .live-grid {
     display: grid;
     grid-template-columns: 3fr 2fr;
-    gap: 16px;
+    gap: 20px;
     align-items: start;
   }
 }
 
 @media (max-width: 899px) {
   .today-bottom { display: block; }
-  .today-bottom > * + * { margin-top: 12px; }
+  .today-bottom > * + * { margin-top: 14px; }
   .live-grid { display: block; }
-  .live-grid > * + * { margin-top: 12px; }
+  .live-grid > * + * { margin-top: 14px; }
 }
 
 /* ── Camera grid ──────────────────────────────────────────── */
@@ -145,13 +180,13 @@ button { cursor: pointer; font-family: inherit; }
 .camera-grid {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 /* Desktop: side by side */
 @media (min-width: 900px) {
   .camera-grid {
     flex-direction: row;
-    gap: 12px;
+    gap: 14px;
   }
 }

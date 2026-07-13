@@ -1,19 +1,19 @@
+import { useLang } from '../context/LanguageContext';
+
 export default function CameraPlaceholder({ label, dataUrl }) {
-  const hasImage = !!dataUrl;
+  const { t } = useLang();
+  const isLive = !!dataUrl;
   return (
     <div style={s.wrap}>
       <div style={s.header}>
-        <span style={{ ...s.dot, background: hasImage ? '#3fb950' : '#484f58' }} />
+        <span style={{ ...s.dot, background: isLive ? '#3fb950' : '#484f58' }} />
         <span style={s.label}>{label}</span>
       </div>
       {/* Aspect-ratio box: always 16:9, scales with width */}
       <div style={s.frameWrap}>
         <div style={s.frame}>
-          {hasImage ? (
-            <img src={dataUrl} alt={label} style={s.img} />
-          ) : (
-            <span style={s.icon}>▣</span>
-          )}
+          <span style={s.icon}>▣</span>
+          <span style={s.pendingText}>{t.cameraPending}</span>
         </div>
       </div>
     </div>
@@ -23,9 +23,9 @@ export default function CameraPlaceholder({ label, dataUrl }) {
 const s = {
   wrap: {
     flex: 1,
-    background: '#161b22',
-    border: '1px solid #30363d',
-    borderRadius: 10,
+    background: 'var(--card-bg)',
+    border: '1px solid var(--card-border)',
+    borderRadius: 16,
     overflow: 'hidden',
     minWidth: 0,
   },
@@ -33,8 +33,8 @@ const s = {
     display: 'flex',
     alignItems: 'center',
     gap: 6,
-    padding: '8px 12px',
-    borderBottom: '1px solid #30363d',
+    padding: '10px 16px',
+    borderBottom: '1px solid var(--card-border)',
   },
   dot: {
     width: 7,
@@ -45,7 +45,7 @@ const s = {
   label: {
     fontSize: 11,
     fontWeight: 600,
-    color: '#8b949e',
+    color: '#8b95a8',
     letterSpacing: 0.8,
     textTransform: 'uppercase',
   },
@@ -59,18 +59,20 @@ const s = {
     inset: 0,
     background: '#0a0d12',
     display: 'flex',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
     overflow: 'hidden',
   },
-  img: {
-    width: '100%',
-    height: '100%',
-    objectFit: 'cover',
-    display: 'block',
-  },
   icon: {
-    fontSize: 40,
-    color: '#21262d',
+    fontSize: 34,
+    color: '#2a3140',
+  },
+  pendingText: {
+    fontSize: 11,
+    fontWeight: 500,
+    color: '#484f58',
+    letterSpacing: 0.3,
   },
 };

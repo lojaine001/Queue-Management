@@ -20,9 +20,9 @@ export default function Sidebar({ active, onChange }) {
             onClick={() => onChange(id)}
             style={{
               ...s.navBtn,
-              background: active === id ? '#1c2128' : 'none',
-              color: active === id ? '#3fb950' : '#8b949e',
-              borderLeft: active === id ? '2px solid #3fb950' : '2px solid transparent',
+              background: active === id ? 'rgba(52, 211, 153, 0.08)' : 'none',
+              color: active === id ? '#34d399' : '#8b949e',
+              borderLeft: active === id ? '3px solid #34d399' : '3px solid transparent',
             }}
           >
             <span style={s.navIcon}>{ICONS[id]}</span>
