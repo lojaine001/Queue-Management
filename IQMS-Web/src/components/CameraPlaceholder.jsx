@@ -12,8 +12,14 @@ export default function CameraPlaceholder({ label, dataUrl }) {
       {/* Aspect-ratio box: always 16:9, scales with width */}
       <div style={s.frameWrap}>
         <div style={s.frame}>
-          <span style={s.icon}>▣</span>
-          <span style={s.pendingText}>{t.cameraPending}</span>
+          {isLive ? (
+            <img src={dataUrl} alt={label} style={s.img} />
+          ) : (
+            <>
+              <span style={s.icon}>▣</span>
+              <span style={s.pendingText}>{t.cameraPending}</span>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -64,6 +70,12 @@ const s = {
     justifyContent: 'center',
     gap: 8,
     overflow: 'hidden',
+  },
+  img: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+    display: 'block',
   },
   icon: {
     fontSize: 34,
