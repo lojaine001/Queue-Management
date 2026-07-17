@@ -5,7 +5,7 @@ const TABS = ['live', 'forecast', 'today', 'alerts'];
 export default function TabBar({ active, onChange }) {
   const { t } = useLang();
   return (
-    <div className="mobile-tabbar" style={s.bar}>
+    <div style={s.bar}>
       {TABS.map(id => (
         <button
           key={id}
@@ -27,9 +27,6 @@ const s = {
     display: 'flex',
     borderBottom: '1px solid #30363d',
     background: '#0d1117',
-    position: 'sticky',
-    top: 52,
-    zIndex: 10,
   },
   btn: {
     flex: 1,

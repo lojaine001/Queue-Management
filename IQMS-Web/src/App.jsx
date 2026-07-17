@@ -23,21 +23,22 @@ function Shell() {
       {/* Desktop sidebar */}
       <Sidebar active={tab} onChange={setTab} />
 
-      {/* Mobile header */}
-      <header className="mobile-header">
-        <button style={s.iconBtn}>☰</button>
-        <span style={s.logo}>IQMS</span>
-        <button
-          style={s.langToggle}
-          onClick={() => setLang(lang === 'fr' ? 'en' : 'fr')}
-        >
-          {lang === 'fr' ? 'EN' : 'FR'}
-        </button>
-      </header>
+      {/* Mobile header + tab bar: one sticky unit, no hardcoded offsets between them */}
+      <div className="mobile-nav">
+        <header className="mobile-header">
+          <button style={s.iconBtn}>☰</button>
+          <span style={s.logo}>IQMS</span>
+          <button
+            style={s.langToggle}
+            onClick={() => setLang(lang === 'fr' ? 'en' : 'fr')}
+          >
+            {lang === 'fr' ? 'EN' : 'FR'}
+          </button>
+        </header>
+        <TabBar active={tab} onChange={setTab} />
+      </div>
 
       <div className="app-main">
-        {/* Mobile tab bar */}
-        <TabBar active={tab} onChange={setTab} />
         {screen}
       </div>
     </div>

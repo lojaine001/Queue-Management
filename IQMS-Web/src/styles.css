@@ -112,24 +112,28 @@ button { cursor: pointer; font-family: inherit; }
 .app-sidebar { display: none; }
 
 /* ── Mobile header / tabbar (hidden on desktop) ───────────── */
+/* Single sticky unit — header + tab bar stack as one block, so
+   neither needs to guess the other's height to avoid overlap. */
+.mobile-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
+}
+
 .mobile-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  background: var(--bg);
   border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  z-index: 20;
 }
 
 /* ── Desktop breakpoint ───────────────────────────────────── */
 @media (min-width: 900px) {
   .app-shell { flex-direction: row; }
 
-  .mobile-header { display: none; }
-  .mobile-tabbar  { display: none !important; }
+  .mobile-nav { display: none; }
 
   .app-sidebar {
     display: flex;
