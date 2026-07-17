@@ -84,7 +84,7 @@ export default function TodayScreen() {
           valueColor="#58a6ff"
           sub={peakCount != null ? `${peakCount} ${t.clients}` : undefined}
         />
-        <div className="today-equip-card" style={{ ...s.statCard, gridColumn: 1 }}>
+        <div style={s.statCard}>
           <div style={s.statLabel}>{t.equipment}</div>
           {paniers != null && (
             <div style={s.equipRow}>
