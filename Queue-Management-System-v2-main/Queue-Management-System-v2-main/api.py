@@ -303,6 +303,19 @@ def day_recap():
                 """)
                 total = int((cur.fetchone() or {}).get("total") or 0)
 
+                # Yesterday's total, for the vs-yesterday comparison
+                yesterday_date = (ref_date - timedelta(days=1)) if ref_date else None
+                yesterday_total = None
+                if yesterday_date:
+                    cur.execute("""
+                        SELECT COUNT(*) AS total
+                        FROM entrance_events
+                        WHERE DATE(timestamp) = %s
+                          AND camera_id NOT LIKE 'SIM_%%'
+                          AND dwell_seconds >= 10
+                    """, (yesterday_date,))
+                    yesterday_total = int((cur.fetchone() or {}).get("total") or 0)
+
                 cur.execute(f"""
                     SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour, COUNT(*) AS cnt
                     FROM entrance_events
@@ -397,13 +410,21 @@ def day_recap():
         _demo      = _json.loads(ds_row["demographics_json"])   if ds_row and ds_row["demographics_json"]   else {}
         _hourly    = _json.loads(ds_row["entries_hour_json"])   if ds_row and ds_row["entries_hour_json"]   else []
 
+        vs_yesterday_pct = (
+            round((total - yesterday_total) / yesterday_total * 100)
+            if yesterday_total else None
+        )
+        peak_pct_of_total = round(peak_count / total * 100) if total else None
+
         return {
             "date":                display_date,
             "total_customers":     total,
+            "vs_yesterday_pct":    vs_yesterday_pct,
             "avg_wait_min":        avg_wait_min,
             "peak_hour":           peak_hour,
             "peak_hour_end":       peak_end,
             "peak_count":          peak_count,
+            "peak_pct_of_total":   peak_pct_of_total,
             "equipment":           equipment,
             "lanes_today":         lanes_today,
             "busiest_lane":        busiest_lane,

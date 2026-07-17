@@ -7,14 +7,14 @@ import { useIsMobile } from '../hooks/useIsMobile';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
 
-function StatCard({ value, label, sub, valueColor, children }) {
+function StatCard({ value, label, sub, subColor, valueColor, children }) {
   return (
     <div style={s.statCard}>
       <div style={s.statLabel}>{label}</div>
       {value != null
         ? <div style={{ ...s.statValue, color: valueColor ?? '#e6edf3' }}>{value}</div>
         : <div style={s.statDash}>—</div>}
-      {sub && <div style={s.statSub}>{sub}</div>}
+      {sub && <div style={{ ...s.statSub, color: subColor ?? s.statSub.color }}>{sub}</div>}
       {children}
     </div>
   );
@@ -50,8 +50,10 @@ export default function TodayScreen() {
   const [recap] = data;
 
   const totalCustomers = recap?.total_customers;
+  const vsYesterdayPct = recap?.vs_yesterday_pct;
   const peakHour = recap?.peak_hour;
   const peakCount = recap?.peak_count;
+  const peakPctOfTotal = recap?.peak_pct_of_total;
   const avgWait = recap?.avg_wait_min;
   const lanesToday = recap?.lanes_today;
   const busiestLane = recap?.busiest_lane;
@@ -77,12 +79,16 @@ export default function TodayScreen() {
           label={t.totalClients}
           value={totalCustomers != null ? totalCustomers.toLocaleString() : null}
           valueColor="#e6edf3"
+          sub={vsYesterdayPct != null ? t.vsYesterday(vsYesterdayPct) : undefined}
+          subColor={vsYesterdayPct != null ? (vsYesterdayPct >= 0 ? '#3fb950' : '#f85149') : undefined}
         />
         <StatCard
           label={t.peakHour}
           value={peakHour}
           valueColor="#58a6ff"
-          sub={peakCount != null ? `${peakCount} ${t.clients}` : undefined}
+          sub={peakCount != null
+            ? `${peakCount} ${t.clients}${peakPctOfTotal != null ? ` · ${t.pctOfTotal(peakPctOfTotal)}` : ''}`
+            : undefined}
         />
         <div style={s.statCard}>
           <div style={s.statLabel}>{t.equipment}</div>

@@ -37,6 +37,7 @@ const T = {
     critical: 'CRITIQUE', urgent: 'URGENT', warning: 'ATTENTION',
     noAlerts: 'Aucune alerte active', allGood: 'Tout est sous contrôle',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs hier`,
+    pctOfTotal: pct => `${pct}% du total`,
   },
   en: {
     tabs: { live: 'Live', forecast: 'Forecast', today: 'Today', alerts: 'Alerts' },
@@ -74,6 +75,7 @@ const T = {
     critical: 'CRITICAL', urgent: 'URGENT', warning: 'WARNING',
     noAlerts: 'No active alerts', allGood: 'Everything is under control',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs yesterday`,
+    pctOfTotal: pct => `${pct}% of total`,
   },
 };
 
