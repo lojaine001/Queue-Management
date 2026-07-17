@@ -1,24 +1,24 @@
 import { useLang } from '../context/LanguageContext';
 
-export default function CameraPlaceholder({ label, dataUrl }) {
+export default function CameraPlaceholder({ label, camId, dataUrl, metric }) {
   const { t } = useLang();
   const isLive = !!dataUrl;
+
   return (
     <div style={s.wrap}>
-      <div style={s.header}>
-        <span style={{ ...s.dot, background: isLive ? '#3fb950' : '#484f58' }} />
-        <span style={s.label}>{label}</span>
+      <div style={s.labelRow}>
+        <span style={{ ...s.dot, background: isLive ? 'var(--green)' : 'var(--text-off)' }} />
+        <span className="micro-label">{label}</span>
       </div>
-      {/* Aspect-ratio box: always 16:9, scales with width */}
       <div style={s.frameWrap}>
         <div style={s.frame}>
           {isLive ? (
-            <img src={dataUrl} alt={label} style={s.img} />
-          ) : (
             <>
-              <span style={s.icon}>▣</span>
-              <span style={s.pendingText}>{t.cameraPending}</span>
+              <img src={dataUrl} alt={label} style={s.img} />
+              {metric && <span className="mono" style={s.chip}>{metric}</span>}
             </>
+          ) : (
+            <span style={s.offlineText}>{t.cameraOffline(camId)}</span>
           )}
         </div>
       </div>
@@ -27,64 +27,24 @@ export default function CameraPlaceholder({ label, dataUrl }) {
 }
 
 const s = {
-  wrap: {
-    flex: 1,
-    background: 'var(--card-bg)',
-    border: '1px solid var(--card-border)',
-    borderRadius: 16,
-    overflow: 'hidden',
-    minWidth: 0,
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '10px 16px',
-    borderBottom: '1px solid var(--card-border)',
-  },
-  dot: {
-    width: 7,
-    height: 7,
-    borderRadius: '50%',
-    flexShrink: 0,
-  },
-  label: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: '#8b95a8',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-  },
-  frameWrap: {
-    position: 'relative',
-    width: '100%',
-    paddingBottom: '56.25%', /* 16:9 */
-  },
+  wrap: { flex: 1, minWidth: 0 },
+  labelRow: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 },
+  dot: { width: 6, height: 6, borderRadius: '50%', flexShrink: 0 },
+  frameWrap: { position: 'relative', width: '100%', paddingBottom: '56.25%' },
   frame: {
-    position: 'absolute',
-    inset: 0,
-    background: '#0a0d12',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
+    position: 'absolute', inset: 0,
+    background: 'var(--video-bg)',
+    border: '0.5px solid var(--hairline)',
+    borderRadius: 'var(--radius)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
     overflow: 'hidden',
   },
-  img: {
-    width: '100%',
-    height: '100%',
-    objectFit: 'cover',
-    display: 'block',
-  },
-  icon: {
-    fontSize: 34,
-    color: '#2a3140',
-  },
-  pendingText: {
-    fontSize: 11,
-    fontWeight: 500,
-    color: '#484f58',
-    letterSpacing: 0.3,
+  img: { width: '100%', height: '100%', objectFit: 'cover', display: 'block' },
+  offlineText: { fontSize: 12, color: 'var(--text-3)' },
+  chip: {
+    position: 'absolute', left: 8, bottom: 8,
+    fontSize: 11, color: 'var(--text)',
+    background: 'rgba(6, 8, 9, 0.85)',
+    padding: '3px 7px', borderRadius: 'var(--radius)',
   },
 };

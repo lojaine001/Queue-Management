@@ -1,16 +1,26 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { LanguageProvider, useLang } from './context/LanguageContext';
 import { ToastProvider } from './context/ToastContext';
-import Sidebar from './components/Sidebar';
-import TabBar from './components/TabBar';
 import LiveScreen from './screens/LiveScreen';
 import ForecastScreen from './screens/ForecastScreen';
 import TodayScreen from './screens/TodayScreen';
 import AlertsScreen from './screens/AlertsScreen';
 
+const TABS = ['live', 'forecast', 'today', 'alerts'];
+
+function useClock() {
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
 function Shell() {
   const [tab, setTab] = useState('live');
   const { t, lang, setLang } = useLang();
+  const now = useClock();
 
   const screen = {
     live:     <LiveScreen />,
@@ -19,25 +29,42 @@ function Shell() {
     alerts:   <AlertsScreen />,
   }[tab];
 
+  const clock = now.toLocaleTimeString(lang === 'fr' ? 'fr-FR' : 'en-GB', { hour12: false });
+
   return (
     <div className="app-shell">
-      {/* Desktop sidebar */}
-      <Sidebar active={tab} onChange={setTab} />
-
-      {/* Mobile header + tab bar: one sticky unit, no hardcoded offsets between them */}
-      <div className="mobile-nav">
-        <header className="mobile-header">
-          <button style={s.iconBtn}>☰</button>
+      <header className="app-header">
+        <div style={s.brandRow}>
           <span style={s.logo}>IQMS</span>
-          <button
-            style={s.langToggle}
-            onClick={() => setLang(lang === 'fr' ? 'en' : 'fr')}
-          >
+          <span style={s.storeName}>{t.storeName}</span>
+        </div>
+        <div style={s.headerRight}>
+          <div style={s.liveIndicator}>
+            <span style={s.liveDot} />
+            <span style={s.liveLabel}>{t.liveLabel}</span>
+          </div>
+          <span className="mono" style={s.clock}>{clock}</span>
+          <button style={s.langToggle} onClick={() => setLang(lang === 'fr' ? 'en' : 'fr')}>
             {lang === 'fr' ? 'EN' : 'FR'}
           </button>
-        </header>
-        <TabBar active={tab} onChange={setTab} />
-      </div>
+        </div>
+      </header>
+
+      <nav className="app-tabs">
+        {TABS.map(id => (
+          <button
+            key={id}
+            onClick={() => setTab(id)}
+            style={{
+              ...s.tabBtn,
+              color: tab === id ? 'var(--text)' : 'var(--text-3)',
+              borderBottomColor: tab === id ? 'var(--green)' : 'transparent',
+            }}
+          >
+            {t.tabs[id]}
+          </button>
+        ))}
+      </nav>
 
       <div className="app-main">
         {screen}
@@ -57,21 +84,28 @@ export default function App() {
 }
 
 const s = {
-  logo: {
-    fontSize: 19,
-    fontWeight: 800,
-    color: '#e6edf3',
-    letterSpacing: 0.5,
+  brandRow: { display: 'flex', alignItems: 'baseline', gap: 10 },
+  logo: { fontSize: 16, fontWeight: 500, color: 'var(--text)', letterSpacing: 0.3 },
+  storeName: { fontSize: 12, color: 'var(--text-3)' },
+  headerRight: { display: 'flex', alignItems: 'center', gap: 20 },
+  liveIndicator: { display: 'flex', alignItems: 'center', gap: 6 },
+  liveDot: {
+    width: 7, height: 7, borderRadius: '50%',
+    background: 'var(--green)',
+    animation: 'pulse 2s ease-in-out infinite',
   },
-  iconBtn: { background: 'none', border: 'none', color: '#8b949e', fontSize: 18, padding: 4 },
+  liveLabel: {
+    fontSize: 11, fontWeight: 500, letterSpacing: '0.1em',
+    color: 'var(--green)', textTransform: 'uppercase',
+  },
+  clock: { fontSize: 13, color: 'var(--text-2)' },
+  tabBtn: {
+    padding: '10px 0',
+    fontSize: 12, fontWeight: 500, letterSpacing: '0.05em', textTransform: 'uppercase',
+    borderBottom: '2px solid transparent',
+    transition: 'color 150ms ease, border-color 150ms ease',
+  },
   langToggle: {
-    background: '#1c2128',
-    border: '1px solid #30363d',
-    borderRadius: 6,
-    padding: '4px 10px',
-    color: '#3fb950',
-    fontSize: 12,
-    fontWeight: 700,
-    letterSpacing: 1,
+    fontSize: 12, fontWeight: 500, color: 'var(--text-2)', letterSpacing: '0.05em',
   },
 };

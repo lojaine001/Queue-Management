@@ -200,6 +200,57 @@ def get_alerts():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/alert-history")
+def alert_history():
+    """
+    Last 7 days of ALERT-status prediction buckets, collapsed into
+    contiguous alert periods. There's no discrete alert-event table,
+    so this derives periods from queue_predictions the same way
+    alert_minutes on /day-recap does.
+    """
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT prediction_for, est_wait_minutes
+                    FROM queue_predictions
+                    WHERE status = 'ALERT'
+                      AND prediction_for >= NOW() - INTERVAL '7 days'
+                    ORDER BY prediction_for ASC
+                """)
+                rows = cur.fetchall()
+
+        gap_limit = timedelta(minutes=BUCKET_MIN * 2)
+        periods = []
+        for row in rows:
+            ts = row["prediction_for"]
+            wait = float(row["est_wait_minutes"] or 0)
+            if periods and (ts - periods[-1]["end"]) <= gap_limit:
+                periods[-1]["end"] = ts
+                periods[-1]["max_wait"] = max(periods[-1]["max_wait"], wait)
+            else:
+                periods.append({"start": ts, "end": ts, "max_wait": wait})
+
+        def _level(wait):
+            if wait > 10: return "red"
+            if wait > 7:  return "orange"
+            return "yellow"
+
+        history = [
+            {
+                "timestamp":    p["start"].strftime("%d/%m %H:%M"),
+                "duration_min": int((p["end"] - p["start"]).total_seconds() / 60) + BUCKET_MIN,
+                "level":        _level(p["max_wait"]),
+            }
+            for p in reversed(periods)
+        ]
+
+        return {"history": history[:50]}
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/forecast")
 def forecast():
     """
@@ -303,18 +354,18 @@ def day_recap():
                 """)
                 total = int((cur.fetchone() or {}).get("total") or 0)
 
-                # Yesterday's total, for the vs-yesterday comparison
-                yesterday_date = (ref_date - timedelta(days=1)) if ref_date else None
-                yesterday_total = None
-                if yesterday_date:
+                # Same day last week, for the vs-last-week comparison
+                last_week_date = (ref_date - timedelta(days=7)) if ref_date else None
+                last_week_total = None
+                if last_week_date:
                     cur.execute("""
                         SELECT COUNT(*) AS total
                         FROM entrance_events
                         WHERE DATE(timestamp) = %s
                           AND camera_id NOT LIKE 'SIM_%%'
                           AND dwell_seconds >= 10
-                    """, (yesterday_date,))
-                    yesterday_total = int((cur.fetchone() or {}).get("total") or 0)
+                    """, (last_week_date,))
+                    last_week_total = int((cur.fetchone() or {}).get("total") or 0)
 
                 cur.execute(f"""
                     SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour, COUNT(*) AS cnt
@@ -410,16 +461,16 @@ def day_recap():
         _demo      = _json.loads(ds_row["demographics_json"])   if ds_row and ds_row["demographics_json"]   else {}
         _hourly    = _json.loads(ds_row["entries_hour_json"])   if ds_row and ds_row["entries_hour_json"]   else []
 
-        vs_yesterday_pct = (
-            round((total - yesterday_total) / yesterday_total * 100)
-            if yesterday_total else None
+        vs_last_week_pct = (
+            round((total - last_week_total) / last_week_total * 100)
+            if last_week_total else None
         )
         peak_pct_of_total = round(peak_count / total * 100) if total else None
 
         return {
             "date":                display_date,
             "total_customers":     total,
-            "vs_yesterday_pct":    vs_yesterday_pct,
+            "vs_last_week_pct":    vs_last_week_pct,
             "avg_wait_min":        avg_wait_min,
             "peak_hour":           peak_hour,
             "peak_hour_end":       peak_end,
