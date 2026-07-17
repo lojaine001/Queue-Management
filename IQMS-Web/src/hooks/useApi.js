@@ -6,6 +6,7 @@ export function useApi(urls, interval = REFRESH_MS) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
 
   const fetchAll = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -17,6 +18,7 @@ export function useApi(urls, interval = REFRESH_MS) {
         )
       );
       setData(results);
+      setLastUpdated(new Date());
     } catch {
       setError('Impossible de joindre le serveur.');
     } finally {
@@ -31,5 +33,5 @@ export function useApi(urls, interval = REFRESH_MS) {
     return () => clearInterval(id);
   }, [fetchAll, interval]);
 
-  return { data, loading, error, refreshing, refresh: () => fetchAll(true) };
+  return { data, loading, error, refreshing, lastUpdated, refresh: () => fetchAll(true) };
 }

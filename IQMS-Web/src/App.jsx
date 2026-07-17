@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { LanguageProvider, useLang } from './context/LanguageContext';
+import { ToastProvider } from './context/ToastContext';
 import Sidebar from './components/Sidebar';
 import TabBar from './components/TabBar';
 import LiveScreen from './screens/LiveScreen';
@@ -48,7 +49,9 @@ function Shell() {
 export default function App() {
   return (
     <LanguageProvider>
-      <Shell />
+      <ToastProvider>
+        <Shell />
+      </ToastProvider>
     </LanguageProvider>
   );
 }

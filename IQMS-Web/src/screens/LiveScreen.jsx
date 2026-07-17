@@ -2,6 +2,8 @@ import { useApi } from '../hooks/useApi';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
 import CameraPlaceholder from '../components/CameraPlaceholder';
+import UpdatedAgo from '../components/UpdatedAgo';
+import Skeleton from '../components/Skeleton';
 
 const SNAP_INTERVAL = 30000;
 
@@ -48,7 +50,7 @@ function LaneCard({ lane, t }) {
 
 export default function LiveScreen() {
   const { t } = useLang();
-  const { data, loading, error } = useApi([
+  const { data, loading, error, lastUpdated } = useApi([
     `${API_URL}/live-lanes`,
     `${API_URL}/alerts`,
   ]);
@@ -72,18 +74,23 @@ export default function LiveScreen() {
         <div>
           <div className="section-header">
             <span className="section-title">{t.liveQueueStatus}</span>
-            <div style={s.liveBadge}>
-              <span style={s.liveDot} />
-              <span style={{ fontSize: 11, fontWeight: 700, color: '#3fb950', letterSpacing: 0.8 }}>{t.live}</span>
+            <div style={s.liveBadgeRow}>
+              <div style={s.liveBadge}>
+                <span style={s.liveDot} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#3fb950', letterSpacing: 0.8 }}>{t.live}</span>
+              </div>
+              <UpdatedAgo lastUpdated={lastUpdated} />
             </div>
           </div>
-          {loading && <div style={s.hint}>{t.loading}</div>}
           {error && <div style={s.errorHint}>{error}</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {lanes.map(lane => <LaneCard key={lane.lane_id} lane={lane} t={t} />)}
-            {lanes.length === 0 && !loading && (
-              <div style={s.hint}>—</div>
-            )}
+            {loading
+              ? [0, 1, 2, 3].map(i => <Skeleton key={i} height={64} radius={16} />)
+              : <>
+                  {lanes.map(lane => <LaneCard key={lane.lane_id} lane={lane} t={t} />)}
+                  {lanes.length === 0 && <div style={s.hint}>—</div>}
+                </>
+            }
           </div>
         </div>
 
@@ -126,6 +133,7 @@ export default function LiveScreen() {
 }
 
 const s = {
+  liveBadgeRow: { display: 'flex', alignItems: 'center', gap: 12 },
   liveBadge: { display: 'flex', alignItems: 'center', gap: 5 },
   liveDot: {
     width: 6, height: 6, borderRadius: '50%',

@@ -1,6 +1,9 @@
 import { useApi } from '../hooks/useApi';
 import { API_URL, HEADERS } from '../config';
 import { useLang } from '../context/LanguageContext';
+import { useToast } from '../context/ToastContext';
+import UpdatedAgo from '../components/UpdatedAgo';
+import Skeleton from '../components/Skeleton';
 
 const STYLE = {
   red:    { bg: '#2d1a1a', border: '#f85149', color: '#f85149' },
@@ -10,7 +13,8 @@ const STYLE = {
 
 export default function AlertsScreen() {
   const { t } = useLang();
-  const { data, loading, error, refresh } = useApi([`${API_URL}/alerts`]);
+  const showToast = useToast();
+  const { data, loading, error, refresh, lastUpdated } = useApi([`${API_URL}/alerts`]);
   const [alert] = data;
 
   const level = alert?.level;
@@ -24,19 +28,26 @@ export default function AlertsScreen() {
         headers: { ...HEADERS, 'Content-Type': 'application/json' },
         body: JSON.stringify({ response }),
       });
+      showToast(t.responseRecorded);
       refresh();
-    } catch { /* ignore */ }
+    } catch {
+      showToast(t.serverError, 'error');
+    }
   }
 
   return (
     <div className="screen-page">
       <div className="section-header">
         <span className="section-title">{t.alerts}</span>
-        {level && <span style={s.countBadge}>{t.active(1)}</span>}
+        <div style={s.headerRight}>
+          {level && <span style={s.countBadge}>{t.active(1)}</span>}
+          <UpdatedAgo lastUpdated={lastUpdated} />
+        </div>
       </div>
 
-      {loading && <div style={s.hint}>{t.loading}</div>}
       {error && <div style={s.errorHint}>{error}</div>}
+
+      {loading && <Skeleton height={140} radius={16} />}
 
       {!loading && !level && (
         <div style={s.emptyWrap}>
@@ -78,6 +89,7 @@ export default function AlertsScreen() {
 }
 
 const s = {
+  headerRight: { display: 'flex', alignItems: 'center', gap: 10 },
   countBadge: {
     fontSize: 11, fontWeight: 700, color: '#f85149',
     background: '#2d1a1a', border: '1px solid #f85149', borderRadius: 10, padding: '2px 8px',

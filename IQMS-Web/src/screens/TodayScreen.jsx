@@ -6,6 +6,8 @@ import { useApi } from '../hooks/useApi';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
+import UpdatedAgo from '../components/UpdatedAgo';
+import Skeleton from '../components/Skeleton';
 
 function StatCard({ value, label, sub, subColor, valueColor, children }) {
   return (
@@ -46,7 +48,7 @@ function ChartTooltip({ active, payload, label }) {
 export default function TodayScreen() {
   const { t } = useLang();
   const isMobile = useIsMobile();
-  const { data, loading, error } = useApi([`${API_URL}/day-recap`]);
+  const { data, loading, error, lastUpdated } = useApi([`${API_URL}/day-recap`]);
   const [recap] = data;
 
   const totalCustomers = recap?.total_customers;
@@ -70,125 +72,143 @@ export default function TodayScreen() {
 
   return (
     <div className="screen-page">
-      {loading && <div style={s.hint}>{t.loading}</div>}
-      {error && <div style={s.errorHint}>{error}</div>}
-
-      {/* Stat cards */}
-      <div className="stat-grid">
-        <StatCard
-          label={t.totalClients}
-          value={totalCustomers != null ? totalCustomers.toLocaleString() : null}
-          valueColor="#e6edf3"
-          sub={vsYesterdayPct != null ? t.vsYesterday(vsYesterdayPct) : undefined}
-          subColor={vsYesterdayPct != null ? (vsYesterdayPct >= 0 ? '#3fb950' : '#f85149') : undefined}
-        />
-        <StatCard
-          label={t.peakHour}
-          value={peakHour}
-          valueColor="#58a6ff"
-          sub={peakCount != null
-            ? `${peakCount} ${t.clients}${peakPctOfTotal != null ? ` · ${t.pctOfTotal(peakPctOfTotal)}` : ''}`
-            : undefined}
-        />
-        <div style={s.statCard}>
-          <div style={s.statLabel}>{t.equipment}</div>
-          {paniers != null && (
-            <div style={s.equipRow}>
-              <span style={s.equipIcon}>🧺</span>
-              <div>
-                <div style={s.equipCount}>{paniers}</div>
-                <div style={s.equipName}>{t.baskets}</div>
-              </div>
-            </div>
-          )}
-          {chariots != null && (
-            <div style={s.equipRow}>
-              <span style={s.equipIcon}>🛒</span>
-              <div>
-                <div style={s.equipCount}>{chariots}</div>
-                <div style={s.equipName}>{t.carts}</div>
-              </div>
-            </div>
-          )}
-          {paniers == null && chariots == null && (
-            <div style={s.statDash}>{t.noData}</div>
-          )}
-        </div>
+      <div style={s.topRow}>
+        <UpdatedAgo lastUpdated={lastUpdated} />
       </div>
 
-      {/* Chart + summary — side by side on desktop */}
-      <div className="today-bottom">
-        {/* Hourly chart */}
-        <div>
-          <div className="section-header">
-            <span className="section-title">{t.entriesByHour}</span>
+      {error && <div style={s.errorHint}>{error}</div>}
+
+      {loading ? (
+        <>
+          <div className="stat-grid">
+            {[0, 1, 2].map(i => <Skeleton key={i} height={90} radius={16} />)}
           </div>
-          <div style={s.chartCard}>
-            {hourlyData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={190}>
-                <ComposedChart data={hourlyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                  <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
-                  <YAxis
-                    domain={[0, 'dataMax']}
-                    allowDecimals={false}
-                    tickCount={6}
-                    tick={{ fill: '#8b949e', fontSize: 10 }}
-                    tickLine={false} axisLine={false}
-                  />
-                  <Tooltip content={<ChartTooltip />} />
-                  <Bar dataKey="count" radius={[3, 3, 0, 0]} name={t.entriesByHour} maxBarSize={isMobile ? 40 : undefined}>
-                    {hourlyData.map((h, i) => (
-                      <Cell key={i} fill={h.isPeak ? '#f85149' : '#3fb950'} />
-                    ))}
-                  </Bar>
-                </ComposedChart>
-              </ResponsiveContainer>
-            ) : (
-              <div style={{ textAlign: 'center', padding: '40px 0', color: '#8b949e', fontSize: 13 }}>
-                {t.noHourlyData}
-              </div>
-            )}
-            <div style={s.legendRow}>
-              <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#3fb950' }} /> {t.today}</span>
-              {hourlyData.some(h => h.isPeak) && (
-                <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#f85149' }} /> {t.peakHour}</span>
+          <div className="today-bottom" style={{ marginTop: 20 }}>
+            <Skeleton height={230} radius={16} />
+            <Skeleton height={150} radius={16} />
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Stat cards */}
+          <div className="stat-grid">
+            <StatCard
+              label={t.totalClients}
+              value={totalCustomers != null ? totalCustomers.toLocaleString() : null}
+              valueColor="#e6edf3"
+              sub={vsYesterdayPct != null ? t.vsYesterday(vsYesterdayPct) : undefined}
+              subColor={vsYesterdayPct != null ? (vsYesterdayPct >= 0 ? '#3fb950' : '#f85149') : undefined}
+            />
+            <StatCard
+              label={t.peakHour}
+              value={peakHour}
+              valueColor="#58a6ff"
+              sub={peakCount != null
+                ? `${peakCount} ${t.clients}${peakPctOfTotal != null ? ` · ${t.pctOfTotal(peakPctOfTotal)}` : ''}`
+                : undefined}
+            />
+            <div style={s.statCard}>
+              <div style={s.statLabel}>{t.equipment}</div>
+              {paniers != null && (
+                <div style={s.equipRow}>
+                  <span style={s.equipIcon}>🧺</span>
+                  <div>
+                    <div style={s.equipCount}>{paniers}</div>
+                    <div style={s.equipName}>{t.baskets}</div>
+                  </div>
+                </div>
+              )}
+              {chariots != null && (
+                <div style={s.equipRow}>
+                  <span style={s.equipIcon}>🛒</span>
+                  <div>
+                    <div style={s.equipCount}>{chariots}</div>
+                    <div style={s.equipName}>{t.carts}</div>
+                  </div>
+                </div>
+              )}
+              {paniers == null && chariots == null && (
+                <div style={s.statDash}>{t.noData}</div>
               )}
             </div>
           </div>
-        </div>
 
-        {/* Daily summary */}
-        <div>
-          <div className="section-header">
-            <span className="section-title">{t.dailySummary}</span>
+          {/* Chart + summary — side by side on desktop */}
+          <div className="today-bottom">
+            {/* Hourly chart */}
+            <div>
+              <div className="section-header">
+                <span className="section-title">{t.entriesByHour}</span>
+              </div>
+              <div style={s.chartCard}>
+                {hourlyData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={190}>
+                    <ComposedChart data={hourlyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                      <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
+                      <YAxis
+                        domain={[0, 'dataMax']}
+                        allowDecimals={false}
+                        tickCount={6}
+                        tick={{ fill: '#8b949e', fontSize: 10 }}
+                        tickLine={false} axisLine={false}
+                      />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Bar dataKey="count" radius={[3, 3, 0, 0]} name={t.entriesByHour} maxBarSize={isMobile ? 40 : undefined}>
+                        {hourlyData.map((h, i) => (
+                          <Cell key={i} fill={h.isPeak ? '#f85149' : '#3fb950'} />
+                        ))}
+                      </Bar>
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div style={{ textAlign: 'center', padding: '40px 0', color: '#8b949e', fontSize: 13 }}>
+                    {t.noHourlyData}
+                  </div>
+                )}
+                <div style={s.legendRow}>
+                  <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#3fb950' }} /> {t.today}</span>
+                  {hourlyData.some(h => h.isPeak) && (
+                    <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#f85149' }} /> {t.peakHour}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Daily summary */}
+            <div>
+              <div className="section-header">
+                <span className="section-title">{t.dailySummary}</span>
+              </div>
+              <div style={s.summaryCard}>
+                <SummaryRow
+                  label={t.avgWaitTime}
+                  value={avgWait != null ? `${Math.round(avgWait)} min` : null}
+                  valueColor="#3fb950"
+                />
+                <SummaryRow
+                  label={t.lanesUsed}
+                  value={lanesToday != null
+                    ? `${lanesToday}${busiestLane ? ` (${t.busiestLane(busiestLane)})` : ''}`
+                    : null}
+                  valueColor="#58a6ff"
+                />
+                <SummaryRow
+                  label={t.alertTime}
+                  value={alertMinutes != null ? `${alertMinutes} min` : null}
+                  valueColor={alertMinutes > 0 ? '#f85149' : '#3fb950'}
+                />
+              </div>
+            </div>
           </div>
-          <div style={s.summaryCard}>
-            <SummaryRow
-              label={t.avgWaitTime}
-              value={avgWait != null ? `${Math.round(avgWait)} min` : null}
-              valueColor="#3fb950"
-            />
-            <SummaryRow
-              label={t.lanesUsed}
-              value={lanesToday != null
-                ? `${lanesToday}${busiestLane ? ` (${t.busiestLane(busiestLane)})` : ''}`
-                : null}
-              valueColor="#58a6ff"
-            />
-            <SummaryRow
-              label={t.alertTime}
-              value={alertMinutes != null ? `${alertMinutes} min` : null}
-              valueColor={alertMinutes > 0 ? '#f85149' : '#3fb950'}
-            />
-          </div>
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 }
 
 const s = {
+  topRow: { display: 'flex', justifyContent: 'flex-end', marginBottom: 4 },
   statCard: {
     background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, padding: '18px 16px',
   },

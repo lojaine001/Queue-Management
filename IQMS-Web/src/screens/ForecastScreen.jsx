@@ -5,6 +5,9 @@ import {
 import { useApi } from '../hooks/useApi';
 import { API_URL, HEADERS } from '../config';
 import { useLang } from '../context/LanguageContext';
+import { useToast } from '../context/ToastContext';
+import UpdatedAgo from '../components/UpdatedAgo';
+import Skeleton from '../components/Skeleton';
 
 const SCENARIO_COLOR = { red: '#f85149', orange: '#db6d28', yellow: '#d29922', green: '#3fb950' };
 
@@ -24,8 +27,9 @@ function CustomTooltip({ active, payload, label, t }) {
 
 export default function ForecastScreen() {
   const { t } = useLang();
+  const showToast = useToast();
 
-  const { data, loading, error, refresh } = useApi([
+  const { data, loading, error, refresh, lastUpdated } = useApi([
     `${API_URL}/forecast`,
     `${API_URL}/forecast-chart`,
   ]);
@@ -71,9 +75,10 @@ export default function ForecastScreen() {
         headers: { ...HEADERS, 'Content-Type': 'application/json' },
         body: JSON.stringify({ lanes: n }),
       });
+      showToast(n > currentLanes ? t.laneOpenedToast(n) : t.laneClosedToast(currentLanes));
       refresh();
     } catch {
-      // fall through — next refresh cycle will show the real state either way
+      showToast(t.serverError, 'error');
     }
   };
 
@@ -85,106 +90,121 @@ export default function ForecastScreen() {
           <span style={s.clockIcon}>⏱</span>
           <span className="section-title">{t.forecast15min}</span>
         </div>
-        <span style={s.sub}>{t.recommendation}</span>
+        <div style={s.headerRight}>
+          <span style={s.sub}>{t.recommendation}</span>
+          <UpdatedAgo lastUpdated={lastUpdated} />
+        </div>
       </div>
 
-      {loading && <div style={s.hint}>{t.loading}</div>}
       {error && <div style={s.errorHint}>{error}</div>}
 
-      {recText && (
-        <div style={{ ...s.recCard, background: recColor + '11', borderColor: recColor + '55' }}>
-          <span style={{ ...s.recArrow, color: recColor }}>{cw > 5 ? '↑' : '✓'}</span>
-          <span style={{ ...s.recText, color: recColor }}>{recText}</span>
-        </div>
-      )}
+      {loading ? (
+        <>
+          <Skeleton height={64} radius={16} style={{ marginBottom: 14 }} />
+          <Skeleton width={180} height={14} style={{ marginBottom: 24 }} />
+          <Skeleton height={200} radius={16} style={{ marginBottom: 24 }} />
+          <div style={s.scenarioRow}>
+            {[0, 1, 2, 3].map(i => <Skeleton key={i} height={90} radius={16} />)}
+          </div>
+        </>
+      ) : (
+        <>
+          {recText && (
+            <div style={{ ...s.recCard, background: recColor + '11', borderColor: recColor + '55' }}>
+              <span style={{ ...s.recArrow, color: recColor }}>{cw > 5 ? '↑' : '✓'}</span>
+              <span style={{ ...s.recText, color: recColor }}>{recText}</span>
+            </div>
+          )}
 
-      {waitNow != null && (
-        <div style={s.waitRow}>
-          <span style={s.waitDot}>⏱</span>
-          <span style={s.waitText}>
-            {t.estimatedWait} :{' '}
-            <strong style={s.waitNumber}>{Math.round(waitNow)} min</strong>
-          </span>
-        </div>
-      )}
-
-      {/* Chart */}
-      <div className="section-header">
-        <span className="section-title">{t.forecastChart}</span>
-        <span style={s.sub}>{t.next60min}</span>
-      </div>
-
-      <div style={s.chartCard}>
-        <ResponsiveContainer width="100%" height={200}>
-          <ComposedChart data={points} margin={{ top: 8, right: 16, left: -16, bottom: 8 }}>
-            <defs>
-              <linearGradient id="waitFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#db6d28" stopOpacity={0.35} />
-                <stop offset="100%" stopColor="#db6d28" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-            <XAxis
-              dataKey="t"
-              tick={{ fill: '#8b949e', fontSize: 10 }}
-              tickLine={false} axisLine={false}
-              minTickGap={30}
-            />
-            <YAxis
-              domain={[0, 32]}
-              ticks={[0, 8, 16, 24, 32]}
-              tick={{ fill: '#8b949e', fontSize: 10 }}
-              tickLine={false} axisLine={false}
-              unit=" min"
-            />
-            <Tooltip content={<CustomTooltip t={t} />} />
-            <Area type="natural" dataKey="wait" stroke="#db6d28" strokeWidth={2.5} fill="url(#waitFill)" dot={false} />
-            <Line type="natural" dataKey="arrivals" stroke="#58a6ff" strokeWidth={2} dot={false} />
-          </ComposedChart>
-        </ResponsiveContainer>
-        <div style={s.legendRow}>
-          <span style={s.legendItem}>
-            <span style={{ ...s.legendDot, background: '#db6d28' }} /> {t.waitLegend}
-          </span>
-          <span style={s.legendItem}>
-            <span style={{ ...s.legendDot, background: '#58a6ff' }} /> {t.arrivalsLegend}
-          </span>
-        </div>
-      </div>
-
-      {/* Lanes — tap to open/close */}
-      <div className="section-header">
-        <span className="section-title">{t.laneScenarios}</span>
-        <span style={s.sub}>{t.simulateScenarios}</span>
-      </div>
-
-      <div style={s.scenarioRow}>
-        {scenarios.map(sc => {
-          const isOpen = sc.lanes <= currentLanes;
-          const color = SCENARIO_COLOR[sc.color] || '#8b949e';
-          return (
-            <button
-              key={sc.lanes}
-              onClick={() => setLanes(sc.lanes)}
-              style={{
-                ...s.scenBtn,
-                background: isOpen ? '#1a2e22' : '#161b22',
-                border: `1px solid ${isOpen ? '#3fb950' : '#30363d'}`,
-                color: isOpen ? '#e6edf3' : '#8b949e',
-              }}
-            >
-              {isOpen && <span style={s.currentDot} />}
-              <span style={s.scenLabel}>{t.laneLabel(sc.lanes)}</span>
-              <span style={{ fontSize: 13, fontWeight: 700, color, fontFamily: 'var(--font-mono)' }}>
-                {Math.round(sc.est_wait_min)} min
+          {waitNow != null && (
+            <div style={s.waitRow}>
+              <span style={s.waitDot}>⏱</span>
+              <span style={s.waitText}>
+                {t.estimatedWait} :{' '}
+                <strong style={s.waitNumber}>{Math.round(waitNow)} min</strong>
               </span>
-              <span style={{ ...s.currentBadge, color: isOpen ? '#3fb950' : '#484f58' }}>
-                {isOpen ? t.openBadge : t.closedBadge}
+            </div>
+          )}
+
+          {/* Chart */}
+          <div className="section-header">
+            <span className="section-title">{t.forecastChart}</span>
+            <span style={s.sub}>{t.next60min}</span>
+          </div>
+
+          <div style={s.chartCard}>
+            <ResponsiveContainer width="100%" height={200}>
+              <ComposedChart data={points} margin={{ top: 8, right: 16, left: -16, bottom: 8 }}>
+                <defs>
+                  <linearGradient id="waitFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#db6d28" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="#db6d28" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                <XAxis
+                  dataKey="t"
+                  tick={{ fill: '#8b949e', fontSize: 10 }}
+                  tickLine={false} axisLine={false}
+                  minTickGap={30}
+                />
+                <YAxis
+                  domain={[0, 32]}
+                  ticks={[0, 8, 16, 24, 32]}
+                  tick={{ fill: '#8b949e', fontSize: 10 }}
+                  tickLine={false} axisLine={false}
+                  unit=" min"
+                />
+                <Tooltip content={<CustomTooltip t={t} />} />
+                <Area type="natural" dataKey="wait" stroke="#db6d28" strokeWidth={2.5} fill="url(#waitFill)" dot={false} />
+                <Line type="natural" dataKey="arrivals" stroke="#58a6ff" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+            <div style={s.legendRow}>
+              <span style={s.legendItem}>
+                <span style={{ ...s.legendDot, background: '#db6d28' }} /> {t.waitLegend}
               </span>
-            </button>
-          );
-        })}
-      </div>
+              <span style={s.legendItem}>
+                <span style={{ ...s.legendDot, background: '#58a6ff' }} /> {t.arrivalsLegend}
+              </span>
+            </div>
+          </div>
+
+          {/* Lanes — tap to open/close */}
+          <div className="section-header">
+            <span className="section-title">{t.laneScenarios}</span>
+            <span style={s.sub}>{t.simulateScenarios}</span>
+          </div>
+
+          <div style={s.scenarioRow}>
+            {scenarios.map(sc => {
+              const isOpen = sc.lanes <= currentLanes;
+              const color = SCENARIO_COLOR[sc.color] || '#8b949e';
+              return (
+                <button
+                  key={sc.lanes}
+                  onClick={() => setLanes(sc.lanes)}
+                  style={{
+                    ...s.scenBtn,
+                    background: isOpen ? '#1a2e22' : '#161b22',
+                    border: `1px solid ${isOpen ? '#3fb950' : '#30363d'}`,
+                    color: isOpen ? '#e6edf3' : '#8b949e',
+                  }}
+                >
+                  {isOpen && <span style={s.currentDot} />}
+                  <span style={s.scenLabel}>{t.laneLabel(sc.lanes)}</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color, fontFamily: 'var(--font-mono)' }}>
+                    {Math.round(sc.est_wait_min)} min
+                  </span>
+                  <span style={{ ...s.currentBadge, color: isOpen ? '#3fb950' : '#484f58' }}>
+                    {isOpen ? t.openBadge : t.closedBadge}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -192,6 +212,7 @@ export default function ForecastScreen() {
 const s = {
   forecastTitleRow: { display: 'flex', alignItems: 'center', gap: 6 },
   clockIcon: { fontSize: 13 },
+  headerRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 },
   sub: { fontSize: 11, color: '#8b95a8' },
   recCard: {
     display: 'flex', alignItems: 'center', gap: 14,
