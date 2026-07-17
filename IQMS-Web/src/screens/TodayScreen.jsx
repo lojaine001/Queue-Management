@@ -3,6 +3,7 @@ import {
   Tooltip, ResponsiveContainer,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
+import { useIsMobile } from '../hooks/useIsMobile';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
 
@@ -44,6 +45,7 @@ function ChartTooltip({ active, payload, label }) {
 
 export default function TodayScreen() {
   const { t } = useLang();
+  const isMobile = useIsMobile();
   const { data, loading, error } = useApi([`${API_URL}/day-recap`]);
   const [recap] = data;
 
@@ -82,7 +84,7 @@ export default function TodayScreen() {
           valueColor="#58a6ff"
           sub={peakCount != null ? `${peakCount} ${t.clients}` : undefined}
         />
-        <div style={{ ...s.statCard, gridColumn: 1 }}>
+        <div className="today-equip-card" style={{ ...s.statCard, gridColumn: 1 }}>
           <div style={s.statLabel}>{t.equipment}</div>
           {paniers != null && (
             <div style={s.equipRow}>
@@ -129,7 +131,7 @@ export default function TodayScreen() {
                     tickLine={false} axisLine={false}
                   />
                   <Tooltip content={<ChartTooltip />} />
-                  <Bar dataKey="count" radius={[3, 3, 0, 0]} name={t.entriesByHour}>
+                  <Bar dataKey="count" radius={[3, 3, 0, 0]} name={t.entriesByHour} maxBarSize={isMobile ? 40 : undefined}>
                     {hourlyData.map((h, i) => (
                       <Cell key={i} fill={h.isPeak ? '#f85149' : '#3fb950'} />
                     ))}

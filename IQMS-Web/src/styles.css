@@ -177,6 +177,11 @@ button { cursor: pointer; font-family: inherit; }
   .today-bottom > * + * { margin-top: 14px; }
   .live-grid { display: block; }
   .live-grid > * + * { margin-top: 14px; }
+
+  /* Today stat cards: 2 columns instead of 3, so the equipment card
+     (forced to its own row) doesn't leave dangling empty cells. */
+  .stat-grid { grid-template-columns: 1fr 1fr; }
+  .today-equip-card { grid-column: 1 / -1 !important; }
 }
 
 /* ── Camera grid ──────────────────────────────────────────── */
