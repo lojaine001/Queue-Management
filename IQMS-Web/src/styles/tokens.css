@@ -33,4 +33,9 @@
   /* Geometry */
   --radius:      4px;
   --radius-page: 6px;
+
+  /* Content width — capped for line-length on medium screens, but wide
+     enough that a large instrument-panel monitor doesn't sit mostly
+     empty next to a full-bleed header. */
+  --content-max: 1600px;
 }

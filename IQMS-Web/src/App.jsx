@@ -34,36 +34,40 @@ function Shell() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div style={s.brandRow}>
-          <span style={s.logo}>IQMS</span>
-          <span style={s.storeName}>{t.storeName}</span>
-        </div>
-        <div style={s.headerRight}>
-          <div style={s.liveIndicator}>
-            <span style={s.liveDot} />
-            <span style={s.liveLabel}>{t.liveLabel}</span>
+        <div className="app-header-inner">
+          <div style={s.brandRow}>
+            <span style={s.logo}>IQMS</span>
+            <span style={s.storeName}>{t.storeName}</span>
           </div>
-          <span className="mono" style={s.clock}>{clock}</span>
-          <button style={s.langToggle} onClick={() => setLang(lang === 'fr' ? 'en' : 'fr')}>
-            {lang === 'fr' ? 'EN' : 'FR'}
-          </button>
+          <div style={s.headerRight}>
+            <div style={s.liveIndicator}>
+              <span style={s.liveDot} />
+              <span style={s.liveLabel}>{t.liveLabel}</span>
+            </div>
+            <span className="mono" style={s.clock}>{clock}</span>
+            <button style={s.langToggle} onClick={() => setLang(lang === 'fr' ? 'en' : 'fr')}>
+              {lang === 'fr' ? 'EN' : 'FR'}
+            </button>
+          </div>
         </div>
       </header>
 
       <nav className="app-tabs">
-        {TABS.map(id => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            style={{
-              ...s.tabBtn,
-              color: tab === id ? 'var(--text)' : 'var(--text-3)',
-              borderBottomColor: tab === id ? 'var(--green)' : 'transparent',
-            }}
-          >
-            {t.tabs[id]}
-          </button>
-        ))}
+        <div className="app-tabs-inner">
+          {TABS.map(id => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              style={{
+                ...s.tabBtn,
+                color: tab === id ? 'var(--text)' : 'var(--text-3)',
+                borderBottomColor: tab === id ? 'var(--green)' : 'transparent',
+              }}
+            >
+              {t.tabs[id]}
+            </button>
+          ))}
+        </div>
       </nav>
 
       <div className="app-main">

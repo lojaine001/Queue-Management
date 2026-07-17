@@ -63,7 +63,7 @@ button { cursor: pointer; font-family: inherit; background: none; border: none; 
 @media (min-width: 900px) {
   .screen-page {
     padding: var(--sp-6) var(--sp-6) 64px;
-    max-width: 1120px;
+    max-width: var(--content-max);
     margin: 0 auto;
   }
 }
@@ -104,29 +104,33 @@ button { cursor: pointer; font-family: inherit; background: none; border: none; 
   .kpi-strip { grid-template-columns: repeat(4, 1fr); }
 }
 
-/* ── Header + tabs: one shared bar for both breakpoints ──────── */
-.app-header {
+/* ── Header + tabs: full-bleed bars, inner content capped to match
+   .screen-page so the whole frame reads as one consistent width
+   instead of a narrow column floating inside a wider bar. ──────── */
+.app-header, .app-tabs {
+  border-bottom: 1px solid var(--hairline);
+}
+
+.app-header-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--sp-3) var(--sp-4);
-  border-bottom: 1px solid var(--hairline);
+  max-width: var(--content-max);
+  margin: 0 auto;
 }
 
-@media (min-width: 900px) {
-  .app-header { padding: var(--sp-3) var(--sp-6); }
-}
-
-.app-tabs {
+.app-tabs-inner {
   display: flex;
   gap: var(--sp-6);
   padding: 0 var(--sp-4);
-  border-bottom: 1px solid var(--hairline);
+  max-width: var(--content-max);
+  margin: 0 auto;
   overflow-x: auto;
 }
 
 @media (min-width: 900px) {
-  .app-tabs { padding: 0 var(--sp-6); }
+  .app-header-inner, .app-tabs-inner { padding-left: var(--sp-6); padding-right: var(--sp-6); }
 }
 
 /* ── Ruled table (departure-board style) ─────────────────────── */
