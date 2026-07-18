@@ -120,6 +120,8 @@ export default function LiveScreen() {
   const [threshold, setThreshold] = useState(
     () => Number(localStorage.getItem('iqms_alert_threshold')) || 8
   );
+  const [openCams, setOpenCams] = useState([]);
+  const toggleCam = id => setOpenCams(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   const wasOverRef = useRef(false);
 
   useEffect(() => {
@@ -206,11 +208,43 @@ export default function LiveScreen() {
 
       <div className="section-header">
         <span className="section-title">{t.liveCameras}</span>
+        <div style={s.camPills}>
+          <button
+            onClick={() => toggleCam('entrance')}
+            style={{ ...s.camPill, ...(openCams.includes('entrance') ? s.camPillActive : {}) }}
+          >
+            <span style={s.camPillIcon}>▣</span> Cam 1 – Entrée
+          </button>
+          <button
+            onClick={() => toggleCam('checkout')}
+            style={{ ...s.camPill, ...(openCams.includes('checkout') ? s.camPillActive : {}) }}
+          >
+            <span style={s.camPillIcon}>▣</span> Cam 2 – Caisses
+          </button>
+        </div>
       </div>
-      <div className="camera-grid">
-        <CameraPlaceholder label="CAM 1 – ENTRÉE"  dataUrl={entranceSnap?.image} />
-        <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
-      </div>
+
+      {openCams.length === 0 ? (
+        <div style={s.camEmpty}>
+          <span style={s.camEmptyIcon}>▣</span>
+          <span style={s.camEmptyText}>{t.selectCameraHint}</span>
+        </div>
+      ) : (
+        <div className="camera-grid">
+          {openCams.includes('entrance') && (
+            <div style={s.camWrap}>
+              <button style={s.camClose} onClick={() => toggleCam('entrance')}>×</button>
+              <CameraPlaceholder label="CAM 1 – ENTRÉE" dataUrl={entranceSnap?.image} />
+            </div>
+          )}
+          {openCams.includes('checkout') && (
+            <div style={s.camWrap}>
+              <button style={s.camClose} onClick={() => toggleCam('checkout')}>×</button>
+              <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -278,6 +312,35 @@ const s = {
   markerRed: {
     borderTop: '7px solid transparent', borderBottom: '7px solid transparent',
     borderLeft: '11px solid #f85149',
+  },
+
+  camPills: { display: 'flex', gap: 10 },
+  camPill: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    background: 'transparent', border: '1px solid #30363d', borderRadius: 999,
+    padding: '8px 16px', color: '#8b949e', fontSize: 13, fontWeight: 500,
+    transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+  },
+  camPillActive: {
+    background: 'rgba(88, 166, 255, 0.12)', border: '1px solid #58a6ff', color: '#58a6ff',
+  },
+  camPillIcon: { fontSize: 12 },
+
+  camEmpty: {
+    border: '1px dashed #30363d', borderRadius: 16,
+    padding: '48px 20px', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', gap: 10,
+  },
+  camEmptyIcon: { fontSize: 22, color: '#484f58' },
+  camEmptyText: { fontSize: 14, color: '#8b949e' },
+
+  camWrap: { position: 'relative', flex: 1, minWidth: 0 },
+  camClose: {
+    position: 'absolute', top: 8, right: 8, zIndex: 5,
+    width: 24, height: 24, borderRadius: '50%',
+    background: 'rgba(0,0,0,0.5)', border: '1px solid var(--card-border)',
+    color: '#e6edf3', fontSize: 14, lineHeight: '22px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
   },
 
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
