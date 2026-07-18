@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  ComposedChart, Bar, Cell, Line, XAxis, YAxis, CartesianGrid,
+  ComposedChart, Bar, Cell, Line, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, PieChart, Pie,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
@@ -54,12 +54,11 @@ function WaitTooltip({ active, payload, label, t }) {
 export default function TodayScreen() {
   const { t } = useLang();
   const [selectedDate, setSelectedDate] = useState(() => todayStr());
-  const [demoHourOpen, setDemoHourOpen] = useState(false);
 
   const { data, loading, error, lastUpdated } = useApi([`${API_URL}/day-recap?date=${selectedDate}`]);
   const [recap] = data;
 
-  const { data: waitData, loading: waitLoading } = useApi([`${API_URL}/day-wait-chart?date=${selectedDate}`]);
+  const { data: waitData, loading: waitLoading } = useApi([`${API_URL}/forecast-chart`]);
   const [dayWait] = waitData;
 
   const totalCustomers = recap?.total_customers;
@@ -165,10 +164,10 @@ export default function TodayScreen() {
         </div>
       </div>
 
-      {/* Temps d'attente — full-day history, replaces Résumé journalier */}
+      {/* Temps d'attente — same live forecast chart as Prévision */}
       <div className="section-header">
         <span className="section-title">{t.waitChartTitle}</span>
-        <span style={s.sub}>{t.waitChartSubtitle}</span>
+        <span style={s.sub}>{t.next60min}</span>
       </div>
       <div style={s.chartCard}>
         {waitLoading ? (
@@ -176,12 +175,18 @@ export default function TodayScreen() {
         ) : waitPoints.length > 0 ? (
           <ResponsiveContainer width="100%" height={220}>
             <ComposedChart data={waitPoints} margin={{ top: 8, right: 16, left: -16, bottom: 8 }}>
+              <defs>
+                <linearGradient id="statsWaitFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#db6d28" stopOpacity={0.35} />
+                  <stop offset="100%" stopColor="#db6d28" stopOpacity={0} />
+                </linearGradient>
+              </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-              <XAxis dataKey="t" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={40} />
-              <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit=" min" />
+              <XAxis dataKey="t" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={30} />
+              <YAxis domain={[0, 32]} ticks={[0, 8, 16, 24, 32]} tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit=" min" />
               <Tooltip content={<WaitTooltip t={t} />} />
-              <Line type="monotone" dataKey="wait" stroke="#db6d28" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="arrivals" stroke="#58a6ff" strokeWidth={2} dot={false} />
+              <Area type="natural" dataKey="wait" stroke="#db6d28" strokeWidth={2.5} fill="url(#statsWaitFill)" dot={false} />
+              <Line type="natural" dataKey="arrivals" stroke="#58a6ff" strokeWidth={2} dot={false} />
             </ComposedChart>
           </ResponsiveContainer>
         ) : (
@@ -246,14 +251,6 @@ export default function TodayScreen() {
           </div>
         </div>
       )}
-
-      <button onClick={() => setDemoHourOpen(o => !o)} style={s.accordionHeader}>
-        <span>{t.demographicsByHourLabel}</span>
-        <span style={{ transition: 'transform 0.15s', transform: demoHourOpen ? 'rotate(180deg)' : 'none' }}>▾</span>
-      </button>
-      {demoHourOpen && (
-        <div style={s.accordionBody}>{t.demographicsByHourPlaceholder}</div>
-      )}
     </div>
   );
 }
@@ -296,17 +293,6 @@ const s = {
   },
   donutCenterValue: { fontSize: 26, fontWeight: 700, color: '#e6edf3', fontFamily: 'var(--font-mono)' },
   donutCenterLabel: { fontSize: 11, color: '#8b949e', marginTop: 2 },
-
-  accordionHeader: {
-    width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 12,
-    padding: '14px 18px', marginTop: 14, color: '#e6edf3', fontSize: 13, fontWeight: 500,
-  },
-  accordionBody: {
-    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderTop: 'none',
-    borderRadius: '0 0 12px 12px', padding: '16px 18px', marginTop: -14,
-    color: '#8b949e', fontSize: 13,
-  },
 
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };
