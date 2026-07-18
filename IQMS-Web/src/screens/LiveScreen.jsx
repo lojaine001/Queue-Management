@@ -12,10 +12,10 @@ const GAUGE_MAX_MIN = 12; // top of the gauge — matches the 9-12+ top zone
 
 // Count-driven lane color: 0 = idle/closed, 1 = green, 2-3 = orange, 4+ = red
 function countColor(count) {
-  if (!count) return { color: '#484f58', bg: '#21262d' };
-  if (count === 1) return { color: '#3fb950', bg: '#1a2e22' };
-  if (count <= 3) return { color: '#db6d28', bg: '#2d2218' };
-  return { color: '#f85149', bg: '#2d1a1a' };
+  if (!count) return { color: '#484f58', bg: '#21262d', borderWidth: 4 };
+  if (count === 1) return { color: '#3fb950', bg: '#1a2e22', borderWidth: 4 };
+  if (count <= 3) return { color: '#db6d28', bg: '#2d2218', borderWidth: 4 };
+  return { color: '#ff3b30', bg: '#3a1210', borderWidth: 6 };
 }
 
 function LaneCard({ lane, t }) {
@@ -24,7 +24,7 @@ function LaneCard({ lane, t }) {
   const st = countColor(isClosed ? 0 : count);
 
   return (
-    <div style={{ ...s.laneCard, borderLeftColor: st.color, background: st.bg }}>
+    <div style={{ ...s.laneCard, borderLeftColor: st.color, borderLeftWidth: st.borderWidth, background: st.bg }}>
       <div style={s.laneLeft}>
         <div style={{ ...s.laneIcon, background: st.color + '22', border: `1.5px solid ${st.color}` }}>
           <span style={{ color: st.color, fontSize: 13 }}>👤</span>
@@ -91,11 +91,20 @@ function Gauge({ current, threshold, t }) {
           <div style={{ ...s.gaugeZone, background: '#d29922' }} />
           <div style={{ ...s.gaugeZone, background: '#3fb950' }} />
         </div>
-        <div style={{ ...s.marker, ...s.markerRed, bottom: `calc(${currentPct}% - 6px)` }} />
-        <div style={{ ...s.marker, ...s.markerWhite, bottom: `calc(${thresholdPct}% - 6px)` }} />
-      </div>
-      <div className="mono" style={{ ...s.gaugeValue, color: overThreshold ? '#f85149' : '#e6edf3' }}>
-        {current != null ? `${Math.round(current)} min` : '—'}
+
+        {/* Live wait — red marker, value sits right next to it at its actual position */}
+        <div style={{ ...s.markerGroup, left: -70, bottom: `calc(${currentPct}% - 8px)` }}>
+          <span className="mono" style={{ fontSize: 14, fontWeight: 700, color: overThreshold ? '#f85149' : '#e6edf3' }}>
+            {current != null ? `${Math.round(current)}m` : '—'}
+          </span>
+          <span style={{ ...s.marker, ...s.markerRed }} />
+        </div>
+
+        {/* Seuil threshold — white marker, value sits next to it, moves live with the slider */}
+        <div style={{ ...s.markerGroup, right: -66, bottom: `calc(${thresholdPct}% - 8px)` }}>
+          <span style={{ ...s.marker, ...s.markerWhite }} />
+          <span className="mono" style={{ fontSize: 12, color: '#8b949e' }}>{threshold}m</span>
+        </div>
       </div>
     </div>
   );
@@ -137,11 +146,19 @@ export default function LiveScreen() {
   const snapshot = lanesData?.snapshot ?? {};
   const avgWait = snapshot.avg_wait_min;
 
-  // Fire a popup only on the rising edge (crossing into alert), not every refresh
+  // Fire a popup only on the rising edge (crossing into alert), not every
+  // refresh. While disabled, keep resetting the tracker so turning alerts
+  // back on always gets a fresh chance to fire if already over threshold —
+  // otherwise a crossing that happened while OFF silently "used up" the
+  // rising edge and nothing would ever show once you turned it back on.
   useEffect(() => {
+    if (!alertsEnabled) {
+      wasOverRef.current = false;
+      return;
+    }
     if (avgWait == null) return;
     const isOver = avgWait >= threshold;
-    if (alertsEnabled && isOver && !wasOverRef.current) {
+    if (isOver && !wasOverRef.current) {
       showToast(t.alertPopupMessage(Math.round(avgWait), threshold), 'error', 6000);
     }
     wasOverRef.current = isOver;
@@ -245,7 +262,7 @@ const s = {
 
   gaugeWrap: {
     background: 'var(--card-bg)', border: '1px solid var(--card-border)',
-    borderRadius: 16, padding: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center',
+    borderRadius: 16, padding: '20px 80px', display: 'flex', flexDirection: 'column', alignItems: 'center',
   },
   gaugeLabel: { fontSize: 13, color: '#8b949e', marginBottom: 14 },
   gaugeBody: { position: 'relative', width: 40, height: 220 },
@@ -254,18 +271,18 @@ const s = {
     display: 'flex', flexDirection: 'column',
   },
   gaugeZone: { flex: 1 },
-  marker: { position: 'absolute', width: 0, height: 0 },
+  markerGroup: {
+    position: 'absolute', display: 'flex', alignItems: 'center', gap: 6,
+  },
+  marker: { width: 0, height: 0, flexShrink: 0 },
   markerRed: {
-    left: -10,
-    borderTop: '6px solid transparent', borderBottom: '6px solid transparent',
-    borderLeft: '10px solid #f85149',
+    borderTop: '7px solid transparent', borderBottom: '7px solid transparent',
+    borderLeft: '11px solid #f85149',
   },
   markerWhite: {
-    right: -10,
-    borderTop: '6px solid transparent', borderBottom: '6px solid transparent',
-    borderRight: '10px solid #ffffff',
+    borderTop: '7px solid transparent', borderBottom: '7px solid transparent',
+    borderRight: '11px solid #ffffff',
   },
-  gaugeValue: { fontSize: 30, fontWeight: 700, marginTop: 16 },
 
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
