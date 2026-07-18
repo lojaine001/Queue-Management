@@ -1,48 +1,101 @@
+import { useEffect, useRef, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
+import { useToast } from '../context/ToastContext';
 import CameraPlaceholder from '../components/CameraPlaceholder';
 import UpdatedAgo from '../components/UpdatedAgo';
 import Skeleton from '../components/Skeleton';
 
 const SNAP_INTERVAL = 30000;
+const GAUGE_MAX_MIN = 12; // top of the gauge — matches the 9-12+ top zone
 
-const LANE_STATUS = {
-  closed:    { color: '#484f58', label: 'CLOSED', bg: '#21262d' },
-  open:      { color: '#3fb950', label: 'OPEN',   bg: '#1a2e22' },
-  busy:      { color: '#d29922', label: 'BUSY',   bg: '#2d2a1a' },
-  busy_high: { color: '#f85149', label: 'BUSY',   bg: '#2d1a1a' },
-};
-
-function statusKey(lane) {
-  if (!lane || lane.status === 'closed') return 'closed';
-  if (lane.fill_pct >= 80) return 'busy_high';
-  if (lane.fill_pct >= 50) return 'busy';
-  return 'open';
+// Count-driven lane color: 0 = idle/closed, 1 = green, 2-3 = orange, 4+ = red
+function countColor(count) {
+  if (!count) return { color: '#484f58', bg: '#21262d' };
+  if (count === 1) return { color: '#3fb950', bg: '#1a2e22' };
+  if (count <= 3) return { color: '#db6d28', bg: '#2d2218' };
+  return { color: '#f85149', bg: '#2d1a1a' };
 }
 
 function LaneCard({ lane, t }) {
-  const key = statusKey(lane);
-  const st = LANE_STATUS[key];
-  const isClosed = key === 'closed';
-  const hasCount = !isClosed && lane.queue_length != null;
+  const count = lane.waiting ?? 0;
+  const isClosed = lane.status === 'closed';
+  const st = countColor(isClosed ? 0 : count);
+
   return (
-    <div style={{ ...s.laneCard, background: st.bg, borderColor: st.color + (isClosed ? '33' : '55') }}>
+    <div style={{ ...s.laneCard, borderLeftColor: st.color, background: st.bg }}>
       <div style={s.laneLeft}>
-        <div style={{ ...s.laneCircle, background: st.color + '22', border: `1.5px solid ${st.color}` }}>
+        <div style={{ ...s.laneIcon, background: st.color + '22', border: `1.5px solid ${st.color}` }}>
           <span style={{ color: st.color, fontSize: 13 }}>👤</span>
         </div>
         <div>
           <div style={s.laneName}>LANE {Number(lane.lane_id) + 1}</div>
-          <div style={s.laneSub}>{lane.lane_type || 'Caisse standard'}</div>
+          <div style={s.laneSub}>{isClosed ? t.closedLabel : (lane.lane_type || 'Caisse standard')}</div>
         </div>
       </div>
       <div style={s.laneRight}>
-        <span style={{ ...s.laneStatusLabel, color: st.color }}>{st.label}</span>
         <span style={{ ...s.laneCount, color: isClosed ? '#484f58' : '#e6edf3' }}>
-          {hasCount || isClosed ? (isClosed ? 0 : lane.queue_length) : <span style={s.laneDash}>—</span>}
-          {' '}<span style={s.laneCountSub}>{t.clients}</span>
+          {isClosed ? 0 : count}
         </span>
+        <span style={s.laneCountSub}>{t.clients}</span>
+      </div>
+    </div>
+  );
+}
+
+function Toggle({ on, onChange }) {
+  return (
+    <button
+      onClick={() => onChange(!on)}
+      style={{ ...s.toggle, background: on ? '#3fb950' : '#30363d' }}
+    >
+      <span style={{ ...s.toggleKnob, transform: on ? 'translateX(18px)' : 'translateX(0)' }} />
+    </button>
+  );
+}
+
+function AlertsBar({ enabled, onToggle, threshold, onThreshold, t }) {
+  return (
+    <div style={s.alertsBar}>
+      <span style={s.bellIcon}>🔔</span>
+      <span style={s.alertsLabel}>{t.alertsLabel}</span>
+      <Toggle on={enabled} onChange={onToggle} />
+      <span style={s.divider} />
+      <span style={s.seuilLabel}>{t.seuilLabel}</span>
+      <input
+        type="range"
+        min={1} max={15} step={1}
+        value={threshold}
+        onChange={e => onThreshold(Number(e.target.value))}
+        style={s.slider}
+      />
+      <span className="mono" style={s.seuilValue}>{threshold} min</span>
+    </div>
+  );
+}
+
+function Gauge({ current, threshold, t }) {
+  const clamp = v => Math.max(0, Math.min(GAUGE_MAX_MIN, v ?? 0));
+  const currentPct = (clamp(current) / GAUGE_MAX_MIN) * 100;
+  const thresholdPct = (clamp(threshold) / GAUGE_MAX_MIN) * 100;
+  const overThreshold = current != null && current >= threshold;
+
+  return (
+    <div style={s.gaugeWrap}>
+      <div style={s.gaugeLabel}>{t.avgWait}</div>
+      <div style={s.gaugeBody}>
+        <div style={s.gaugeBar}>
+          <div style={{ ...s.gaugeZone, background: '#f85149' }} />
+          <div style={{ ...s.gaugeZone, background: '#db6d28' }} />
+          <div style={{ ...s.gaugeZone, background: '#d29922' }} />
+          <div style={{ ...s.gaugeZone, background: '#3fb950' }} />
+        </div>
+        <div style={{ ...s.marker, ...s.markerRed, bottom: `calc(${currentPct}% - 6px)` }} />
+        <div style={{ ...s.marker, ...s.markerWhite, bottom: `calc(${thresholdPct}% - 6px)` }} />
+      </div>
+      <div className="mono" style={{ ...s.gaugeValue, color: overThreshold ? '#f85149' : '#e6edf3' }}>
+        {current != null ? `${Math.round(current)} min` : '—'}
       </div>
     </div>
   );
@@ -50,6 +103,24 @@ function LaneCard({ lane, t }) {
 
 export default function LiveScreen() {
   const { t } = useLang();
+  const showToast = useToast();
+
+  const [alertsEnabled, setAlertsEnabled] = useState(
+    () => localStorage.getItem('iqms_alerts_enabled') === 'true'
+  );
+  const [threshold, setThreshold] = useState(
+    () => Number(localStorage.getItem('iqms_alert_threshold')) || 8
+  );
+  const wasOverRef = useRef(false);
+
+  useEffect(() => {
+    localStorage.setItem('iqms_alerts_enabled', String(alertsEnabled));
+  }, [alertsEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('iqms_alert_threshold', String(threshold));
+  }, [threshold]);
+
   const { data, loading, error, lastUpdated } = useApi([
     `${API_URL}/live-lanes`,
     `${API_URL}/alerts`,
@@ -64,22 +135,36 @@ export default function LiveScreen() {
 
   const lanes = lanesData?.lanes ?? [];
   const snapshot = lanesData?.snapshot ?? {};
-  const openLanes = lanes.filter(l => l.status !== 'closed');
+  const avgWait = snapshot.avg_wait_min;
+
+  // Fire a popup only on the rising edge (crossing into alert), not every refresh
+  useEffect(() => {
+    if (avgWait == null) return;
+    const isOver = avgWait >= threshold;
+    if (alertsEnabled && isOver && !wasOverRef.current) {
+      showToast(t.alertPopupMessage(Math.round(avgWait), threshold), 'error', 6000);
+    }
+    wasOverRef.current = isOver;
+  }, [avgWait, threshold, alertsEnabled]);
 
   return (
     <div className="screen-page">
-      {/* ── Live grid: lanes | right panel ── */}
+      <AlertsBar
+        enabled={alertsEnabled} onToggle={setAlertsEnabled}
+        threshold={threshold} onThreshold={setThreshold}
+        t={t}
+      />
+
       <div className="live-grid">
-        {/* Left: lanes */}
         <div>
           <div className="section-header">
-            <span className="section-title">{t.liveQueueStatus}</span>
+            <span style={s.bigTitle}>{t.liveQueueStatus}</span>
             <div style={s.liveBadgeRow}>
               <div style={s.liveBadge}>
                 <span style={s.liveDot} />
-                <span style={{ fontSize: 11, fontWeight: 700, color: '#3fb950', letterSpacing: 0.8 }}>{t.live}</span>
+                <span style={s.liveWord}>{t.live}</span>
               </div>
-              <UpdatedAgo lastUpdated={lastUpdated} />
+              <UpdatedAgo lastUpdated={lastUpdated} fontSize={14} dotSize={7} />
             </div>
           </div>
           {error && <div style={s.errorHint}>{error}</div>}
@@ -94,33 +179,14 @@ export default function LiveScreen() {
           </div>
         </div>
 
-        {/* Right: snapshot + cameras */}
         <div>
-          {(snapshot.in_queue != null || snapshot.avg_wait_min != null) && (
-            <>
-              <div className="section-header" style={{ marginTop: 0 }}>
-                <span className="section-title">SNAPSHOT</span>
-              </div>
-              <div style={s.snapshotRow}>
-                <div style={s.snapshotCard}>
-                  <div style={s.snapValue}>{snapshot.in_queue ?? '—'}</div>
-                  <div style={s.snapLabel}>{t.inQueue}</div>
-                  <div style={s.snapSub}>{t.openLanes(openLanes.length)}</div>
-                </div>
-                <div style={s.snapshotCard}>
-                  <div style={{ ...s.snapValue, color: (snapshot.avg_wait_min ?? 0) > 10 ? '#f85149' : '#3fb950' }}>
-                    {snapshot.avg_wait_min != null ? `${Math.round(snapshot.avg_wait_min)} min` : '—'}
-                  </div>
-                  <div style={s.snapLabel}>{t.avgWait}</div>
-                </div>
-              </div>
-            </>
-          )}
-
+          <div className="section-header" style={{ marginTop: 0 }}>
+            <span className="section-title">SNAPSHOT</span>
+          </div>
+          <Gauge current={avgWait} threshold={threshold} t={t} />
         </div>
       </div>
 
-      {/* ── Cameras: full-width row on desktop, stacked on mobile ── */}
       <div className="section-header">
         <span className="section-title">{t.liveCameras}</span>
       </div>
@@ -133,36 +199,74 @@ export default function LiveScreen() {
 }
 
 const s = {
+  alertsBar: {
+    display: 'flex', alignItems: 'center', gap: 12,
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+    borderRadius: 16, padding: '14px 20px', marginBottom: 8,
+  },
+  bellIcon: { fontSize: 16 },
+  alertsLabel: { fontSize: 15, fontWeight: 600, color: '#e6edf3', marginRight: 4 },
+  toggle: {
+    width: 38, height: 20, borderRadius: 10, position: 'relative',
+    padding: 2, transition: 'background 0.15s',
+  },
+  toggleKnob: {
+    display: 'block', width: 16, height: 16, borderRadius: '50%',
+    background: '#fff', transition: 'transform 0.15s',
+  },
+  divider: { width: 1, height: 24, background: 'var(--card-border)', margin: '0 4px' },
+  seuilLabel: { fontSize: 14, color: '#8b949e' },
+  slider: { flex: 1, maxWidth: 240, accentColor: '#58a6ff' },
+  seuilValue: { fontSize: 15, fontWeight: 700, color: '#e6edf3', minWidth: 48 },
+
+  bigTitle: { fontSize: 20, fontWeight: 500, color: '#e6edf3' },
   liveBadgeRow: { display: 'flex', alignItems: 'center', gap: 12 },
   liveBadge: { display: 'flex', alignItems: 'center', gap: 5 },
   liveDot: {
-    width: 6, height: 6, borderRadius: '50%',
+    width: 8, height: 8, borderRadius: '50%',
     background: '#3fb950', boxShadow: '0 0 6px #3fb950',
   },
+  liveWord: { fontSize: 14, fontWeight: 700, color: '#3fb950', letterSpacing: 0.8 },
+
   laneCard: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '16px 20px', border: '1px solid', borderRadius: 16,
+    padding: '16px 20px', borderLeft: '4px solid', borderRadius: 12,
   },
   laneLeft: { display: 'flex', alignItems: 'center', gap: 14 },
-  laneCircle: {
+  laneIcon: {
     width: 36, height: 36, borderRadius: '50%',
     display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
   },
   laneName: { fontSize: 14, fontWeight: 700, color: '#e6edf3' },
   laneSub: { fontSize: 11, color: '#8b949e', marginTop: 2 },
-  laneRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 },
-  laneStatusLabel: { fontSize: 11, fontWeight: 700, letterSpacing: 0.8 },
+  laneRight: { display: 'flex', alignItems: 'baseline', gap: 6 },
   laneCount: { fontSize: 26, fontWeight: 700, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
-  laneCountSub: { fontSize: 12, fontWeight: 400, fontFamily: 'var(--font-ui)', color: '#8b949e' },
-  laneDash: { color: '#484f58' },
-  snapshotRow: { display: 'flex', gap: 14, marginBottom: 4 },
-  snapshotCard: {
-    flex: 1, background: 'var(--card-bg)', border: '1px solid var(--card-border)',
-    borderRadius: 16, padding: '16px 18px',
+  laneCountSub: { fontSize: 12, fontWeight: 400, color: '#8b949e' },
+
+  gaugeWrap: {
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+    borderRadius: 16, padding: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center',
   },
-  snapValue: { fontSize: 28, fontWeight: 700, color: '#e6edf3', fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
-  snapLabel: { fontSize: 10, fontWeight: 700, color: '#8b95a8', letterSpacing: 0.8, marginTop: 6, textTransform: 'uppercase' },
-  snapSub: { fontSize: 11, color: '#484f58', marginTop: 4 },
+  gaugeLabel: { fontSize: 13, color: '#8b949e', marginBottom: 14 },
+  gaugeBody: { position: 'relative', width: 40, height: 220 },
+  gaugeBar: {
+    width: '100%', height: '100%', borderRadius: 20, overflow: 'hidden',
+    display: 'flex', flexDirection: 'column',
+  },
+  gaugeZone: { flex: 1 },
+  marker: { position: 'absolute', width: 0, height: 0 },
+  markerRed: {
+    left: -10,
+    borderTop: '6px solid transparent', borderBottom: '6px solid transparent',
+    borderLeft: '10px solid #f85149',
+  },
+  markerWhite: {
+    right: -10,
+    borderTop: '6px solid transparent', borderBottom: '6px solid transparent',
+    borderRight: '10px solid #ffffff',
+  },
+  gaugeValue: { fontSize: 30, fontWeight: 700, marginTop: 16 },
+
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };

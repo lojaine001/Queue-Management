@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLang } from '../context/LanguageContext';
 
-export default function UpdatedAgo({ lastUpdated }) {
+export default function UpdatedAgo({ lastUpdated, fontSize = 11, dotSize = 6 }) {
   const { t } = useLang();
   const [, tick] = useState(0);
 
@@ -18,8 +18,8 @@ export default function UpdatedAgo({ lastUpdated }) {
 
   return (
     <span style={s.wrap}>
-      <span style={{ ...s.dot, background: stale ? '#d29922' : '#3fb950' }} />
-      <span style={{ ...s.text, color: stale ? '#d29922' : '#8b949e' }}>{label}</span>
+      <span style={{ ...s.dot, width: dotSize, height: dotSize, background: stale ? '#d29922' : '#3fb950' }} />
+      <span style={{ ...s.text, fontSize, color: stale ? '#d29922' : '#8b949e' }}>{label}</span>
     </span>
   );
 }
@@ -27,9 +27,9 @@ export default function UpdatedAgo({ lastUpdated }) {
 const s = {
   wrap: { display: 'flex', alignItems: 'center', gap: 5 },
   dot: {
-    width: 6, height: 6, borderRadius: '50%',
+    borderRadius: '50%',
     boxShadow: '0 0 5px currentColor',
     animation: 'pulse 2s infinite',
   },
-  text: { fontSize: 11, fontFamily: 'var(--font-mono)' },
+  text: { fontFamily: 'var(--font-mono)' },
 };

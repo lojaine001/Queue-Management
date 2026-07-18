@@ -6,12 +6,12 @@ const TONE = { success: '#3fb950', error: '#f85149' };
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
 
-  const showToast = useCallback((message, tone = 'success') => {
+  const showToast = useCallback((message, tone = 'success', duration = 2500) => {
     const id = Date.now() + Math.random();
     setToasts(list => [...list, { id, message, tone }]);
     setTimeout(() => {
       setToasts(list => list.filter(x => x.id !== id));
-    }, 2500);
+    }, duration);
   }, []);
 
   return (
