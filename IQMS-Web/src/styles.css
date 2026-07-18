@@ -118,14 +118,6 @@ button { cursor: pointer; font-family: inherit; }
   margin-top: 8px;
 }
 
-/* Statistique: 4-card stat row — 2x2 on mobile, single row on desktop */
-.stat-grid-4 {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 14px;
-  margin-top: 8px;
-}
-
 /* Statistique: gender donut + age bar side by side on desktop, stacked on mobile */
 .demo-grid {
   display: block;
@@ -194,8 +186,6 @@ button { cursor: pointer; font-family: inherit; }
     gap: 20px;
     align-items: start;
   }
-
-  .stat-grid-4 { grid-template-columns: repeat(4, 1fr); }
 
   .demo-grid {
     display: grid;

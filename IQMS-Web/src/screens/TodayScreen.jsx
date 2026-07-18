@@ -63,7 +63,6 @@ export default function TodayScreen() {
 
   const totalCustomers = recap?.total_customers;
   const vsYesterdayPct = recap?.vs_yesterday_pct;
-  const avgAge = recap?.avg_age;
   const genderRows = recap?.demographics_gender ?? [];
   const ageRows = recap?.demographics_age ?? [];
   const femme = genderRows.find(g => g.key === 'female');
@@ -101,11 +100,11 @@ export default function TodayScreen() {
 
       {/* Stat row */}
       {loading ? (
-        <div className="stat-grid-4">
-          {[0, 1, 2, 3].map(i => <Skeleton key={i} height={90} radius={16} />)}
+        <div className="stat-grid">
+          {[0, 1, 2].map(i => <Skeleton key={i} height={90} radius={16} />)}
         </div>
       ) : (
-        <div className="stat-grid-4">
+        <div className="stat-grid">
           <StatCard
             label={t.totalClients}
             value={totalCustomers != null ? totalCustomers.toLocaleString() : null}
@@ -124,11 +123,6 @@ export default function TodayScreen() {
             value={homme ? `${homme.percent}%` : null}
             valueColor="#3b82f6"
             sub={homme ? t.hommeCount(homme.count) : undefined}
-          />
-          <StatCard
-            label={t.ageMoyenLabel}
-            value={avgAge != null ? t.ageValue(Math.round(avgAge)) : null}
-            valueColor="#e6edf3"
           />
         </div>
       )}
