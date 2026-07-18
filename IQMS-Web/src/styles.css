@@ -2,12 +2,39 @@
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
-  50%      { opacity: 0.4; }
+  50%      { opacity: 0.35; }
 }
 
-@keyframes fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+:root {
+  --bg:         #0d1117;
+  --surface:    #161b22;
+  --surface2:   #1c2128;
+  --border:     #30363d;
+  --text:       #e6edf3;
+  --text-sub:   #8b949e;
+  --text-dim:   #484f58;
+  --green:      #3fb950;
+  --accent:     #34d399;
+  --yellow:     #d29922;
+  --orange:     #db6d28;
+  --red:        #f85149;
+  --blue:       #58a6ff;
+
+  /* Standardized card treatment */
+  --card-bg:     #12171f;
+  --card-border: rgba(255, 255, 255, 0.06);
+  --card-radius: 16px;
+  --card-pad:    20px;
+
+  /* Type hierarchy */
+  --label-color: #8b95a8;
+  --font-ui:   'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 
 html, body, #root {
@@ -16,56 +43,54 @@ html, body, #root {
   color: var(--text);
   font-family: var(--font-ui);
   font-size: 14px;
-  font-weight: 400;
   -webkit-font-smoothing: antialiased;
 }
 
-button { cursor: pointer; font-family: inherit; background: none; border: none; color: inherit; }
+button { cursor: pointer; font-family: inherit; }
+
+/* ── Shared design system primitives ─────────────────────── */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  padding: var(--card-pad);
+}
+
+.metric {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--label-color);
+}
 
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 2px; }
-
-/* ── Shared primitives ────────────────────────────────────── */
-.micro-label {
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-.mono {
-  font-family: var(--font-num);
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
-}
-
-.hairline-top    { border-top: 1px solid var(--hairline); }
-.hairline-bottom { border-bottom: 1px solid var(--hairline); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 /* ── Shell ────────────────────────────────────────────────── */
 .app-shell {
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
-  border-radius: var(--radius-page);
 }
 
 .app-main {
   flex: 1;
+  overflow-y: auto;
 }
 
-/* ── Page content ─────────────────────────────────────────── */
+/* ── Screen page ──────────────────────────────────────────── */
 .screen-page {
-  padding: var(--sp-4) var(--sp-4) 64px;
-}
-
-@media (min-width: 900px) {
-  .screen-page {
-    padding: var(--sp-6) var(--sp-6) 64px;
-    max-width: var(--content-max);
-    margin: 0 auto;
-  }
+  padding: 20px 16px 80px;
 }
 
 /* ── Section header ───────────────────────────────────────── */
@@ -73,92 +98,109 @@ button { cursor: pointer; font-family: inherit; background: none; border: none; 
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--sp-3);
-  margin-top: var(--sp-6);
+  margin-bottom: 14px;
+  margin-top: 24px;
 }
 
 .section-title {
   font-size: 11px;
-  font-weight: 500;
-  color: var(--text-3);
-  letter-spacing: 0.1em;
+  font-weight: 700;
+  color: var(--label-color);
+  letter-spacing: 1px;
   text-transform: uppercase;
 }
 
-/* ── KPI strip: hairline-divided cells, no card backgrounds ── */
-.kpi-strip {
+/* ── Stat grid ────────────────────────────────────────────── */
+.stat-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  border-top: 1px solid var(--hairline);
-  border-left: 1px solid var(--hairline);
-  margin-top: var(--sp-2);
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 14px;
+  margin-top: 8px;
 }
 
-.kpi-cell {
-  border-right: 1px solid var(--hairline);
-  border-bottom: 1px solid var(--hairline);
-  padding: var(--sp-3) var(--sp-4);
+/* ── Desktop sidebar (hidden on mobile) ───────────────────── */
+.app-sidebar { display: none; }
+
+/* ── Mobile header / tabbar (hidden on desktop) ───────────── */
+/* Single sticky unit — header + tab bar stack as one block, so
+   neither needs to guess the other's height to avoid overlap. */
+.mobile-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
 }
 
-@media (min-width: 900px) {
-  .kpi-strip { grid-template-columns: repeat(4, 1fr); }
-}
-
-/* ── Header + tabs: full-bleed bars, inner content capped to match
-   .screen-page so the whole frame reads as one consistent width
-   instead of a narrow column floating inside a wider bar. ──────── */
-.app-header, .app-tabs {
-  border-bottom: 1px solid var(--hairline);
-}
-
-.app-header-inner {
+.mobile-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--sp-3) var(--sp-4);
-  max-width: var(--content-max);
-  margin: 0 auto;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
 }
 
-.app-tabs-inner {
-  display: flex;
-  gap: var(--sp-6);
-  padding: 0 var(--sp-4);
-  max-width: var(--content-max);
-  margin: 0 auto;
-  overflow-x: auto;
-}
-
+/* ── Desktop breakpoint ───────────────────────────────────── */
 @media (min-width: 900px) {
-  .app-header-inner, .app-tabs-inner { padding-left: var(--sp-6); padding-right: var(--sp-6); }
-}
+  .app-shell { flex-direction: row; }
 
-/* ── Ruled table (departure-board style) ─────────────────────── */
-.ruled-table { width: 100%; border-collapse: collapse; }
-.ruled-table tr { border-bottom: 1px solid var(--hairline); transition: background 150ms ease; }
-.ruled-table tr:last-child { border-bottom: none; }
-.ruled-table td { padding: var(--sp-3) var(--sp-2); font-size: 13px; }
+  .mobile-nav { display: none; }
 
-/* ── Camera grid ──────────────────────────────────────────── */
-.camera-grid {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-}
+  .app-sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 220px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    padding: 20px 0;
+  }
 
-@media (min-width: 900px) {
-  .camera-grid { flex-direction: row; }
+  .app-main { overflow-y: auto; }
+
+  .screen-page {
+    padding: 32px 40px 48px;
+    max-width: 1100px;
+  }
 
   /* Today: chart + summary side by side */
   .today-bottom {
     display: grid;
     grid-template-columns: 3fr 2fr;
-    gap: var(--sp-6);
+    gap: 20px;
+    align-items: start;
+  }
+
+  /* Live: lanes left, stats+cams right */
+  .live-grid {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    gap: 20px;
     align-items: start;
   }
 }
 
 @media (max-width: 899px) {
   .today-bottom { display: block; }
-  .today-bottom > * + * { margin-top: var(--sp-4); }
+  .today-bottom > * + * { margin-top: 14px; }
+  .live-grid { display: block; }
+  .live-grid > * + * { margin-top: 14px; }
+}
+
+/* ── Camera grid ──────────────────────────────────────────── */
+/* Mobile: stacked full-width */
+.camera-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Desktop: side by side */
+@media (min-width: 900px) {
+  .camera-grid {
+    flex-direction: row;
+    gap: 14px;
+  }
 }

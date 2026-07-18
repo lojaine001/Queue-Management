@@ -1,29 +1,32 @@
 import {
-  ComposedChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  ComposedChart, Bar, Cell, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
+import { useIsMobile } from '../hooks/useIsMobile';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
 import UpdatedAgo from '../components/UpdatedAgo';
 import Skeleton from '../components/Skeleton';
 
-function KpiCell({ label, value, sub, color }) {
+function StatCard({ value, label, sub, subColor, valueColor, children }) {
   return (
-    <div className="kpi-cell">
-      <div className="micro-label">{label}</div>
-      <div className="mono" style={{ fontSize: 24, marginTop: 6, color: color ?? 'var(--text)' }}>
-        {value ?? '—'}
-      </div>
-      {sub && <div style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 4 }}>{sub}</div>}
+    <div style={s.statCard}>
+      <div style={s.statLabel}>{label}</div>
+      {value != null
+        ? <div style={{ ...s.statValue, color: valueColor ?? '#e6edf3' }}>{value}</div>
+        : <div style={s.statDash}>—</div>}
+      {sub && <div style={{ ...s.statSub, color: subColor ?? s.statSub.color }}>{sub}</div>}
+      {children}
     </div>
   );
 }
 
-function SummaryRow({ label, value }) {
+function SummaryRow({ label, value, valueColor }) {
   return (
     <div style={s.summaryRow}>
-      <span style={{ fontSize: 13, color: 'var(--text-2)' }}>{label}</span>
-      <span className="mono" style={{ fontSize: 13, color: 'var(--text)' }}>{value ?? '—'}</span>
+      <span style={s.summaryLabel}>{label}</span>
+      <span style={{ ...s.summaryValue, color: valueColor ?? '#3fb950' }}>{value ?? '—'}</span>
     </div>
   );
 }
@@ -31,20 +34,25 @@ function SummaryRow({ label, value }) {
 function ChartTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
-    <div style={s.tooltip}>
-      <div style={{ fontSize: 11, color: 'var(--text-3)' }}>{label}</div>
-      <div className="mono" style={{ color: 'var(--text)' }}>{payload[0]?.value}</div>
+    <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
+      <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
+      {payload.map(p => (
+        <div key={p.dataKey} style={{ color: p.color, fontWeight: 700, fontSize: 12 }}>
+          {p.value}
+        </div>
+      ))}
     </div>
   );
 }
 
 export default function TodayScreen() {
   const { t } = useLang();
+  const isMobile = useIsMobile();
   const { data, loading, error, lastUpdated } = useApi([`${API_URL}/day-recap`]);
   const [recap] = data;
 
   const totalCustomers = recap?.total_customers;
-  const vsLastWeekPct = recap?.vs_last_week_pct;
+  const vsYesterdayPct = recap?.vs_yesterday_pct;
   const peakHour = recap?.peak_hour;
   const peakCount = recap?.peak_count;
   const peakPctOfTotal = recap?.peak_pct_of_total;
@@ -64,95 +72,132 @@ export default function TodayScreen() {
 
   return (
     <div className="screen-page">
-      <div className="section-header">
-        <span className="section-title">{t.todayTitle}</span>
+      <div style={s.topRow}>
         <UpdatedAgo lastUpdated={lastUpdated} />
       </div>
 
-      {error && <div style={s.errorText}>{error}</div>}
+      {error && <div style={s.errorHint}>{error}</div>}
 
       {loading ? (
         <>
-          <div className="kpi-strip">{[0, 1, 2, 3].map(i => <Skeleton key={i} height={70} />)}</div>
-          <div className="today-bottom" style={{ marginTop: 24 }}>
-            <Skeleton height={220} />
-            <Skeleton height={150} />
+          <div className="stat-grid">
+            {[0, 1, 2].map(i => <Skeleton key={i} height={90} radius={16} />)}
+          </div>
+          <div className="today-bottom" style={{ marginTop: 20 }}>
+            <Skeleton height={230} radius={16} />
+            <Skeleton height={150} radius={16} />
           </div>
         </>
       ) : (
         <>
-          <div className="kpi-strip">
-            <KpiCell
+          {/* Stat cards */}
+          <div className="stat-grid">
+            <StatCard
               label={t.totalClients}
               value={totalCustomers != null ? totalCustomers.toLocaleString() : null}
-              sub={vsLastWeekPct != null ? t.vsLastWeek(vsLastWeekPct) : undefined}
+              valueColor="#e6edf3"
+              sub={vsYesterdayPct != null ? t.vsYesterday(vsYesterdayPct) : undefined}
+              subColor={vsYesterdayPct != null ? (vsYesterdayPct >= 0 ? '#3fb950' : '#f85149') : undefined}
             />
-            <KpiCell
+            <StatCard
               label={t.peakHour}
               value={peakHour}
-              color="var(--cyan)"
+              valueColor="#58a6ff"
               sub={peakCount != null
                 ? `${peakCount} ${t.clients}${peakPctOfTotal != null ? ` · ${t.pctOfTotal(peakPctOfTotal)}` : ''}`
                 : undefined}
             />
-            <KpiCell
-              label={t.avgWaitTime}
-              value={avgWait != null ? `${Math.round(avgWait)} min` : null}
-              color="var(--cyan)"
-            />
-            <KpiCell
-              label={t.lanesUsed}
-              value={lanesToday}
-              sub={busiestLane ? t.busiestLane(busiestLane) : undefined}
-            />
+            <div style={s.statCard}>
+              <div style={s.statLabel}>{t.equipment}</div>
+              {paniers != null && (
+                <div style={s.equipRow}>
+                  <span style={s.equipIcon}>🧺</span>
+                  <div>
+                    <div style={s.equipCount}>{paniers}</div>
+                    <div style={s.equipName}>{t.baskets}</div>
+                  </div>
+                </div>
+              )}
+              {chariots != null && (
+                <div style={s.equipRow}>
+                  <span style={s.equipIcon}>🛒</span>
+                  <div>
+                    <div style={s.equipCount}>{chariots}</div>
+                    <div style={s.equipName}>{t.carts}</div>
+                  </div>
+                </div>
+              )}
+              {paniers == null && chariots == null && (
+                <div style={s.statDash}>{t.noData}</div>
+              )}
+            </div>
           </div>
 
+          {/* Chart + summary — side by side on desktop */}
           <div className="today-bottom">
             {/* Hourly chart */}
             <div>
               <div className="section-header">
                 <span className="section-title">{t.entriesByHour}</span>
               </div>
-              {hourlyData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={200}>
-                  <ComposedChart data={hourlyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-                    <CartesianGrid stroke="var(--hairline)" strokeWidth={0.5} horizontal vertical={false} />
-                    <XAxis
-                      dataKey="hour"
-                      tick={{ fill: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-num)' }}
-                      tickLine={false} axisLine={false} interval={1}
-                    />
-                    <YAxis
-                      domain={[0, 'dataMax']}
-                      allowDecimals={false}
-                      tickCount={6}
-                      tick={{ fill: 'var(--text-3)', fontSize: 11, fontFamily: 'var(--font-num)' }}
-                      tickLine={false} axisLine={false}
-                    />
-                    <Tooltip content={<ChartTooltip />} cursor={{ fill: 'var(--raised)' }} />
-                    <Bar dataKey="count" radius={0} maxBarSize={18}>
-                      {hourlyData.map((h, i) => (
-                        <Cell key={i} fill={h.isPeak ? 'var(--cyan)' : 'var(--text)'} fillOpacity={h.isPeak ? 1 : 0.85} />
-                      ))}
-                    </Bar>
-                  </ComposedChart>
-                </ResponsiveContainer>
-              ) : (
-                <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-3)', fontSize: 13 }}>
-                  {t.noHourlyData}
+              <div style={s.chartCard}>
+                {hourlyData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={190}>
+                    <ComposedChart data={hourlyData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                      <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
+                      <YAxis
+                        domain={[0, 'dataMax']}
+                        allowDecimals={false}
+                        tickCount={6}
+                        tick={{ fill: '#8b949e', fontSize: 10 }}
+                        tickLine={false} axisLine={false}
+                      />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Bar dataKey="count" radius={[3, 3, 0, 0]} name={t.entriesByHour} maxBarSize={isMobile ? 40 : undefined}>
+                        {hourlyData.map((h, i) => (
+                          <Cell key={i} fill={h.isPeak ? '#f85149' : '#3fb950'} />
+                        ))}
+                      </Bar>
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div style={{ textAlign: 'center', padding: '40px 0', color: '#8b949e', fontSize: 13 }}>
+                    {t.noHourlyData}
+                  </div>
+                )}
+                <div style={s.legendRow}>
+                  <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#3fb950' }} /> {t.today}</span>
+                  {hourlyData.some(h => h.isPeak) && (
+                    <span style={s.legendItem}><span style={{ ...s.legendSq, background: '#f85149' }} /> {t.peakHour}</span>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
 
-            {/* Ruled summary */}
+            {/* Daily summary */}
             <div>
               <div className="section-header">
                 <span className="section-title">{t.dailySummary}</span>
               </div>
-              <div>
-                <SummaryRow label={t.baskets} value={paniers} />
-                <SummaryRow label={t.carts} value={chariots} />
-                <SummaryRow label={t.alertTime} value={alertMinutes != null ? `${alertMinutes} min` : null} />
+              <div style={s.summaryCard}>
+                <SummaryRow
+                  label={t.avgWaitTime}
+                  value={avgWait != null ? `${Math.round(avgWait)} min` : null}
+                  valueColor="#3fb950"
+                />
+                <SummaryRow
+                  label={t.lanesUsed}
+                  value={lanesToday != null
+                    ? `${lanesToday}${busiestLane ? ` (${t.busiestLane(busiestLane)})` : ''}`
+                    : null}
+                  valueColor="#58a6ff"
+                />
+                <SummaryRow
+                  label={t.alertTime}
+                  value={alertMinutes != null ? `${alertMinutes} min` : null}
+                  valueColor={alertMinutes > 0 ? '#f85149' : '#3fb950'}
+                />
               </div>
             </div>
           </div>
@@ -163,12 +208,31 @@ export default function TodayScreen() {
 }
 
 const s = {
+  topRow: { display: 'flex', justifyContent: 'flex-end', marginBottom: 4 },
+  statCard: {
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, padding: '18px 16px',
+  },
+  statLabel: { fontSize: 9, fontWeight: 700, color: '#8b95a8', letterSpacing: 0.8, marginBottom: 8, textTransform: 'uppercase' },
+  statValue: { fontSize: 30, fontWeight: 700, lineHeight: 1.1, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  statDash: { fontSize: 20, color: '#484f58', marginTop: 4, fontFamily: 'var(--font-mono)' },
+  statSub: { fontSize: 11, color: '#3fb950', marginTop: 6 },
+  equipRow: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 },
+  equipIcon: { fontSize: 18 },
+  equipCount: { fontSize: 19, fontWeight: 700, color: '#e6edf3', lineHeight: 1, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  equipName: { fontSize: 10, color: '#8b949e', marginTop: 2 },
+  chartCard: { background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, padding: '18px 16px 12px' },
+  legendRow: { display: 'flex', gap: 16, marginTop: 8, paddingLeft: 12 },
+  legendItem: { display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: '#8b949e' },
+  legendSq: { display: 'inline-block', width: 10, height: 10, borderRadius: 2 },
+  summaryCard: {
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, overflow: 'hidden',
+  },
   summaryRow: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '12px 0', borderBottom: '1px solid var(--hairline)',
+    padding: '16px 18px', borderBottom: '1px solid var(--card-border)', fontSize: 13,
   },
-  tooltip: {
-    background: 'var(--surface)', border: '0.5px solid var(--hairline)', borderRadius: 4, padding: '6px 10px',
-  },
-  errorText: { color: 'var(--red)', fontSize: 13, padding: '8px 0' },
+  summaryLabel: { color: '#e6edf3' },
+  summaryValue: { fontWeight: 700, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
+  errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };
