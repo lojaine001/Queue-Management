@@ -328,21 +328,35 @@ def forecast():
 
 
 @app.get("/day-recap")
-def day_recap():
-    """Returns today's summary (falls back to most recent day with data)."""
+def day_recap(date: Optional[str] = None):
+    """
+    Returns the summary for a given day (?date=YYYY-MM-DD), or falls back
+    to the most recent day with data when no date is given.
+    """
     try:
+        requested_date = None
+        if date:
+            try:
+                requested_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date must be in YYYY-MM-DD format")
+
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Find the most recent day that has data
-                cur.execute("""
-                    SELECT DATE(timestamp) AS day
-                    FROM entrance_events
-                    WHERE camera_id NOT LIKE 'SIM_%%'
-                    ORDER BY timestamp DESC LIMIT 1
-                """)
-                day_row = cur.fetchone()
-                ref_date = day_row["day"] if day_row else None
-                date_filter = f"DATE(timestamp) = '{ref_date}'" if ref_date else "timestamp >= CURRENT_DATE"
+                if requested_date:
+                    ref_date = requested_date
+                    date_filter = f"DATE(timestamp) = '{ref_date}'"
+                else:
+                    # Find the most recent day that has data
+                    cur.execute("""
+                        SELECT DATE(timestamp) AS day
+                        FROM entrance_events
+                        WHERE camera_id NOT LIKE 'SIM_%%'
+                        ORDER BY timestamp DESC LIMIT 1
+                    """)
+                    day_row = cur.fetchone()
+                    ref_date = day_row["day"] if day_row else None
+                    date_filter = f"DATE(timestamp) = '{ref_date}'" if ref_date else "timestamp >= CURRENT_DATE"
                 display_date = ref_date.strftime("%d %b %Y") if ref_date else datetime.now().strftime("%d %b %Y")
 
                 cur.execute(f"""
@@ -432,13 +446,60 @@ def day_recap():
                 """)
                 equip_rows = cur.fetchall()
 
-                # Demographics and hourly entries read from dashboard_state
-                # so values match the dashboard exactly.
-                cur.execute("""
-                    SELECT demographics_json, entries_hour_json
-                    FROM dashboard_state WHERE id = 1
+                # Gender/age demographics — computed fresh for the requested
+                # day (not read from dashboard_state, which only ever holds
+                # today's cache and would be wrong for past dates).
+                cur.execute(f"""
+                    SELECT gender, COUNT(*) AS cnt
+                    FROM entrance_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                      AND gender IS NOT NULL AND gender != 'unknown'
+                    GROUP BY gender
                 """)
-                ds_row = cur.fetchone()
+                gender_rows = cur.fetchall()
+
+                cur.execute(f"""
+                    SELECT
+                        CASE
+                            WHEN age_estimate < 30 THEN '18-30'
+                            WHEN age_estimate < 50 THEN '30-50'
+                            ELSE '50+'
+                        END AS age_group,
+                        COUNT(*) AS cnt
+                    FROM entrance_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                      AND age_estimate IS NOT NULL
+                    GROUP BY 1
+                    ORDER BY MIN(age_estimate)
+                """)
+                age_rows = cur.fetchall()
+
+                cur.execute(f"""
+                    SELECT ROUND(AVG(age_estimate)::numeric, 1) AS avg_age
+                    FROM entrance_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                      AND age_estimate IS NOT NULL
+                """)
+                avg_age_row = cur.fetchone()
+
+                # Hourly entries — also computed fresh per requested day,
+                # same reason as demographics above.
+                cur.execute(f"""
+                    SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour,
+                           COUNT(*) AS cnt
+                    FROM entrance_events
+                    WHERE {date_filter}
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                    GROUP BY 1 ORDER BY 1 ASC
+                """)
+                hourly_rows = cur.fetchall()
 
         denom = total or 1
         equipment = []
@@ -456,10 +517,41 @@ def day_recap():
                 "color":   colors[key],
             })
 
-        # Demographics and hourly from dashboard_state (exact match with dashboard)
-        import json as _json
-        _demo      = _json.loads(ds_row["demographics_json"])   if ds_row and ds_row["demographics_json"]   else {}
-        _hourly    = _json.loads(ds_row["entries_hour_json"])   if ds_row and ds_row["entries_hour_json"]   else []
+        gender_total = sum(int(r["cnt"]) for r in gender_rows) or 1
+        gender_colors = {"female": "#ec4899", "male": "#3b82f6"}
+        gender_labels = {"female": "Femme", "male": "Homme"}
+        demographics_gender = [
+            {
+                "key":     r["gender"],
+                "label":   gender_labels.get(r["gender"], str(r["gender"]).capitalize()),
+                "count":   int(r["cnt"]),
+                "percent": round(int(r["cnt"]) / gender_total * 100),
+                "color":   gender_colors.get(r["gender"], "#94a3b8"),
+            }
+            for r in gender_rows
+        ]
+
+        age_colors = {"18-30": "#22d3ee", "30-50": "#a78bfa", "50+": "#fb923c"}
+        demographics_age = [
+            {
+                "group": r["age_group"],
+                "count": int(r["cnt"]),
+                "color": age_colors.get(r["age_group"], "#94a3b8"),
+            }
+            for r in age_rows
+        ]
+
+        avg_age = float(avg_age_row["avg_age"]) if avg_age_row and avg_age_row["avg_age"] else None
+
+        peak_hourly_cnt = max((int(r["cnt"]) for r in hourly_rows), default=0)
+        hourly_entries = [
+            {
+                "hour":    r["hour"].strftime("%H:00"),
+                "count":   int(r["cnt"]),
+                "is_peak": int(r["cnt"]) == peak_hourly_cnt and peak_hourly_cnt > 0,
+            }
+            for r in hourly_rows
+        ]
 
         vs_yesterday_pct = (
             round((total - yesterday_total) / yesterday_total * 100)
@@ -480,11 +572,14 @@ def day_recap():
             "lanes_today":         lanes_today,
             "busiest_lane":        busiest_lane,
             "alert_minutes":       alert_minutes,
-            "demographics_gender": _demo.get("gender", []),
-            "demographics_age":    _demo.get("age",    []),
-            "entries_by_hour":     _hourly,
+            "demographics_gender": demographics_gender,
+            "demographics_age":    demographics_age,
+            "avg_age":             avg_age,
+            "entries_by_hour":     hourly_entries,
         }
 
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -517,6 +612,54 @@ def forecast_chart():
                 for row in rows
             ]
         }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/day-wait-chart")
+def day_wait_chart(date: Optional[str] = None):
+    """
+    Full-day history of predicted arrivals/wait for the Statistique page's
+    Temps d'attente chart. Unlike /forecast-chart (always the next 60 min
+    forward from now), this covers a whole day - past or current - at
+    native prediction resolution. For today, it naturally tapers off
+    wherever the ensemble job's predictions currently stop (it doesn't
+    force the line to stop exactly at "now" or fabricate future points).
+    """
+    try:
+        if date:
+            try:
+                ref_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date must be in YYYY-MM-DD format")
+        else:
+            ref_date = datetime.now().date()
+
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE DATE(prediction_for) = %s
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """, (ref_date,))
+                rows = cur.fetchall()
+
+        return {
+            "slots": [
+                {
+                    "time":     row["prediction_for"].strftime("%H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
+                }
+                for row in rows
+            ]
+        }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

@@ -2,7 +2,7 @@ import { createContext, useContext, useState } from 'react';
 
 const T = {
   fr: {
-    tabs: { live: 'En direct', forecast: 'Prévision', today: "Aujourd'hui", alerts: 'Alertes' },
+    tabs: { live: 'En direct', forecast: 'Prévision', today: 'Statistique', alerts: 'Alertes' },
     live: 'LIVE', open: 'OPEN', busy: 'BUSY', closed: 'CLOSED', clients: 'clients',
     liveQueueStatus: 'LIVE QUEUE STATUS',
     inQueue: 'EN FILE', avgWait: 'ATTENTE',
@@ -46,9 +46,20 @@ const T = {
     responseRecorded: 'Réponse enregistrée',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs hier`,
     pctOfTotal: pct => `${pct}% du total`,
+    statsTitle: 'Statistique',
+    femmeLabel: 'FEMME', hommeLabel: 'HOMME', ageMoyenLabel: 'ÂGE MOYEN',
+    femmeCount: n => `${n} visiteuses`, hommeCount: n => `${n} visiteurs`,
+    ageValue: n => `${n} ans`,
+    waitChartTitle: "TEMPS D'ATTENTE", waitChartSubtitle: 'historique — pas de 5 min',
+    demographicsTitle: 'DÉMOGRAPHIE CLIENTS', demographicsSubtitle: 'Profil genre et âge des visiteurs',
+    genderSplitLabel: 'Répartition par genre', ageGroupLabel: 'Répartition par âge',
+    totalLabel: 'total',
+    demographicsByHourLabel: 'Démographie par heure de la journée',
+    demographicsByHourPlaceholder: 'Cette fonctionnalité arrive bientôt.',
+    noDemographicsData: 'Aucune donnée démographique pour cette date',
   },
   en: {
-    tabs: { live: 'Live', forecast: 'Forecast', today: 'Today', alerts: 'Alerts' },
+    tabs: { live: 'Live', forecast: 'Forecast', today: 'Statistics', alerts: 'Alerts' },
     live: 'LIVE', open: 'OPEN', busy: 'BUSY', closed: 'CLOSED', clients: 'clients',
     liveQueueStatus: 'LIVE QUEUE STATUS',
     inQueue: 'IN QUEUE', avgWait: 'WAIT',
@@ -92,6 +103,17 @@ const T = {
     responseRecorded: 'Response recorded',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs yesterday`,
     pctOfTotal: pct => `${pct}% of total`,
+    statsTitle: 'Statistics',
+    femmeLabel: 'FEMALE', hommeLabel: 'MALE', ageMoyenLabel: 'AVG AGE',
+    femmeCount: n => `${n} visitors`, hommeCount: n => `${n} visitors`,
+    ageValue: n => `${n} yrs`,
+    waitChartTitle: 'WAIT TIME', waitChartSubtitle: 'history — 5 min steps',
+    demographicsTitle: 'CUSTOMER DEMOGRAPHICS', demographicsSubtitle: 'Gender and age profile of visitors',
+    genderSplitLabel: 'Gender split', ageGroupLabel: 'Age group distribution',
+    totalLabel: 'total',
+    demographicsByHourLabel: 'Demographics by hour of day',
+    demographicsByHourPlaceholder: 'Coming soon.',
+    noDemographicsData: 'No demographic data for this date',
   },
 };
 
