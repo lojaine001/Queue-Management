@@ -54,11 +54,13 @@ function WaitTooltip({ active, payload, label, t }) {
 export default function TodayScreen() {
   const { t } = useLang();
   const [selectedDate, setSelectedDate] = useState(() => todayStr());
+  const isToday = selectedDate === todayStr();
 
   const { data, loading, error, lastUpdated } = useApi([`${API_URL}/day-recap?date=${selectedDate}`]);
   const [recap] = data;
 
-  const { data: waitData, loading: waitLoading } = useApi([`${API_URL}/forecast-chart`]);
+  const waitUrl = isToday ? `${API_URL}/forecast-chart` : `${API_URL}/day-wait-chart?date=${selectedDate}`;
+  const { data: waitData, loading: waitLoading } = useApi([waitUrl]);
   const [dayWait] = waitData;
 
   const totalCustomers = recap?.total_customers;
@@ -158,10 +160,10 @@ export default function TodayScreen() {
         </div>
       </div>
 
-      {/* Temps d'attente — same live forecast chart as Prévision */}
+      {/* Temps d'attente — live 60-min forecast for today, full-day history for past dates */}
       <div className="section-header">
         <span className="section-title">{t.waitChartTitle}</span>
-        <span style={s.sub}>{t.next60min}</span>
+        <span style={s.sub}>{isToday ? t.next60min : t.dayWaitHistory}</span>
       </div>
       <div style={s.chartCard}>
         {waitLoading ? (
