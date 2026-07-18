@@ -8,7 +8,7 @@ import UpdatedAgo from '../components/UpdatedAgo';
 import Skeleton from '../components/Skeleton';
 
 const SNAP_INTERVAL = 30000;
-const GAUGE_MAX_MIN = 12; // top of the gauge — matches the 9-12+ top zone
+const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
 
 // Count-driven lane color: 0 = idle/closed, 1 = green, 2-3 = orange, 4+ = red
 function countColor(count) {
@@ -75,11 +75,17 @@ function AlertsBar({ enabled, onToggle, threshold, onThreshold, t }) {
   );
 }
 
-function Gauge({ current, threshold, t }) {
+function Gauge({ current, t }) {
   const clamp = v => Math.max(0, Math.min(GAUGE_MAX_MIN, v ?? 0));
   const currentPct = (clamp(current) / GAUGE_MAX_MIN) * 100;
-  const thresholdPct = (clamp(threshold) / GAUGE_MAX_MIN) * 100;
-  const overThreshold = current != null && current >= threshold;
+  // Zone the marker currently sits in, purely for the value label color
+  const zoneColor = (() => {
+    const v = clamp(current);
+    if (v >= 6) return '#f85149';
+    if (v >= 4) return '#db6d28';
+    if (v >= 2) return '#d29922';
+    return '#3fb950';
+  })();
 
   return (
     <div style={s.gaugeWrap}>
@@ -94,16 +100,10 @@ function Gauge({ current, threshold, t }) {
 
         {/* Live wait — red marker, value sits right next to it at its actual position */}
         <div style={{ ...s.markerGroup, left: -70, bottom: `calc(${currentPct}% - 8px)` }}>
-          <span className="mono" style={{ fontSize: 14, fontWeight: 700, color: overThreshold ? '#f85149' : '#e6edf3' }}>
+          <span className="mono" style={{ fontSize: 14, fontWeight: 700, color: zoneColor }}>
             {current != null ? `${Math.round(current)}m` : '—'}
           </span>
           <span style={{ ...s.marker, ...s.markerRed }} />
-        </div>
-
-        {/* Seuil threshold — white marker, value sits next to it, moves live with the slider */}
-        <div style={{ ...s.markerGroup, right: -66, bottom: `calc(${thresholdPct}% - 8px)` }}>
-          <span style={{ ...s.marker, ...s.markerWhite }} />
-          <span className="mono" style={{ fontSize: 12, color: '#8b949e' }}>{threshold}m</span>
         </div>
       </div>
     </div>
@@ -200,7 +200,7 @@ export default function LiveScreen() {
           <div className="section-header" style={{ marginTop: 0 }}>
             <span className="section-title">SNAPSHOT</span>
           </div>
-          <Gauge current={avgWait} threshold={threshold} t={t} />
+          <Gauge current={avgWait} t={t} />
         </div>
       </div>
 
@@ -262,7 +262,7 @@ const s = {
 
   gaugeWrap: {
     background: 'var(--card-bg)', border: '1px solid var(--card-border)',
-    borderRadius: 16, padding: '20px 80px', display: 'flex', flexDirection: 'column', alignItems: 'center',
+    borderRadius: 16, padding: '20px 20px 20px 80px', display: 'flex', flexDirection: 'column', alignItems: 'center',
   },
   gaugeLabel: { fontSize: 13, color: '#8b949e', marginBottom: 14 },
   gaugeBody: { position: 'relative', width: 40, height: 220 },
@@ -278,10 +278,6 @@ const s = {
   markerRed: {
     borderTop: '7px solid transparent', borderBottom: '7px solid transparent',
     borderLeft: '11px solid #f85149',
-  },
-  markerWhite: {
-    borderTop: '7px solid transparent', borderBottom: '7px solid transparent',
-    borderRight: '11px solid #ffffff',
   },
 
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
