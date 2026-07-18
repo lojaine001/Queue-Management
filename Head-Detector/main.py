@@ -339,7 +339,8 @@ def main():
     show_ids   = config2.get('show_ids', False)
     max_distance_between_points = config2.get('max_distance_between_points', 2)
     max_age = config2.get('max_age', 10)
-    expect_fps = config2.get('expect_fps', 3)
+    expect_fps = float(config2.get('expect_fps', 3))
+    processing_fps = float(config2.get('processing_fps', expect_fps))
     snapshot_class_only = config2.get('snapshot_classes', [])
     openvino_device     = config2.get('openvino_device', 'CPU').upper()     # CPU / GPU / MYRIAD
     openvino_precision  = config2.get('openvino_precision', 'FP32').upper() # FP32 / FP16
@@ -537,7 +538,16 @@ def main():
 
     db = DBLogger()
 
-    thread_fps = 3
+    thread_fps = processing_fps
+    if thread_fps > 0:
+        print(Color.CYAN(f'[PERF] Target processing FPS : {thread_fps:.2f}'))
+    else:
+        print(Color.CYAN('[PERF] Target processing FPS : unlimited'))
+    if expect_fps != thread_fps and thread_fps > 0:
+        print(Color.YELLOW(
+            f'[PERF] WARNING: expect_fps={expect_fps:.2f} but processing_fps={thread_fps:.2f}. '
+            'Track age and dwell calculations use expect_fps, so keep them aligned unless you intentionally want different timing.'
+        ))
 
     no_dets = len(os.listdir(save_path)) + 1
     no_snapshots = len(os.listdir(snapshot_path)) + 1
@@ -568,6 +578,8 @@ def main():
     # Tracks shorter than this are still written to entrance_events (for counting)
     # but are excluded from service_events (wait time estimation) and the queue snapshot.
     QUEUE_MIN_DWELL_SEC = float(config2.get('queue_min_dwell_sec', 3.0))
+    # Separate (lower) threshold used only for queue_state_snapshots live count.
+    QUEUE_SNAPSHOT_MIN_DWELL_SEC = float(config2.get('queue_snapshot_min_dwell_sec', QUEUE_MIN_DWELL_SEC))
     # Caddy/basket image collection. Set interval to 0 to disable.
     CADDY_COLLECT_INTERVAL_SEC = float(config2.get('caddy_collect_interval_sec', 30.0))
     CADDY_COLLECT_MAX_GB       = float(config2.get('caddy_collect_max_gb', 2.0))
@@ -653,6 +665,7 @@ def main():
 
             current_time = time.time()
             confirmed_visual_tracks = []
+            snapshot_eligible_tracks = []  # in-ROI tracks counted by snapshot but not yet confirmed
 
             if debug_mode:
                 new_ids  = [obj.global_id for obj in tracked_objects if obj.global_id not in track_start_times]
@@ -715,6 +728,17 @@ def main():
                 active_tracked_sec = track_hits.get(track_id, 0) / expect_fps
                 min_confirmed_track_sec = max_age / expect_fps
                 if active_tracked_sec <= min_confirmed_track_sec:
+                    if track_dur >= QUEUE_SNAPSHOT_MIN_DWELL_SEC:
+                        snap_roi_idx = (obj.last_detection.data.get("roi_idx")
+                                        if hasattr(obj.last_detection, "data") and obj.last_detection.data
+                                        else None)
+                        if snap_roi_idx is not None:
+                            snapshot_eligible_tracks.append({
+                                "track_id": track_id,
+                                "roi_idx": snap_roi_idx,
+                                "bbox": (bx1, by1, bx2, by2),
+                                "track_dur": track_dur,
+                            })
                     continue
 
                 if track_id not in person_loggers:
@@ -811,6 +835,11 @@ def main():
 
                 PAD = 6
                 rx1, ry1, rx2, ry2 = bx1 - PAD, by1 - PAD, bx2 + PAD, by2 + PAD
+                if roi_idx is not None and track_dur >= QUEUE_SNAPSHOT_MIN_DWELL_SEC:
+                    # Keep the white queue-count overlay visible even after the track
+                    # becomes fully confirmed, so live snapshot-counted people are easy
+                    # to spot in the preview window.
+                    cv2.rectangle(img, (rx1 - 2, ry1 - 2), (rx2 + 2, ry2 + 2), (255, 255, 255), 2)
                 cv2.rectangle(img, (rx1, ry1), (rx2, ry2), track_color, 2)
                 cv2.circle(img, (tip_x, tip_y), 3, (0, 0, 255), -1, cv2.LINE_AA)
 
@@ -849,10 +878,31 @@ def main():
                         cv2.putText(img, eq_label, (label_x + 2, eq_y - 2),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, eq_color, 1, cv2.LINE_AA)
 
+            for track_info in snapshot_eligible_tracks:
+                bx1, by1, bx2, by2 = track_info["bbox"]
+                PAD = 6
+                rx1, ry1, rx2, ry2 = bx1 - PAD, by1 - PAD, bx2 + PAD, by2 + PAD
+                cv2.rectangle(img, (rx1, ry1), (rx2, ry2), (255, 255, 255), 2)
+                track_dur_s = track_info["track_dur"]
+                dwell_label = (f'ID:{track_info["track_id"]}  {track_dur_s:.1f}s'
+                               if show_ids else f'{track_dur_s:.1f}s')
+                (tw, th), _ = cv2.getTextSize(dwell_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                label_y = min(by2 + 20, img.shape[0] - 4)
+                label_x = max(bx1, 2)
+                cv2.rectangle(img, (label_x - 2, label_y - th - 6), (label_x + tw + 4, label_y + 2), (20, 20, 20), -1)
+                cv2.rectangle(img, (label_x - 2, label_y - th - 6), (label_x + tw + 4, label_y + 2), (255, 255, 255), 1)
+                cv2.putText(img, dwell_label, (label_x + 2, label_y - 3),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+            lane_snapshot_counts = dict(lane_active_counts)
+            for track_info in snapshot_eligible_tracks:
+                roi_idx = track_info["roi_idx"]
+                lane_snapshot_counts[roi_idx] = lane_snapshot_counts.get(roi_idx, 0) + 1
+
             for lane_number, (roi_name, roi_pts, roi_zone) in enumerate(roi_polygons, start=1):
                 center_x = int(roi_zone.centroid.x)
                 center_y = int(roi_zone.centroid.y)
-                active_count = lane_active_counts.get(lane_number - 1, 0)
+                active_count = lane_snapshot_counts.get(lane_number - 1, 0)
                 lane_label = f"L{lane_number}: {active_count}"
                 (tw, th), _ = cv2.getTextSize(lane_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
                 cv2.rectangle(
@@ -992,17 +1042,16 @@ def main():
             # ── Periodic queue-state snapshot ────────────────────────────────
             if current_time - last_snapshot_time >= SNAPSHOT_INTERVAL:
                 active_ids = [obj.global_id for obj in tracked_objects]
-                # Only count people who have been standing for >= QUEUE_MIN_DWELL_SEC.
-                # Tracks shorter than this are passers-by and would inflate the queue count.
                 dwells = [current_time - track_start_times[tid]
                           for tid in active_ids if tid in track_start_times]
-                long_dwells = [d for d in dwells if d >= QUEUE_MIN_DWELL_SEC]
-                queue_count = len(long_dwells)
+                long_dwells = [d for d in dwells if d >= QUEUE_SNAPSHOT_MIN_DWELL_SEC]
+                # Use the same per-lane count that is shown on the overlay (0.25 s threshold).
+                queue_count = sum(lane_snapshot_counts.values())
                 avg_dwell = float(sum(long_dwells) / len(long_dwells)) if long_dwells else 0.0
                 max_dwell = float(max(long_dwells)) if long_dwells else 0.0
                 # Persist the per-lane counts already computed for the overlay.
                 db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell,
-                                      lane_counts=lane_active_counts)
+                                      lane_counts=lane_snapshot_counts)
                 last_snapshot_time = current_time
 
             # ── Caddy dataset collection (raw frame, low framerate) ───────────
@@ -1024,8 +1073,9 @@ def main():
 
             # Control loop timing to match desired FPS
             elapsed_time = time.time() - start_time
-            sleep_time = max(0, (1.0 / thread_fps) - elapsed_time)
-            time.sleep(sleep_time)
+            if thread_fps > 0:
+                sleep_time = max(0, (1.0 / thread_fps) - elapsed_time)
+                time.sleep(sleep_time)
             end_time = time.time()
             fps = max(round(1 / (end_time - start_time)), 1)
             write_text(img, f"FPS: {fps}", position="bottom_right")

@@ -19,11 +19,17 @@ show_rejected_track_overlay: False
 openvino_device: CPU       # CPU | GPU | NPU (MYRIAD is accepted as a legacy alias)
 openvino_precision: FP32   # FP32 | FP16
 
-expect_fps: 3
+# Main-loop throttle. Set to 0 for no artificial cap.
+processing_fps: 0
 
-max_age: 9
+# Used to convert tracker age (frames) into seconds for confirmation/dwell logic.
+# Keep this aligned with the actual processed FPS unless you intentionally want
+# different timing semantics.
+expect_fps: 8
 
-max_distance_between_points: 3
+max_age: 4
+
+max_distance_between_points: 6
 
 save_one: True
 
@@ -69,10 +75,10 @@ owlv2_score_thresh:    0.10
 # ── Queue quality filter ──────────────────────────────────────────────────────
 # Tracks shorter than this (seconds) are passer-by noise; excluded from
 # service_events and queue snapshot counts.
-queue_min_dwell_sec: 2.5
+queue_min_dwell_sec: 3.0
 
 # Lower threshold used only for the live queue_state_snapshots count.
-queue_snapshot_min_dwell_sec: 0.25
+queue_snapshot_min_dwell_sec: 1.0
 
 # How often (seconds) to write a queue_state_snapshots row while running.
 snapshot_interval: 3

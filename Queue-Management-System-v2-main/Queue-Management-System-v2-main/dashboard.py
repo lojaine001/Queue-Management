@@ -19,6 +19,7 @@ import psycopg2
 import streamlit as st
 from dotenv import find_dotenv, load_dotenv
 from plotly.subplots import make_subplots
+from streamlit.components.v1 import html as st_html
 
 try:
     import tensorflow as tf
@@ -94,7 +95,17 @@ def _today_hours():
     """Return (open_hour, open_min, close_hour, close_min, open_tot, close_tot) for today."""
     _oh, _om, _ch, _cm = _day_hours(pd.Timestamp.now().weekday())
     return _oh, _om, _ch, _cm, _oh * 60 + _om, _ch * 60 + _cm
-REFRESH_SEC = int(os.getenv("REFRESH_SEC", 900))
+# Scheduler interval drives everything time-based on this page: the
+# @st.cache_data TTL below, and the page auto-refresh timer further down —
+# so a browser reload always lands right when a new prediction is due.
+if "sched_interval" not in st.session_state:
+    _qp_interval = st.query_params.get("sched_interval", None)
+    _interval_options = [5, 10, 15, 30, 60]
+    if _qp_interval is not None and str(_qp_interval).isdigit() and int(_qp_interval) in _interval_options:
+        st.session_state["sched_interval"] = int(_qp_interval)
+    else:
+        st.session_state["sched_interval"] = 15
+REFRESH_SEC = int(st.session_state["sched_interval"]) * 60
 WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
@@ -1406,9 +1417,15 @@ def load_prophet_training_fit():
 
 st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout="wide")
 
-# Auto-refresh is intentionally disabled here. The previous fragment-based
-# rerun path could blank the page before the dashboard finished rendering.
-# Use the Refresh button while we debug prediction/training behavior.
+# Auto-refresh via a full browser reload (not a Streamlit fragment rerun —
+# that path used to blank the page mid-render). A plain page reload always
+# re-executes the script top to bottom, so it's safe against that failure mode.
+# REFRESH_SEC == sched_interval minutes (set above), so the reload cadence
+# always matches the prediction recalculation cadence.
+st_html(
+    f"<script>setTimeout(function(){{ window.parent.location.reload(); }}, {REFRESH_SEC * 1000});</script>",
+    height=0,
+)
 
 st.markdown(
     """
@@ -2397,14 +2414,8 @@ with action_dwell_models:
     )
 
 # ── Auto-prediction scheduler UI ───────────────────────────────────────────────
-
-if "sched_interval" not in st.session_state:
-    _qp_interval = st.query_params.get("sched_interval", None)
-    _interval_options = [5, 10, 15, 30, 60]
-    if _qp_interval is not None and str(_qp_interval).isdigit() and int(_qp_interval) in _interval_options:
-        st.session_state["sched_interval"] = int(_qp_interval)
-    else:
-        st.session_state["sched_interval"] = 15
+# (sched_interval is initialized earlier, near st.set_page_config, since the
+# page auto-refresh timer needs it before this point in the script.)
 
 _sched_pid = _scheduler_pid()
 _sched_running = _sched_pid is not None

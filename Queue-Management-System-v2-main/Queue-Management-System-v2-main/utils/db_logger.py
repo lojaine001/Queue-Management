@@ -214,17 +214,26 @@ class DBLogger:
         except Exception as e:
             print(f"[DB] Snapshot error: {e}")
 
-    def get_today_entry_timestamps(self):
+    def get_today_entry_timestamps(self, camera_id: str = None):
         """Return today's entrance event timestamps as Unix epoch floats for counted_entry_times."""
         if not self.enabled:
             return []
         try:
-            self.cursor.execute("""
-                SELECT EXTRACT(EPOCH FROM timestamp)
-                FROM entrance_events
-                WHERE timestamp >= CURRENT_DATE::TIMESTAMPTZ
-                ORDER BY timestamp ASC
-            """)
+            if camera_id:
+                self.cursor.execute("""
+                    SELECT EXTRACT(EPOCH FROM timestamp)
+                    FROM entrance_events
+                    WHERE timestamp >= CURRENT_DATE::TIMESTAMPTZ
+                      AND camera_id = %s
+                    ORDER BY timestamp ASC
+                """, (camera_id,))
+            else:
+                self.cursor.execute("""
+                    SELECT EXTRACT(EPOCH FROM timestamp)
+                    FROM entrance_events
+                    WHERE timestamp >= CURRENT_DATE::TIMESTAMPTZ
+                    ORDER BY timestamp ASC
+                """)
             return [float(row[0]) for row in self.cursor.fetchall()]
         except Exception as e:
             print(f"[DB] get_today_entry_timestamps error: {e}")

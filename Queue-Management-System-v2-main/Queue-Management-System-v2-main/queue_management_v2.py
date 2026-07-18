@@ -1,6 +1,7 @@
 import os
 import logging
 import sys
+from typing import cast
 
 LIVE_SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'snapshots')
 LIVE_SNAP_INTERVAL = 5.0
@@ -283,7 +284,7 @@ def main():
     stored_config = get_config(config_filepath=config_name)
     config2 = get_config(config_filepath='config2.yml')
 
-    camID = stored_config.get('camID', 'camera1')
+    camID: str = stored_config.get('camID', 'camera1')
     ip_address = stored_config.get('ip_address', '192.168.1.136:1033/axis-media/media.amp')
 
 
@@ -401,7 +402,16 @@ def main():
     thread = get_capture_thread(cap_url=link, cap_loop=True)
     thread.start()
 
-    thread_fps = 3
+    # Determine processing/expected FPS from the video stream itself
+    stream_fps = thread.get_fps()
+    if stream_fps > 0:
+        expect_fps = stream_fps
+        print(f"[PERF] Detected video stream FPS: {expect_fps}")
+    else:
+        print(f"[PERF] Could not detect stream FPS. Using expect_fps: {expect_fps}")
+
+    thread_fps = cast(int, expect_fps)
+    print(f"[PERF] Processing loop FPS cap: {thread_fps}")
 
     no_dets = len(os.listdir(save_path)) + 1
     no_snapshots = len(os.listdir(snapshot_path)) + 1
@@ -421,11 +431,14 @@ def main():
     _T_REPORT_EVERY = 30.0     # seconds between timing reports
     track_data = {}        # track_id -> {gender, age, confidence, best_conf} accumulated while alive
     prev_track_ids = set() # track_ids active in the previous frame
-    counted_entry_times = deque(db.get_today_entry_timestamps())
+    counted_entry_times = deque(db.get_today_entry_timestamps(camera_id=str(camID)))
     track_crossed:  set[int]        = set()   # tracks that already triggered a count
     band_candidate: dict[int, list] = {}      # track_id → [dist1, dist2, ...] for 3-frame confirm
     face_analyzed_tracks: set[int]  = set()   # tracks that received at least one real face result
     _face_frame_counter: int        = 0
+
+    if args.view_img:
+        cv2.namedWindow('Queue Management System', cv2.WINDOW_NORMAL)
 
     try:
         while True:

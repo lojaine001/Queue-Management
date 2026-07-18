@@ -4,6 +4,7 @@ warnings.filterwarnings('ignore')
 import os
 import sys
 import copy
+import ctypes
 import cv2
 import time
 import onnx
@@ -17,6 +18,8 @@ from argparse import ArgumentParser
 from typing import Tuple, Optional, List, Dict
 import importlib.util
 from abc import ABC, abstractmethod
+from contextlib import redirect_stderr
+from io import StringIO
 
 
 class Color(Enum):
@@ -134,17 +137,22 @@ class AbstractModel(ABC):
 
         _devnull_fd  = os.open(os.devnull, os.O_WRONLY)
         _old_stderr  = os.dup(2)
+        provider_stderr = StringIO()
+        self._provider_init_stderr = ""
         os.dup2(_devnull_fd, 2)
         try:
-            self._interpreter = self._create_inference_session(
-                model_path=model_path,
-                sess_options=session_option,
-                providers=providers,
-            )
+            self._preload_openvino_runtime()
+            with redirect_stderr(provider_stderr):
+                self._interpreter = self._create_inference_session(
+                    model_path=model_path,
+                    sess_options=session_option,
+                    providers=providers,
+                )
         finally:
             os.dup2(_old_stderr, 2)
             os.close(_old_stderr)
             os.close(_devnull_fd)
+            self._provider_init_stderr = provider_stderr.getvalue().strip()
 
         requested_provider_names = [
             self._provider_name(provider) for provider in (providers or [])
@@ -197,6 +205,72 @@ class AbstractModel(ABC):
             return provider[0]
         return provider
 
+    def _preload_openvino_runtime(self) -> None:
+        if sys.platform != 'win32':
+            return
+
+        provider_names = [self._provider_name(provider) for provider in (self._providers or [])]
+        if 'OpenVINOExecutionProvider' not in provider_names:
+            return
+
+        ov_spec = importlib.util.find_spec('openvino')
+        ort_spec = importlib.util.find_spec('onnxruntime')
+        if not ov_spec or not ov_spec.origin or not ort_spec or not ort_spec.origin:
+            return
+
+        ov_dir = Path(ov_spec.origin).resolve().parent
+        ov_libs = ov_dir / 'libs'
+        ort_capi = Path(ort_spec.origin).resolve().parent / 'capi'
+
+        self._provider_dll_handles = []
+        for dll_dir in [ov_libs, ort_capi]:
+            if not dll_dir.is_dir():
+                continue
+            try:
+                self._provider_dll_handles.append(os.add_dll_directory(str(dll_dir)))
+            except (AttributeError, FileNotFoundError, OSError):
+                continue
+
+        preload_chain = [
+            ov_libs / 'tbb12.dll',
+            ov_libs / 'openvino.dll',
+            ov_libs / 'openvino_c.dll',
+            ort_capi / 'onnxruntime.dll',
+            ort_capi / 'onnxruntime_providers_shared.dll',
+        ]
+        for dll_path in preload_chain:
+            if not dll_path.exists():
+                continue
+            ctypes.WinDLL(str(dll_path))
+
+    def _collect_openvino_debug_context(self) -> List[str]:
+        details: List[str] = []
+
+        try:
+            import importlib.metadata as importlib_metadata
+            for name in ['onnxruntime-openvino', 'openvino', 'openvino-telemetry']:
+                try:
+                    details.append(f'{name}={importlib_metadata.version(name)}')
+                except importlib_metadata.PackageNotFoundError:
+                    details.append(f'{name}=missing')
+        except Exception as version_exc:
+            details.append(f'version_probe_error={version_exc}')
+
+        try:
+            ov_spec = importlib.util.find_spec('openvino')
+            if ov_spec and ov_spec.origin:
+                ov_dir = Path(ov_spec.origin).resolve().parent
+                ov_lib = ov_dir / 'libs' / 'openvino.dll'
+                details.append(f'openvino_origin={ov_spec.origin}')
+                details.append(f'openvino_dll_exists={ov_lib.exists()}')
+        except Exception as ov_exc:
+            details.append(f'openvino_probe_error={ov_exc}')
+
+        if getattr(self, '_provider_init_stderr', ''):
+            details.append(f'provider_stderr={self._provider_init_stderr}')
+
+        return details
+
     def _create_inference_session(
         self,
         *,
@@ -241,6 +315,11 @@ class AbstractModel(ABC):
             print(Color.YELLOW(
                 f'[ORT] WARNING: OpenVINO session initialization failed, falling back to CPU. Reason: {exc}'
             ))
+            debug_details = self._collect_openvino_debug_context()
+            if debug_details:
+                print(Color.YELLOW('[ORT] OpenVINO debug context:'))
+                for detail in debug_details:
+                    print(Color.YELLOW(f'  - {detail}'))
             return onnxruntime.InferenceSession(
                 model_path,
                 sess_options=sess_options,

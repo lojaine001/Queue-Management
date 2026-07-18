@@ -1,5 +1,5 @@
-"""
-api.py — FastAPI backend for the IQMS Manager Mobile App.
+﻿"""
+api.py â€” FastAPI backend for the IQMS Manager Mobile App.
 
 Run with:
     uvicorn api:app --host 0.0.0.0 --port 8000 --reload
@@ -38,6 +38,7 @@ DB_CONFIG = dict(
 
 LANE_MAX_CAPACITY = 10  # denominator for fill bar
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
+CHECKOUT_CAM_ID = os.getenv("CHECKOUT_CAM_ID", "Bosch_Camera_exit")
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
 
 
@@ -59,7 +60,7 @@ def _lane_status(avg_wait_min: float, queue_depth: int) -> str:
     return "closed"
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# â”€â”€ Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class AlertResponse(BaseModel):
     response: str
@@ -70,7 +71,7 @@ class SetLanesRequest(BaseModel):
     lanes: int
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/health")
 def health():
@@ -81,63 +82,41 @@ def health():
 def live_lanes():
     """
     Returns per-lane queue status for the Live tab.
-    Reads recent service_events grouped by lane_id + current queue snapshot.
+    - Per-lane counts from queue_state_snapshots.lane_counts (head detector, live)
+    - avg_wait_min from dashboard_state.service_min (stable, floor-capped)
     """
     try:
+        import json
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Recent activity per lane — use last 2 hours as fallback
                 cur.execute("""
-                    SELECT
-                        lane_id,
-                        COUNT(*)                                    AS recent_checkouts,
-                        ROUND(AVG(total_dwell_sec)::numeric / 60.0, 1)      AS avg_wait_min
-                    FROM service_events
-                    WHERE timestamp >= NOW() - INTERVAL '2 hours'
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND lane_id IS NOT NULL
-                    GROUP BY lane_id
-                    ORDER BY lane_id
-                """)
-                lane_rows = cur.fetchall()
+                    SELECT queue_count, lane_counts
+                    FROM queue_state_snapshots
+                    WHERE camera_id = %s
+                    ORDER BY timestamp DESC LIMIT 1
+                """, (CHECKOUT_CAM_ID,))
+                snap_row = cur.fetchone()
 
-                # Read queue count and avg wait from dashboard_state — these are
-                # the exact values the dashboard computes and displays, so the
-                # app snapshot matches the dashboard perfectly.
-                cur.execute("""
-                    SELECT queue_now AS queue_count,
-                           service_min * 60 AS avg_dwell_sec,
-                           open_lanes
-                    FROM dashboard_state WHERE id = 1
-                """)
-                snap = cur.fetchone()
-                total_queue = int(snap["queue_count"] or 0) if snap else 0
-                active_lanes = max(len(lane_rows), 1)
-                queue_per_lane = max(0, round(total_queue / active_lanes))
+                cur.execute("SELECT queue_now, service_min, wait_5m FROM dashboard_state WHERE id = 1")
+                ds = cur.fetchone()
+
+        total_queue = int(snap_row["queue_count"] or 0) if snap_row else (int(ds["queue_now"] or 0) if ds else 0)
+        # Use 5-min forecast wait; fall back to service_min
+        avg_wait_min = round(float(ds["wait_5m"]) if ds and ds["wait_5m"] is not None else float(ds["service_min"] if ds and ds["service_min"] else 1.0), 2)
+
+        lane_counts_raw = snap_row["lane_counts"] if snap_row else None
+        if isinstance(lane_counts_raw, str):
+            lane_counts_raw = json.loads(lane_counts_raw)
+        lane_counts: dict = lane_counts_raw or {}
 
         lanes = []
-        active_lane_ids = {str(r["lane_id"]) for r in lane_rows}
-
-        # Build up to 4 lanes
-        known_lanes = sorted(active_lane_ids) if active_lane_ids else []
-        # Pad to 4 if fewer
-        while len(known_lanes) < 4:
-            known_lanes.append(str(len(known_lanes)))
-
-        for i, lane_id in enumerate(known_lanes[:4]):
-            matching = next((r for r in lane_rows if str(r["lane_id"]) == lane_id), None)
-            if matching:
-                avg_wait = float(matching["avg_wait_min"] or 0)
-                depth = queue_per_lane
-                status = _lane_status(avg_wait, depth)
-            else:
-                avg_wait = 0.0
-                depth = 0
-                status = "closed"
-
+        for i in range(4):
+            depth = int(lane_counts.get(str(i), 0))
+            avg_wait = avg_wait_min if depth > 0 else 0.0
+            status = _lane_status(avg_wait, depth)
             lanes.append({
                 "lane_number": i + 1,
-                "lane_id":     lane_id,
+                "lane_id":     str(i),
                 "status":      status,
                 "waiting":     depth,
                 "fill":        depth,
@@ -147,7 +126,7 @@ def live_lanes():
 
         snapshot = {
             "total_in_queue": total_queue,
-            "avg_wait_min":   round(float(snap["avg_dwell_sec"] or 0) / 60, 1) if snap else 0.0,
+            "avg_wait_min":   avg_wait_min,
             "open_lanes":     len([l for l in lanes if l["status"] != "closed"]),
         }
 
@@ -175,11 +154,11 @@ def get_alerts():
         wait = float(state["wait_15m"])
 
         if wait > 10:
-            level, message = "red",    f"Queue exceeding {wait:.0f} min in 15 min — open a lane immediately."
+            level, message = "red",    f"Queue exceeding {wait:.0f} min in 15 min â€” open a lane immediately."
         elif wait > 7:
-            level, message = "orange", f"Queue building to {wait:.0f} min in 15 min — open a lane soon."
+            level, message = "orange", f"Queue building to {wait:.0f} min in 15 min â€” open a lane soon."
         elif wait > 5:
-            level, message = "yellow", f"Queue may reach {wait:.0f} min — consider opening a lane."
+            level, message = "yellow", f"Queue may reach {wait:.0f} min â€” consider opening a lane."
         else:
             level, message = None,     f"Queue normal. Expected wait in 15 min: {wait:.1f} min."
 
@@ -199,7 +178,7 @@ def forecast():
     """
     Reads the pre-computed values that the dashboard already calculates and
     writes to dashboard_state on every refresh. This guarantees the app shows
-    exactly the same numbers as the dashboard — no separate computation needed.
+    exactly the same numbers as the dashboard â€” no separate computation needed.
     """
     try:
         with _conn() as conn:
@@ -217,7 +196,7 @@ def forecast():
         def _f(v): return round(float(v), 1) if v is not None else None
 
         if not state:
-            # dashboard_state not populated yet — dashboard hasn't run since last restart
+            # dashboard_state not populated yet â€” dashboard hasn't run since last restart
             return {
                 "wait_now_min": None, "wait_5_min": None,
                 "wait_10_min": None, "wait_15_min": None,
@@ -293,14 +272,29 @@ def day_recap():
                     FROM entrance_events
                     WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
                 """)
                 total = int((cur.fetchone() or {}).get("total") or 0)
 
+                # Yesterday's total, for the vs-yesterday comparison
+                yesterday_date = (ref_date - timedelta(days=1)) if ref_date else None
+                yesterday_total = None
+                if yesterday_date:
+                    cur.execute("""
+                        SELECT COUNT(*) AS total
+                        FROM entrance_events
+                        WHERE DATE(timestamp) = %s
+                          AND camera_id NOT LIKE 'SIM_%%'
+                          AND dwell_seconds >= 10
+                    """, (yesterday_date,))
+                    yesterday_total = int((cur.fetchone() or {}).get("total") or 0)
+
                 cur.execute(f"""
-                    SELECT DATE_TRUNC('hour', timestamp) AS hour, COUNT(*) AS cnt
+                    SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour, COUNT(*) AS cnt
                     FROM entrance_events
                     WHERE {date_filter}
                       AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
                     GROUP BY 1 ORDER BY 2 DESC LIMIT 1
                 """)
                 peak_row   = cur.fetchone()
@@ -389,13 +383,21 @@ def day_recap():
         _demo      = _json.loads(ds_row["demographics_json"])   if ds_row and ds_row["demographics_json"]   else {}
         _hourly    = _json.loads(ds_row["entries_hour_json"])   if ds_row and ds_row["entries_hour_json"]   else []
 
+        vs_yesterday_pct = (
+            round((total - yesterday_total) / yesterday_total * 100)
+            if yesterday_total else None
+        )
+        peak_pct_of_total = round(peak_count / total * 100) if total else None
+
         return {
             "date":                display_date,
             "total_customers":     total,
+            "vs_yesterday_pct":    vs_yesterday_pct,
             "avg_wait_min":        avg_wait_min,
             "peak_hour":           peak_hour,
             "peak_hour_end":       peak_end,
             "peak_count":          peak_count,
+            "peak_pct_of_total":   peak_pct_of_total,
             "equipment":           equipment,
             "lanes_today":         lanes_today,
             "busiest_lane":        busiest_lane,
@@ -475,27 +477,28 @@ def forecast_chart_3h():
 
 @app.get("/forecast-chart-12h")
 def forecast_chart_12h():
-    """Returns 12-hour time series of predicted arrivals and wait for the app chart."""
+    """Returns last 6 hours of actual entrance counts (3-min buckets) for the app chart."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0)    AS arrivals,
-                        COALESCE(est_wait_minutes, 0) AS wait_min
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW() - INTERVAL '6 hours'
-                      AND prediction_for <= NOW() + INTERVAL '6 hours'
-                    ORDER BY prediction_for ASC, predicted_at DESC
+                    SELECT
+                        time_bucket('3 minutes', timestamp) AS slot,
+                        COUNT(*) AS entries
+                    FROM entrance_events
+                    WHERE timestamp >= NOW() - INTERVAL '6 hours'
+                      AND timestamp <= NOW()
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                    GROUP BY 1
+                    ORDER BY 1 ASC
                 """)
                 rows = cur.fetchall()
         return {
             "slots": [
                 {
-                    "time":     row["prediction_for"].strftime("%H:%M"),
-                    "arrivals": round(float(row["arrivals"]), 1),
-                    "wait_min": round(float(row["wait_min"]), 1),
+                    "time":    row["slot"].strftime("%H:%M"),
+                    "entries": int(row["entries"]),
                 }
                 for row in rows
             ]
@@ -506,27 +509,28 @@ def forecast_chart_12h():
 
 @app.get("/forecast-chart-2d")
 def forecast_chart_2d():
-    """Returns 2-day history + forecast time series for the app chart."""
+    """Returns last 2 days of actual entrance counts (3-min buckets) for the app chart."""
     try:
         with _conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0)    AS arrivals,
-                        COALESCE(est_wait_minutes, 0) AS wait_min
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW() - INTERVAL '2 days'
-                      AND prediction_for <= NOW() + INTERVAL '12 hours'
-                    ORDER BY prediction_for ASC, predicted_at DESC
+                    SELECT
+                        time_bucket('3 minutes', timestamp) AS slot,
+                        COUNT(*) AS entries
+                    FROM entrance_events
+                    WHERE timestamp >= NOW() - INTERVAL '2 days'
+                      AND timestamp <= NOW()
+                      AND camera_id NOT LIKE 'SIM_%%'
+                      AND dwell_seconds >= 10
+                    GROUP BY 1
+                    ORDER BY 1 ASC
                 """)
                 rows = cur.fetchall()
         return {
             "slots": [
                 {
-                    "time":     row["prediction_for"].strftime("%d/%m %H:%M"),
-                    "arrivals": round(float(row["arrivals"]), 1),
-                    "wait_min": round(float(row["wait_min"]), 1),
+                    "time":    row["slot"].strftime("%d/%m %H:%M"),
+                    "entries": int(row["entries"]),
                 }
                 for row in rows
             ]

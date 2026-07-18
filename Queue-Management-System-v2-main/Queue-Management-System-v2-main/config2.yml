@@ -1,9 +1,9 @@
 # (conf, area, ratio)
 debug_mode: True
 
-expect_fps: 3
+expect_fps: 12
 
-max_age: 3
+max_age: 6
 
 max_distance_between_points: 3
 
