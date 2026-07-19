@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  ComposedChart, Bar, Cell, Line, Area, XAxis, YAxis, CartesianGrid,
+  ComposedChart, Bar, Cell, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, PieChart, Pie, LineChart,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
@@ -42,7 +42,7 @@ function WaitTooltip({ active, payload, label, t }) {
       <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
       {payload.map(p => (
         <div key={p.dataKey} style={{ color: p.color, fontWeight: 700, fontSize: 12 }}>
-          {p.dataKey === 'wait' ? t.waitLegend : t.arrivalsLegend}: {p.value?.toFixed(1)}
+          {t.waitLegend}: {p.value?.toFixed(1)}
         </div>
       ))}
     </div>
@@ -75,7 +75,7 @@ export default function TodayScreen() {
     isPeak: !!h.is_peak,
   }));
 
-  const waitPoints = (dayWait?.slots ?? []).map(sl => ({ t: sl.time, wait: sl.wait_min, arrivals: sl.arrivals }));
+  const waitPoints = (dayWait?.slots ?? []).map(sl => ({ t: sl.time, wait: sl.wait_min }));
 
   return (
     <div className="screen-page">
@@ -174,18 +174,11 @@ export default function TodayScreen() {
         ) : waitPoints.length > 0 ? (
           <ResponsiveContainer width="100%" height={220}>
             <ComposedChart data={waitPoints} margin={{ top: 8, right: 16, left: -16, bottom: 8 }}>
-              <defs>
-                <linearGradient id="statsWaitFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#db6d28" stopOpacity={0.35} />
-                  <stop offset="100%" stopColor="#db6d28" stopOpacity={0} />
-                </linearGradient>
-              </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
               <XAxis dataKey="t" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={30} />
               <YAxis domain={[0, 32]} ticks={[0, 8, 16, 24, 32]} tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit=" min" />
               <Tooltip content={<WaitTooltip t={t} />} />
-              <Area type="natural" dataKey="wait" stroke="#db6d28" strokeWidth={2.5} fill="url(#statsWaitFill)" dot={false} />
-              <Line type="natural" dataKey="arrivals" stroke="#58a6ff" strokeWidth={2} dot={false} />
+              <Bar dataKey="wait" fill="#db6d28" radius={[3, 3, 0, 0]} />
             </ComposedChart>
           </ResponsiveContainer>
         ) : (
@@ -193,7 +186,6 @@ export default function TodayScreen() {
         )}
         <div style={s.legendRow}>
           <span style={s.legendItem}><span style={{ ...s.legendDot, background: '#db6d28' }} /> {t.waitLegend}</span>
-          <span style={s.legendItem}><span style={{ ...s.legendDot, background: '#58a6ff' }} /> {t.arrivalsLegend}</span>
         </div>
       </div>
 
