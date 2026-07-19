@@ -138,6 +138,14 @@ export default function LiveScreen() {
     localStorage.setItem('iqms_alert_threshold', String(threshold));
   }, [threshold]);
 
+  // Ask for browser-notification permission once alerts are turned on,
+  // so the rising-edge effect below can actually fire a native popup.
+  useEffect(() => {
+    if (alertsEnabled && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, [alertsEnabled]);
+
   const { data, loading, error, lastUpdated } = useApi([
     `${API_URL}/live-lanes`,
     `${API_URL}/alerts`,
@@ -167,7 +175,11 @@ export default function LiveScreen() {
     if (avgWait == null) return;
     const isOver = avgWait >= threshold;
     if (isOver && !wasOverRef.current) {
-      showToast(t.alertPopupMessage(Math.round(avgWait), threshold), 'error', 6000);
+      const message = t.alertPopupMessage(Math.round(avgWait), threshold);
+      showToast(message, 'error', 6000);
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('IQMS', { body: message });
+      }
     }
     wasOverRef.current = isOver;
   }, [avgWait, threshold, alertsEnabled]);
