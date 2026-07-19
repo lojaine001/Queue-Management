@@ -1,7 +1,7 @@
 import { useLang } from '../context/LanguageContext';
 
-const TABS = ['live', 'forecast', 'today', 'alerts'];
-const ICONS = { live: '◉', forecast: '◈', today: '◧', alerts: '◬' };
+const TABS = ['live', 'today'];
+const ICONS = { live: '◉', today: '◧' };
 
 export default function Sidebar({ active, onChange }) {
   const { t, lang, setLang } = useLang();

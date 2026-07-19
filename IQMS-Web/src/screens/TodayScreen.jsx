@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   ComposedChart, Bar, Cell, Line, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, PieChart, Pie,
+  Tooltip, ResponsiveContainer, PieChart, Pie, LineChart,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
 import { API_URL } from '../config';
@@ -13,14 +13,12 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function StatCard({ value, label, sub, subColor, valueColor }) {
+function GenderTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null;
+  const d = payload[0].payload;
   return (
-    <div style={s.statCard}>
-      <div style={s.statLabel}>{label}</div>
-      {value != null
-        ? <div style={{ ...s.statValue, color: valueColor ?? '#e6edf3' }}>{value}</div>
-        : <div style={s.statDash}>—</div>}
-      {sub && <div style={{ ...s.statSub, color: subColor ?? s.statSub.color }}>{sub}</div>}
+    <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
+      <span style={{ color: d.color, fontWeight: 700, fontSize: 12 }}>{d.label} - {d.percent}%</span>
     </div>
   );
 }
@@ -65,11 +63,11 @@ export default function TodayScreen() {
 
   const totalCustomers = recap?.total_customers;
   const vsYesterdayPct = recap?.vs_yesterday_pct;
+  const trend7d = recap?.trend_7d ?? [];
   const genderRows = recap?.demographics_gender ?? [];
   const ageRows = recap?.demographics_age ?? [];
   const femme = genderRows.find(g => g.key === 'female');
   const homme = genderRows.find(g => g.key === 'male');
-  const genderTotal = (femme?.count ?? 0) + (homme?.count ?? 0);
 
   const hourlyData = (recap?.entries_by_hour ?? []).map(h => ({
     hour: h.hour,
@@ -100,32 +98,37 @@ export default function TodayScreen() {
 
       {error && <div style={s.errorHint}>{error}</div>}
 
-      {/* Stat row */}
+      {/* Clients Total banner */}
       {loading ? (
-        <div className="stat-grid">
-          {[0, 1, 2].map(i => <Skeleton key={i} height={90} radius={16} />)}
-        </div>
+        <Skeleton height={96} radius={16} />
       ) : (
-        <div className="stat-grid">
-          <StatCard
-            label={t.totalClients}
-            value={totalCustomers != null ? totalCustomers.toLocaleString() : null}
-            valueColor="#e6edf3"
-            sub={vsYesterdayPct != null ? t.vsYesterday(vsYesterdayPct) : undefined}
-            subColor={vsYesterdayPct != null ? (vsYesterdayPct >= 0 ? '#3fb950' : '#f85149') : undefined}
-          />
-          <StatCard
-            label={t.femmeLabel}
-            value={femme ? `${femme.percent}%` : null}
-            valueColor="#ec4899"
-            sub={femme ? t.femmeCount(femme.count) : undefined}
-          />
-          <StatCard
-            label={t.hommeLabel}
-            value={homme ? `${homme.percent}%` : null}
-            valueColor="#3b82f6"
-            sub={homme ? t.hommeCount(homme.count) : undefined}
-          />
+        <div style={s.banner}>
+          <div style={s.bannerLeft}>
+            <div style={s.bannerIcon}>👥</div>
+            <div>
+              <div style={s.statLabel}>{t.totalClients}</div>
+              {totalCustomers != null ? (
+                <div style={s.bannerValueRow}>
+                  <span style={s.bannerValue}>{totalCustomers.toLocaleString()}</span>
+                  {vsYesterdayPct != null && (
+                    <span style={{ ...s.bannerDelta, color: vsYesterdayPct >= 0 ? '#3fb950' : '#f85149' }}>
+                      {t.vsYesterday(vsYesterdayPct)}
+                    </span>
+                  )}
+                </div>
+              ) : <div style={s.statDash}>—</div>}
+            </div>
+          </div>
+          {trend7d.length > 0 && (
+            <div style={s.bannerRight}>
+              <span style={s.sub}>{t.last7days}</span>
+              <ResponsiveContainer width={140} height={40}>
+                <LineChart data={trend7d}>
+                  <Line type="monotone" dataKey="count" stroke="#3fb950" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
       )}
 
@@ -208,26 +211,21 @@ export default function TodayScreen() {
         <div className="demo-grid">
           <div style={s.chartCard}>
             <div style={s.demoLabel}>{t.genderSplitLabel}</div>
-            <div style={s.donutWrap}>
-              <ResponsiveContainer width="100%" height={220}>
-                <PieChart>
-                  <Pie
-                    data={[femme, homme].filter(Boolean)}
-                    dataKey="count" nameKey="label"
-                    innerRadius={60} outerRadius={90} paddingAngle={2} strokeWidth={0}
-                  >
-                    {[femme, homme].filter(Boolean).map((g, i) => <Cell key={i} fill={g.color} />)}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div style={s.donutCenter}>
-                <div style={s.donutCenterValue}>{genderTotal.toLocaleString()}</div>
-                <div style={s.donutCenterLabel}>{t.totalLabel}</div>
-              </div>
-            </div>
+            <ResponsiveContainer width="100%" height={220}>
+              <PieChart>
+                <Tooltip content={<GenderTooltip />} />
+                <Pie
+                  data={[femme, homme].filter(Boolean)}
+                  dataKey="count" nameKey="label"
+                  innerRadius={60} outerRadius={90} paddingAngle={2} strokeWidth={0}
+                >
+                  {[femme, homme].filter(Boolean).map((g, i) => <Cell key={i} fill={g.color} />)}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
             <div style={s.legendRow}>
-              {femme && <span style={s.legendItem}><span style={{ ...s.legendDot, background: femme.color }} /> {t.femmeLabel} {femme.percent}%</span>}
-              {homme && <span style={s.legendItem}><span style={{ ...s.legendDot, background: homme.color }} /> {t.hommeLabel} {homme.percent}%</span>}
+              {femme && <span style={s.legendItem}><span style={{ ...s.legendDot, background: femme.color }} /> {t.femmeLabel}</span>}
+              {homme && <span style={s.legendItem}><span style={{ ...s.legendDot, background: homme.color }} /> {t.hommeLabel}</span>}
             </div>
           </div>
 
@@ -265,13 +263,23 @@ const s = {
     fontSize: 13, fontFamily: 'inherit', colorScheme: 'dark',
   },
 
-  statCard: {
-    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, padding: '18px 16px',
+  banner: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16,
+    padding: '20px 24px', gap: 16,
   },
+  bannerLeft: { display: 'flex', alignItems: 'center', gap: 16 },
+  bannerIcon: {
+    width: 48, height: 48, borderRadius: 12, background: 'rgba(63,185,80,0.12)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
+  },
+  bannerValueRow: { display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 4 },
+  bannerValue: { fontSize: 32, fontWeight: 700, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', color: '#e6edf3' },
+  bannerDelta: { fontSize: 12, fontWeight: 600 },
+  bannerRight: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 },
+
   statLabel: { fontSize: 9, fontWeight: 700, color: '#8b949e', letterSpacing: 0.8, marginBottom: 8, textTransform: 'uppercase' },
-  statValue: { fontSize: 30, fontWeight: 700, lineHeight: 1.1, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
   statDash: { fontSize: 20, color: '#484f58', marginTop: 4 },
-  statSub: { fontSize: 11, color: '#3fb950', marginTop: 6 },
 
   sub: { fontSize: 11, color: '#484f58' },
   chartCard: { background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16, padding: '18px 16px 12px' },
@@ -282,13 +290,6 @@ const s = {
   legendDot: { display: 'inline-block', width: 8, height: 8, borderRadius: '50%' },
 
   demoLabel: { fontSize: 13, color: '#8b949e', marginBottom: 8 },
-  donutWrap: { position: 'relative' },
-  donutCenter: {
-    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-    textAlign: 'center', pointerEvents: 'none',
-  },
-  donutCenterValue: { fontSize: 26, fontWeight: 700, color: '#e6edf3', fontFamily: 'var(--font-mono)' },
-  donutCenterLabel: { fontSize: 11, color: '#8b949e', marginTop: 2 },
 
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };

@@ -110,14 +110,6 @@ button { cursor: pointer; font-family: inherit; }
   text-transform: uppercase;
 }
 
-/* ── Stat grid ────────────────────────────────────────────── */
-.stat-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 14px;
-  margin-top: 8px;
-}
-
 /* Statistique: gender donut + age bar side by side on desktop, stacked on mobile */
 .demo-grid {
   display: block;

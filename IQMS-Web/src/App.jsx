@@ -4,19 +4,15 @@ import { ToastProvider } from './context/ToastContext';
 import Sidebar from './components/Sidebar';
 import TabBar from './components/TabBar';
 import LiveScreen from './screens/LiveScreen';
-import ForecastScreen from './screens/ForecastScreen';
 import TodayScreen from './screens/TodayScreen';
-import AlertsScreen from './screens/AlertsScreen';
 
 function Shell() {
   const [tab, setTab] = useState('live');
   const { t, lang, setLang } = useLang();
 
   const screen = {
-    live:     <LiveScreen />,
-    forecast: <ForecastScreen />,
-    today:    <TodayScreen />,
-    alerts:   <AlertsScreen />,
+    live:  <LiveScreen />,
+    today: <TodayScreen />,
   }[tab];
 
   return (
