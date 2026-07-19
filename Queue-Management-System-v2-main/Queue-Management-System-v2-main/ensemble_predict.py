@@ -58,6 +58,7 @@ from prediction.core import (  # noqa: E402
 from prediction.pipeline import DB_CONFIG  # noqa: E402
 
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
+CHECKOUT_CAM_ID = os.getenv("CHECKOUT_CAM_ID", "Bosch_Camera_exit")
 
 
 def _connect():
@@ -775,21 +776,22 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     )
 
     # ── Wait estimates ────────────────────────────────────────────────────────
+    # Scoped to the actual checkout camera only — MAX(active_lanes)/SUM(queue_count)
+    # across every camera_id ever recorded was picking up months-stale rows from
+    # unrelated/renamed cameras (including a case-duplicate "Bosch_Camera_Exit"
+    # vs "Bosch_Camera_exit"), inflating the lane count the wait model assumes.
     _log("\n[Wait] Loading current queue state from snapshots...")
     _conn_snap = _connect()
     try:
         snap_latest = pd.read_sql("""
             SELECT NOW() AS timestamp,
-                   COALESCE(SUM(queue_count), 0) AS queue_count,
-                   MAX(active_lanes)             AS active_lanes
-            FROM (
-                SELECT DISTINCT ON (camera_id)
-                    queue_count, active_lanes
-                FROM queue_state_snapshots
-                WHERE camera_id NOT LIKE 'SIM_%%'
-                ORDER BY camera_id, timestamp DESC
-            ) latest_per_camera
-        """, _conn_snap)
+                   COALESCE(queue_count, 0) AS queue_count,
+                   active_lanes
+            FROM queue_state_snapshots
+            WHERE camera_id = %(cam)s
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, _conn_snap, params={"cam": CHECKOUT_CAM_ID})
     finally:
         _conn_snap.close()
 
