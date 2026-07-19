@@ -57,6 +57,24 @@ from prediction.core import (  # noqa: E402
 )
 from prediction.pipeline import DB_CONFIG  # noqa: E402
 
+STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
+
+
+def _connect():
+    """
+    psycopg2.connect + SET timezone. Without this, a naive local
+    datetime (e.g. "13:48") gets stored as if it were already UTC,
+    shifting every prediction_for by the local UTC offset (2h in
+    summer) — which silently makes /forecast-chart's "NOW() to +60min"
+    window never match the rows this script just wrote.
+    """
+    conn = psycopg2.connect(**DB_CONFIG)
+    with conn.cursor() as cur:
+        cur.execute("SET timezone = %s", (STORE_TZ,))
+    conn.commit()
+    return conn
+
+
 W_PROPHET           = float(os.getenv("W_PROPHET",          0.40))
 W_LSTM              = float(os.getenv("W_LSTM",             0.30))
 W_XGB               = float(os.getenv("W_XGB",             0.30))
@@ -299,7 +317,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     where_clause = get_where_clause(source)
 
     # ── 1. Load data ─────────────────────────────────────────────────────────
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = _connect()
     _log(f"[DB] Connected to PostgreSQL database={DB_CONFIG.get('dbname')} host={DB_CONFIG.get('host')} [ok]")
 
     clean_filter = f"timestamp >= NOW() - INTERVAL '{data_span_days} days' AND dwell_seconds >= 10"
@@ -758,7 +776,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
 
     # ── Wait estimates ────────────────────────────────────────────────────────
     _log("\n[Wait] Loading current queue state from snapshots...")
-    _conn_snap = psycopg2.connect(**DB_CONFIG)
+    _conn_snap = _connect()
     try:
         snap_latest = pd.read_sql("""
             SELECT NOW() AS timestamp,
@@ -785,7 +803,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
 
     # ── Dwell model: XGBoost on service_events → per-bucket prediction ────────
     print("\n[Dwell] Loading service events for dwell model...")
-    _conn_svc = psycopg2.connect(**DB_CONFIG)
+    _conn_svc = _connect()
     try:
         df_svc = pd.read_sql(f"""
             SELECT timestamp, total_dwell_sec / 60.0 AS service_min
@@ -889,7 +907,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     browsing_lag_steps = max(1, round(BROWSING_GAP_MIN / BUCKET_MINUTES))
     print(f"[Wait] Browsing gap = {BROWSING_GAP_MIN} min ({browsing_lag_steps} buckets) — shifting entrance → checkout...")
 
-    _conn_hist = psycopg2.connect(**DB_CONFIG)
+    _conn_hist = _connect()
     try:
         df_hist = pd.read_sql(f"""
             SELECT
@@ -1026,7 +1044,7 @@ def _save_to_db(result: dict) -> None:
     wait_estimates = result["wait_estimates"]
 
     print("\n[DB] Saving predictions to queue_predictions...")
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = _connect()
     cur  = conn.cursor()
 
     cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
