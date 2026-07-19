@@ -22,17 +22,23 @@ function LaneCard({ lane, t }) {
   const count = lane.waiting ?? 0;
   const isClosed = lane.status === 'closed';
   const st = countColor(isClosed ? 0 : count);
+  const iconColor = isClosed ? '#8b949e' : st.color;
+  const fillMax = lane.fill_max || 10;
+  const fillRatio = isClosed ? 0 : Math.min(1, count / fillMax);
 
   return (
     <div style={{ ...s.laneCard, borderLeftColor: st.color, borderLeftWidth: st.borderWidth, background: st.bg }}>
       <div style={s.laneLeft}>
-        <div style={{ ...s.laneIcon, background: st.color + '22', border: `1.5px solid ${st.color}` }}>
-          <span style={{ color: st.color, fontSize: 13 }}>👤</span>
+        <div style={{ ...s.laneIcon, background: iconColor + '33', border: `2px solid ${iconColor}` }}>
+          <span style={{ color: iconColor, fontSize: 14 }}>👤</span>
         </div>
         <div>
           <div style={s.laneName}>LANE {Number(lane.lane_id) + 1}</div>
           <div style={s.laneSub}>{isClosed ? t.closedLabel : (lane.lane_type || 'Caisse standard')}</div>
         </div>
+      </div>
+      <div style={s.laneFillTrack}>
+        <div style={{ ...s.laneFillBar, width: `${fillRatio * 100}%`, background: st.color }} />
       </div>
       <div style={s.laneRight}>
         <span style={{ ...s.laneCount, color: isClosed ? '#484f58' : '#e6edf3' }}>
@@ -290,6 +296,11 @@ const s = {
   },
   laneName: { fontSize: 14, fontWeight: 700, color: '#e6edf3' },
   laneSub: { fontSize: 11, color: '#8b949e', marginTop: 2 },
+  laneFillTrack: {
+    flex: 1, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.06)',
+    margin: '0 20px', overflow: 'hidden',
+  },
+  laneFillBar: { height: '100%', borderRadius: 3, transition: 'width 0.3s ease' },
   laneRight: { display: 'flex', alignItems: 'baseline', gap: 6 },
   laneCount: { fontSize: 26, fontWeight: 700, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
   laneCountSub: { fontSize: 12, fontWeight: 400, color: '#8b949e' },
