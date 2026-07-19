@@ -302,6 +302,19 @@ def day_recap(date: Optional[str] = None):
                     """, (yesterday_date,))
                     yesterday_total = int((cur.fetchone() or {}).get("total") or 0)
 
+                # 7-day trend ending on ref_date, for the Clients Total sparkline
+                trend_rows = []
+                if ref_date:
+                    cur.execute("""
+                        SELECT DATE(timestamp) AS day, COUNT(*) AS cnt
+                        FROM entrance_events
+                        WHERE DATE(timestamp) BETWEEN %s AND %s
+                          AND camera_id NOT LIKE 'SIM_%%'
+                          AND dwell_seconds >= 10
+                        GROUP BY 1 ORDER BY 1 ASC
+                    """, (ref_date - timedelta(days=6), ref_date))
+                    trend_rows = cur.fetchall()
+
                 cur.execute(f"""
                     SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour, COUNT(*) AS cnt
                     FROM entrance_events
@@ -422,6 +435,13 @@ def day_recap(date: Optional[str] = None):
                 """)
                 hourly_rows = cur.fetchall()
 
+        trend_by_day = {r["day"]: int(r["cnt"]) for r in trend_rows}
+        trend_7d = []
+        if ref_date:
+            for i in range(6, -1, -1):
+                d = ref_date - timedelta(days=i)
+                trend_7d.append({"date": d.strftime("%Y-%m-%d"), "count": trend_by_day.get(d, 0)})
+
         denom = total or 1
         equipment = []
         order  = ["trolley", "store_basket"]
@@ -484,6 +504,7 @@ def day_recap(date: Optional[str] = None):
             "date":                display_date,
             "total_customers":     total,
             "vs_yesterday_pct":    vs_yesterday_pct,
+            "trend_7d":            trend_7d,
             "avg_wait_min":        avg_wait_min,
             "peak_hour":           peak_hour,
             "peak_hour_end":       peak_end,
