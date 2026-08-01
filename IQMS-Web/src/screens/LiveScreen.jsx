@@ -34,7 +34,7 @@ function LaneCard({ lane, t }) {
         </div>
         <div>
           <div style={s.laneName}>LANE {Number(lane.lane_id) + 1}</div>
-          <div style={s.laneSub}>{isClosed ? t.closedLabel : (lane.lane_type || 'Caisse standard')}</div>
+          <div style={s.laneSub}>{lane.lane_type || 'Caisse standard'}</div>
         </div>
       </div>
       <div style={s.laneFillTrack}>

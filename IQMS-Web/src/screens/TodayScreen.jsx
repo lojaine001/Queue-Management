@@ -13,6 +13,11 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Temporarily hidden per request — the wait-time model's accuracy is still
+// being worked on (lane-count/timezone bugs), so the chart stays off until
+// it's been validated against real open-hours data.
+const SHOW_WAIT_CHART = false;
+
 function GenderTooltip({ active, payload }) {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
@@ -58,7 +63,7 @@ export default function TodayScreen() {
   const [recap] = data;
 
   const waitUrl = isToday ? `${API_URL}/forecast-chart` : `${API_URL}/day-wait-chart?date=${selectedDate}`;
-  const { data: waitData, loading: waitLoading } = useApi([waitUrl]);
+  const { data: waitData, loading: waitLoading } = useApi(SHOW_WAIT_CHART ? [waitUrl] : []);
   const [dayWait] = waitData;
 
   const totalCustomers = recap?.total_customers;
@@ -164,30 +169,34 @@ export default function TodayScreen() {
       </div>
 
       {/* Temps d'attente — live 60-min forecast for today, full-day history for past dates */}
-      <div className="section-header">
-        <span className="section-title">{t.waitChartTitle}</span>
-        <span style={s.sub}>{isToday ? t.next60min : t.dayWaitHistory}</span>
-      </div>
-      <div style={s.chartCard}>
-        {waitLoading ? (
-          <Skeleton height={220} radius={16} />
-        ) : waitPoints.length > 0 ? (
-          <ResponsiveContainer width="100%" height={220}>
-            <ComposedChart data={waitPoints} margin={{ top: 8, right: 16, left: -16, bottom: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-              <XAxis dataKey="t" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={30} />
-              <YAxis domain={[0, 32]} ticks={[0, 8, 16, 24, 32]} tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit=" min" />
-              <Tooltip content={<WaitTooltip t={t} />} />
-              <Bar dataKey="wait" fill="#db6d28" radius={[3, 3, 0, 0]} />
-            </ComposedChart>
-          </ResponsiveContainer>
-        ) : (
-          <div style={s.emptyChart}>{t.noHourlyData}</div>
-        )}
-        <div style={s.legendRow}>
-          <span style={s.legendItem}><span style={{ ...s.legendDot, background: '#db6d28' }} /> {t.waitLegend}</span>
-        </div>
-      </div>
+      {SHOW_WAIT_CHART && (
+        <>
+          <div className="section-header">
+            <span className="section-title">{t.waitChartTitle}</span>
+            <span style={s.sub}>{isToday ? t.next60min : t.dayWaitHistory}</span>
+          </div>
+          <div style={s.chartCard}>
+            {waitLoading ? (
+              <Skeleton height={220} radius={16} />
+            ) : waitPoints.length > 0 ? (
+              <ResponsiveContainer width="100%" height={220}>
+                <ComposedChart data={waitPoints} margin={{ top: 8, right: 16, left: -16, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                  <XAxis dataKey="t" tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={30} />
+                  <YAxis domain={[0, 32]} ticks={[0, 8, 16, 24, 32]} tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} unit=" min" />
+                  <Tooltip content={<WaitTooltip t={t} />} />
+                  <Bar dataKey="wait" fill="#db6d28" radius={[3, 3, 0, 0]} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={s.emptyChart}>{t.noHourlyData}</div>
+            )}
+            <div style={s.legendRow}>
+              <span style={s.legendItem}><span style={{ ...s.legendDot, background: '#db6d28' }} /> {t.waitLegend}</span>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Customer demographics */}
       <div className="section-header">
