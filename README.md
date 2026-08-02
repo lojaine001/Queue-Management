@@ -9,6 +9,7 @@ It uses cameras to see how many people are waiting, predicts how busy it's about
 ## Where it is now
 
 ![Current app]
+
 <img width="777" height="573" alt="image" src="https://github.com/user-attachments/assets/535e1294-7fa3-4672-b960-bf13f01e73ef" />
 
 
@@ -19,6 +20,7 @@ A live view of every checkout lane, wait-time alerts, and a statistics page to l
 ## Where it started
 
 ![Earlier version]
+
 <img width="968" height="756" alt="Screenshot 2026-07-02 160916" src="https://github.com/user-attachments/assets/4b97d701-02db-4798-84b9-abe1b323b5f9" />
 
 An earlier version of the same idea — the project has evolved a lot since this point.
@@ -28,6 +30,7 @@ An earlier version of the same idea — the project has evolved a lot since this
 ## The operations dashboard
 
 ![Dashboard]
+
 <img width="1492" height="758" alt="Screenshot 2026-05-29 152603" src="https://github.com/user-attachments/assets/c97c4cf5-a17f-4700-aea5-2f25311d9126" />
 
 A separate monitoring tool used to run and tune the prediction model directly — queue state, forecasts at multiple time horizons, and live model controls.
