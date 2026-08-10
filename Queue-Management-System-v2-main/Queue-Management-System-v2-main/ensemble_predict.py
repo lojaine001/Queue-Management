@@ -579,6 +579,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         with open(SCALER_PATH, "rb") as _f:
             scaler = pickle.load(_f)
         y_open_scaled = scaler.transform(y_open_values.reshape(-1, 1))
+        _lstm_has_enough_data = True  # a cached model implies a prior run had enough data
         _log("[LSTM] Loaded [ok]")
     else:
         scaler = MinMaxScaler(feature_range=(0, 1))
@@ -592,6 +593,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         y_open_scaled = scaler.transform(y_open_values.reshape(-1, 1))
 
         X_lstm, y_lstm = _make_sequences(y_open_scaled, SEQUENCE_LEN)
+        _lstm_has_enough_data = len(X_lstm) > 0
         _log(f"[LSTM] Training on {len(X_lstm)} open-hour sequences (epochs=20)...")
         lstm_model = Sequential([
             LSTM(64, input_shape=(SEQUENCE_LEN, 1), return_sequences=True),
@@ -601,17 +603,25 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
             Dense(1),
         ])
         lstm_model.compile(optimizer="adam", loss="mse")
-        lstm_model.fit(X_lstm, y_lstm, epochs=20, batch_size=32, verbose=0)
-        lstm_model.save(LSTM_PATH)
-        with open(SCALER_PATH, "wb") as _f:
-            pickle.dump(scaler, _f)
-        _save_json(LSTM_META_PATH, {
-            "data_span_days": data_span_days,
-            "train_fingerprint": _prophet_train_fingerprint,
-            "open_values": int(len(y_open_values)),
-            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-        _log("[LSTM] Trained and saved [ok]")
+        if _lstm_has_enough_data:
+            lstm_model.fit(X_lstm, y_lstm, epochs=20, batch_size=32, verbose=0)
+            lstm_model.save(LSTM_PATH)
+            with open(SCALER_PATH, "wb") as _f:
+                pickle.dump(scaler, _f)
+            _save_json(LSTM_META_PATH, {
+                "data_span_days": data_span_days,
+                "train_fingerprint": _prophet_train_fingerprint,
+                "open_values": int(len(y_open_values)),
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            _log("[LSTM] Trained and saved [ok]")
+        else:
+            _log(
+                f"[LSTM] Skipping training — only {len(y_open_values)} open-hour value(s) "
+                f"available, need at least {SEQUENCE_LEN} for one sequence. Falling back to "
+                "a naive flat forecast for this run instead of crashing the whole ensemble "
+                "(Prophet + XGBoost still run normally)."
+            )
 
     opening_profile_source = df_real_r if len(df_real_r) > 0 else df[["ds", "y"]]
     opening_profile_scaled = _build_lstm_opening_profile(opening_profile_source, scaler)
@@ -624,29 +634,41 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
 
     # Seed from the last SEQUENCE_LEN open-hour values — not the raw tail
     # which may end in overnight zeros and cause near-zero rollout predictions.
-    last_seq = y_open_scaled[-SEQUENCE_LEN:].copy() if len(y_open_scaled) >= SEQUENCE_LEN \
-               else y_open_scaled.copy()
-    lstm_scaled_preds = []
-    opening_span = max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
-    opening_fade_span = max(1, opening_span - BUCKET_MINUTES)
-    for ts in future_timestamps:
-        inp      = last_seq.reshape(1, SEQUENCE_LEN, 1)
-        next_val = lstm_model.predict(inp, verbose=0)[0][0]
-        ts_dt = pd.Timestamp(ts)
-        minute_of_day = ts_dt.hour * 60 + ts_dt.minute
-        opening_target = opening_profile_scaled.get(minute_of_day)
-        if opening_target is not None and SHOP_OPEN_TOT <= minute_of_day < (SHOP_OPEN_TOT + opening_span):
-            progress = min(1.0, max(0.0, (minute_of_day - SHOP_OPEN_TOT) / opening_fade_span))
-            blend_weight = LSTM_OPENING_BLEND_MAX + (
-                (LSTM_OPENING_BLEND_MIN - LSTM_OPENING_BLEND_MAX) * progress
-            )
-            next_val = ((1.0 - blend_weight) * float(next_val)) + (blend_weight * opening_target)
-        lstm_scaled_preds.append(next_val)
-        last_seq = np.append(last_seq[1:], [[next_val]], axis=0)
+    if _lstm_has_enough_data:
+        last_seq = y_open_scaled[-SEQUENCE_LEN:].copy() if len(y_open_scaled) >= SEQUENCE_LEN \
+                   else y_open_scaled.copy()
+        lstm_scaled_preds = []
+        opening_span = max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
+        opening_fade_span = max(1, opening_span - BUCKET_MINUTES)
+        for ts in future_timestamps:
+            inp      = last_seq.reshape(1, SEQUENCE_LEN, 1)
+            next_val = lstm_model.predict(inp, verbose=0)[0][0]
+            ts_dt = pd.Timestamp(ts)
+            minute_of_day = ts_dt.hour * 60 + ts_dt.minute
+            opening_target = opening_profile_scaled.get(minute_of_day)
+            if opening_target is not None and SHOP_OPEN_TOT <= minute_of_day < (SHOP_OPEN_TOT + opening_span):
+                progress = min(1.0, max(0.0, (minute_of_day - SHOP_OPEN_TOT) / opening_fade_span))
+                blend_weight = LSTM_OPENING_BLEND_MAX + (
+                    (LSTM_OPENING_BLEND_MIN - LSTM_OPENING_BLEND_MAX) * progress
+                )
+                next_val = ((1.0 - blend_weight) * float(next_val)) + (blend_weight * opening_target)
+            lstm_scaled_preds.append(next_val)
+            last_seq = np.append(last_seq[1:], [[next_val]], axis=0)
 
-    lstm_vals = scaler.inverse_transform(
-        np.array(lstm_scaled_preds).reshape(-1, 1)
-    ).flatten().clip(min=0)
+        lstm_vals = scaler.inverse_transform(
+            np.array(lstm_scaled_preds).reshape(-1, 1)
+        ).flatten().clip(min=0)
+    else:
+        # Not enough open-hour history to seed a real sequence (reshaping a
+        # too-short window to (1, SEQUENCE_LEN, 1) is what used to crash here).
+        # Naive fallback: repeat the mean of whatever real values exist, so
+        # Prophet + XGBoost can still carry the ensemble for this run.
+        _naive_scaled = float(np.mean(y_open_scaled)) if len(y_open_scaled) > 0 else 0.5
+        lstm_vals = np.full(len(future_timestamps), _naive_scaled, dtype=float)
+        lstm_vals = scaler.inverse_transform(
+            lstm_vals.reshape(-1, 1)
+        ).flatten().clip(min=0)
+        _log(f"[LSTM] Using naive flat fallback ({len(future_timestamps)} steps) — insufficient data for real rollout")
 
     # ── MODEL 3 — XGBOOST ───────────────────────────────────────────────────
     _log("\n[XGBoost] Building features...")

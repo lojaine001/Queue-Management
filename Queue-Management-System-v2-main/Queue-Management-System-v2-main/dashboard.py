@@ -156,9 +156,18 @@ def _run_prediction(data_span_days: int = 30):
         [sys.executable, script, "--source", "REAL", "--days", str(data_span_days)],
         env=env,
         cwd=cwd,
+        capture_output=True,
+        text=True,
     )
+    # Echo to this process's own console too (Streamlit terminal), not just
+    # the UI's error box — capture_output means it's no longer live-streamed,
+    # but it's still visible here right after the subprocess finishes.
+    if result.stdout:
+        print(result.stdout, flush=True)
+    if result.stderr:
+        print(result.stderr, flush=True)
     print(f"[Dashboard] Prediction subprocess finished: returncode={result.returncode}", flush=True)
-    return result.returncode == 0, "", ""
+    return result.returncode == 0, result.stdout, result.stderr
 
 
 def _to_local_timestamp(value):
@@ -1727,7 +1736,11 @@ if "training_span_days" not in st.session_state:
     st.session_state["training_span_days"] = (
         int(_qp_days_init)
         if _qp_days_init is not None and str(_qp_days_init).isdigit() and int(_qp_days_init) in _valid_days_init
-        else int(os.getenv("DATA_SPAN_DAYS", 7))
+        # 7 days isn't enough real history to guarantee the LSTM's minimum
+        # sequence length after any gap in data collection (confirmed: a
+        # 7-day window with only a few hours of real traffic crashed the
+        # whole prediction). 30 matches the CLI/ensemble_predict.py default.
+        else int(os.getenv("DATA_SPAN_DAYS", 30))
     )
 
 
@@ -2332,7 +2345,7 @@ if _arrivals_capped:
 
 
 def _sync_days_to_qp():
-    st.query_params["training_days"] = str(st.session_state.get("training_span_days", int(os.getenv("DATA_SPAN_DAYS", 7))))
+    st.query_params["training_days"] = str(st.session_state.get("training_span_days", int(os.getenv("DATA_SPAN_DAYS", 30))))
 
 def _sync_lanes_to_qp():
     st.query_params["lanes"] = str(st.session_state.get("forecast_active_lanes", detected_lanes))
