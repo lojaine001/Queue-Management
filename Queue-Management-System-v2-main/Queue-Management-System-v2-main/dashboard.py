@@ -1854,6 +1854,14 @@ else:
 selected_lanes = int(st.session_state["forecast_active_lanes"])
 selected_lanes = max(1, min(MAX_LANES, selected_lanes))
 
+# Defined unconditionally — used later at module level regardless of whether
+# pred_df has any rows. Only depend on queue_count/selected_lanes (both
+# already set above), not on predictions being available, so there's no
+# reason these should ever be missing. Recomputed below when pred_df isn't
+# empty (same formula), this is just the fallback for when it is.
+_in_service = min(queue_count, selected_lanes)
+_waiting_backlog = max(0.0, float(queue_count - selected_lanes))
+
 wait_0m  = None
 wait_5m  = None
 wait_10m = None
