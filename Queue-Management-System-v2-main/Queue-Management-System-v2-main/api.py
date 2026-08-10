@@ -111,7 +111,10 @@ def live_lanes():
 
         lanes = []
         for i in range(4):
-            depth = int(lane_counts.get(str(i), 0))
+            # Head-Detector writes lane_counts keyed 1..4 (matching lane1..lane4),
+            # not 0-indexed — was reading str(i) here, which only ever matched
+            # keys "1".."3" shifted by one lane and never read lane 4 at all.
+            depth = int(lane_counts.get(str(i + 1), 0))
             avg_wait = avg_wait_min if depth > 0 else 0.0
             status = _lane_status(avg_wait, depth)
             lanes.append({
