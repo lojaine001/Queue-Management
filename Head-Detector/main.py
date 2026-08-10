@@ -1050,6 +1050,10 @@ def main():
                 avg_dwell = float(sum(long_dwells) / len(long_dwells)) if long_dwells else 0.0
                 max_dwell = float(max(long_dwells)) if long_dwells else 0.0
                 # Persist the per-lane counts already computed for the overlay.
+                systems_logger.debug(
+                    f"[SNAPSHOT] Attempting write | cam={camID} | queue_count={queue_count} "
+                    f"| lane_counts={lane_snapshot_counts} | db.enabled={db.enabled}"
+                )
                 db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell,
                                       lane_counts=lane_snapshot_counts)
                 last_snapshot_time = current_time

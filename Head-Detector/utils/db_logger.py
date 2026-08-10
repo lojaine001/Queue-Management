@@ -272,6 +272,7 @@ class DBLogger:
     def log_queue_snapshot(self, camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes=2, lane_counts=None):
         """Insert a periodic queue-state snapshot used by ensemble_predict for dynamic wait estimation."""
         if not self.enabled:
+            print("[DB] Snapshot skipped — db not enabled")
             return
         try:
             import json
@@ -281,6 +282,7 @@ class DBLogger:
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (camera_id, queue_count, avg_dwell_sec, max_dwell_sec, active_lanes,
                   json.dumps(lane_counts) if lane_counts is not None else None))
+            print(f"[DB] Snapshot saved | cam={camera_id} | queue_count={queue_count} | lane_counts={lane_counts}")
         except Exception as e:
             print(f"[DB] Snapshot error: {e}")
 
