@@ -1449,8 +1449,22 @@ st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout=
 # Uses LIVE_REFRESH_SEC (fast, ~20s) rather than REFRESH_SEC (the prediction
 # scheduler's cadence, often 15+ min) — the camera-driven "Live Operations"
 # tiles need to feel current, independent of how often the forecast reruns.
+#
+# The timer alone isn't enough: browsers throttle/pause setTimeout in
+# background tabs to save battery, so a tab left open but not focused can
+# sit stale far longer than LIVE_REFRESH_SEC. The visibilitychange listener
+# catches that up by reloading the instant the tab becomes visible again,
+# which is exactly the moment someone actually looks at it.
 st_html(
-    f"<script>setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});</script>",
+    f"""<script>
+    var _iqmsLoadedAt = Date.now();
+    setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});
+    document.addEventListener('visibilitychange', function() {{
+        if (document.visibilityState === 'visible' && (Date.now() - _iqmsLoadedAt) > 3000) {{
+            window.parent.location.reload();
+        }}
+    }});
+    </script>""",
     height=0,
 )
 
