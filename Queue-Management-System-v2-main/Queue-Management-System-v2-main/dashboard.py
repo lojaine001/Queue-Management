@@ -1446,27 +1446,25 @@ st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout=
 # Auto-refresh via a full browser reload (not a Streamlit fragment rerun —
 # that path used to blank the page mid-render). A plain page reload always
 # re-executes the script top to bottom, so it's safe against that failure mode.
-# Uses LIVE_REFRESH_SEC (fast, ~20s) rather than REFRESH_SEC (the prediction
-# scheduler's cadence, often 15+ min) — the camera-driven "Live Operations"
-# tiles need to feel current, independent of how often the forecast reruns.
 #
-# The timer alone isn't enough: browsers throttle/pause setTimeout in
-# background tabs to save battery, so a tab left open but not focused can
-# sit stale far longer than LIVE_REFRESH_SEC. The visibilitychange listener
-# catches that up by reloading the instant the tab becomes visible again,
-# which is exactly the moment someone actually looks at it.
-st_html(
-    f"""<script>
-    var _iqmsLoadedAt = Date.now();
-    setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});
-    document.addEventListener('visibilitychange', function() {{
-        if (document.visibilityState === 'visible' && (Date.now() - _iqmsLoadedAt) > 3000) {{
-            window.parent.location.reload();
-        }}
-    }});
-    </script>""",
-    height=0,
-)
+# DISABLED as of 2026-08-11: a 20s (LIVE_REFRESH_SEC) reload was too aggressive
+# for this page's actual per-run cost (DB queries + dwell-model inference +
+# chart building) — the reload was firing before a run finished rendering,
+# so the page never settled and just spun continuously. Re-enable only after
+# measuring real wall-clock time for a full script run on the target machine,
+# with the interval set comfortably above that.
+# st_html(
+#     f"""<script>
+#     var _iqmsLoadedAt = Date.now();
+#     setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});
+#     document.addEventListener('visibilitychange', function() {{
+#         if (document.visibilityState === 'visible' && (Date.now() - _iqmsLoadedAt) > 3000) {{
+#             window.parent.location.reload();
+#         }}
+#     }});
+#     </script>""",
+#     height=0,
+# )
 
 st.markdown(
     """
