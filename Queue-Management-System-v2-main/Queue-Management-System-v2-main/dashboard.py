@@ -111,6 +111,10 @@ if "sched_interval" not in st.session_state:
     else:
         st.session_state["sched_interval"] = 15
 REFRESH_SEC = int(st.session_state["sched_interval"]) * 60
+# Live camera-driven tiles (In Queue Now, Entries Last Hour, Predicted Wait)
+# reflect data that changes every few seconds — they shouldn't wait on the
+# prediction scheduler's cadence (REFRESH_SEC, often 15+ minutes) to update.
+LIVE_REFRESH_SEC = int(os.getenv("LIVE_REFRESH_SEC", 20))
 WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
@@ -1041,7 +1045,7 @@ def load_recent_entrance_history():
     return df
 
 
-@st.cache_data(ttl=REFRESH_SEC)
+@st.cache_data(ttl=LIVE_REFRESH_SEC)
 def load_entries_delta():
     with _conn() as conn:
         with conn.cursor() as cur:
@@ -1442,10 +1446,11 @@ st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout=
 # Auto-refresh via a full browser reload (not a Streamlit fragment rerun —
 # that path used to blank the page mid-render). A plain page reload always
 # re-executes the script top to bottom, so it's safe against that failure mode.
-# REFRESH_SEC == sched_interval minutes (set above), so the reload cadence
-# always matches the prediction recalculation cadence.
+# Uses LIVE_REFRESH_SEC (fast, ~20s) rather than REFRESH_SEC (the prediction
+# scheduler's cadence, often 15+ min) — the camera-driven "Live Operations"
+# tiles need to feel current, independent of how often the forecast reruns.
 st_html(
-    f"<script>setTimeout(function(){{ window.parent.location.reload(); }}, {REFRESH_SEC * 1000});</script>",
+    f"<script>setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});</script>",
     height=0,
 )
 
