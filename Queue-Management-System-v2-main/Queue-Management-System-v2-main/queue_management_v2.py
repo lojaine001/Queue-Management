@@ -757,6 +757,15 @@ def main():
                                        has_bag=has_bag)
                     detection_logger.info(f"[DB] Track died  track_id={track_id} | dwell={dwell:.1f}s "
                                           f"| gender={gender} | age={age} | bag={has_bag} | conf={conf:.2f}")
+                else:
+                    # Crossed the line but was tracked for less than min_elapsed_time
+                    # before the track died — this insert never happens, and until
+                    # now nothing logged why. If this fires often, min_elapsed_time
+                    # is too strict for how briefly people stay visible near the door.
+                    systems_logger.info(
+                        f"[DB] Crossed but NOT inserted — dwell too short | track_id={track_id} "
+                        f"| dwell={dwell:.2f}s | min_elapsed_time={min_elapsed_time}s"
+                    )
                 track_start_times.pop(track_id, None)
                 track_data.pop(track_id, None)
                 person_loggers.pop(track_id, None)
