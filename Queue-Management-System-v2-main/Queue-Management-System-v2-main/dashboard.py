@@ -57,6 +57,11 @@ from prediction.pipeline import load_lane_history_agg  # noqa: E402
 from prediction.dwell_modifier import compute_dwell_modifier_from_recent  # noqa: E402
 
 CAMERA_ID = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
+# Queue depth / lane occupancy come from the checkout camera specifically —
+# queue_state_snapshots also receives rows from the entrance camera
+# (queue_management_v2.py), and without this, whichever camera happened to
+# write most recently silently wins (see load_snapshot / load_queue_delta).
+CHECKOUT_CAM_ID = os.getenv("CHECKOUT_CAM_ID", "Bosch_Camera_exit")
 ARRIVAL_CALIB_PATH = Path(__file__).parent / "calibration.json"
 
 
@@ -930,9 +935,11 @@ def load_snapshot():
             """
             SELECT queue_count, avg_dwell_sec, active_lanes, timestamp
             FROM queue_state_snapshots
+            WHERE camera_id = %(cam)s
             ORDER BY timestamp DESC LIMIT 1
             """,
             conn,
+            params={"cam": CHECKOUT_CAM_ID},
         )
     return row.iloc[0] if not row.empty else None
 
@@ -943,10 +950,12 @@ def load_queue_delta():
         row = pd.read_sql(
             """
             SELECT queue_count FROM queue_state_snapshots
-            WHERE timestamp <= NOW() - INTERVAL '1 hour'
+            WHERE camera_id = %(cam)s
+              AND timestamp <= NOW() - INTERVAL '1 hour'
             ORDER BY timestamp DESC LIMIT 1
             """,
             conn,
+            params={"cam": CHECKOUT_CAM_ID},
         )
     return int(row.iloc[0]["queue_count"]) if not row.empty else None
 
@@ -1001,10 +1010,12 @@ def load_queue_history(hours):
             SELECT timestamp, queue_count, avg_dwell_sec,
                    COALESCE(active_lanes, 1) AS active_lanes
             FROM queue_state_snapshots
-            WHERE timestamp >= NOW() - INTERVAL '{int(hours)} hours'
+            WHERE camera_id = %(cam)s
+              AND timestamp >= NOW() - INTERVAL '{int(hours)} hours'
             ORDER BY timestamp ASC
             """,
             conn,
+            params={"cam": CHECKOUT_CAM_ID},
         )
     return df
 
@@ -1160,10 +1171,12 @@ def load_full_day_queue():
             """
             SELECT timestamp, queue_count
             FROM queue_state_snapshots
-            WHERE timestamp >= CURRENT_DATE
+            WHERE camera_id = %(cam)s
+              AND timestamp >= CURRENT_DATE
             ORDER BY timestamp ASC
             """,
             conn,
+            params={"cam": CHECKOUT_CAM_ID},
         )
     return df
 
