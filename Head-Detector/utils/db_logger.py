@@ -9,6 +9,14 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
 
+# entry_time is passed in as a naive local datetime-based value (see
+# main.py's use of datetime.fromtimestamp()). Without pinning the session
+# timezone, Postgres interprets that naive value using its own default
+# session timezone instead of real local time, silently shifting every
+# stored timestamp — the same bug class already fixed in
+# ensemble_predict.py's _connect().
+STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
+
 
 class DBLogger:
     def __init__(self):
@@ -26,9 +34,10 @@ class DBLogger:
             )
             self.conn.autocommit = True
             self.cursor = self.conn.cursor()
+            self.cursor.execute("SET timezone = %s", (STORE_TZ,))
             self._create_table()
             self.enabled = True
-            print("[DB] Connected to PostgreSQL ✓")
+            print(f"[DB] Connected to PostgreSQL ✓ (timezone={STORE_TZ})")
         except Exception as e:
             print(f"[DB] WARNING: Could not connect to PostgreSQL — running without DB. Error: {e}")
 
