@@ -31,6 +31,11 @@ except Exception:
 
 load_dotenv(find_dotenv(usecwd=True))
 
+# Temporary: timing a full script run end to end, to pick a safe auto-refresh
+# interval (the last attempt guessed 20s and reloaded before a run finished
+# rendering). Remove once a real interval has been set from observed numbers.
+_iqms_run_started_at = _time.time()
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
@@ -4275,7 +4280,10 @@ else:
 # ── Footer ─────────────────────────────────────────────────────────────────────
 
 st.divider()
+_iqms_run_elapsed = _time.time() - _iqms_run_started_at
+print(f"[TIMING] Full dashboard run took {_iqms_run_elapsed:.1f}s", flush=True)
 st.caption(
     f"Auto-refresh every {REFRESH_SEC}s · Busy threshold: {WAIT_BUSY_MIN} min · "
-    f"Alert threshold: {WAIT_ALERT_MIN} min · Default lanes: {DEFAULT_LANES}"
+    f"Alert threshold: {WAIT_ALERT_MIN} min · Default lanes: {DEFAULT_LANES} · "
+    f"This run took {_iqms_run_elapsed:.1f}s"
 )
