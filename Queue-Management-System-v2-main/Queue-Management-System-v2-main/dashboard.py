@@ -119,11 +119,13 @@ REFRESH_SEC = int(st.session_state["sched_interval"]) * 60
 # Live camera-driven tiles (In Queue Now, Entries Last Hour, Predicted Wait)
 # reflect data that changes every few seconds — they shouldn't wait on the
 # prediction scheduler's cadence (REFRESH_SEC, often 15+ minutes) to update.
-# 60s chosen from measured full-run times on the target machine (2026-08-12):
-# observed 10.7s-27.6s per run. A prior attempt at 20s reloaded the page
-# before a run finished rendering and made it spin indefinitely — this
-# leaves >2x margin over the slowest run actually seen, not a guess.
-LIVE_REFRESH_SEC = int(os.getenv("LIVE_REFRESH_SEC", 60))
+# 300s (5 min) — well above the measured 10.7s-27.6s full-run time on the
+# target machine (2026-08-12), and slower by request since 60s reloaded more
+# often than felt useful for a page nobody watches continuously. Reloading
+# does NOT trigger a new prediction run — that's only the "Run Prediction"
+# button or the separate Auto-predict background scheduler, neither of
+# which this timer touches.
+LIVE_REFRESH_SEC = int(os.getenv("LIVE_REFRESH_SEC", 300))
 WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
