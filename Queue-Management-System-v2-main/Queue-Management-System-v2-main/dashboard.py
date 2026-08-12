@@ -119,7 +119,11 @@ REFRESH_SEC = int(st.session_state["sched_interval"]) * 60
 # Live camera-driven tiles (In Queue Now, Entries Last Hour, Predicted Wait)
 # reflect data that changes every few seconds — they shouldn't wait on the
 # prediction scheduler's cadence (REFRESH_SEC, often 15+ minutes) to update.
-LIVE_REFRESH_SEC = int(os.getenv("LIVE_REFRESH_SEC", 20))
+# 60s chosen from measured full-run times on the target machine (2026-08-12):
+# observed 10.7s-27.6s per run. A prior attempt at 20s reloaded the page
+# before a run finished rendering and made it spin indefinitely — this
+# leaves >2x margin over the slowest run actually seen, not a guess.
+LIVE_REFRESH_SEC = int(os.getenv("LIVE_REFRESH_SEC", 60))
 WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
 WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
@@ -1452,24 +1456,23 @@ st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout=
 # that path used to blank the page mid-render). A plain page reload always
 # re-executes the script top to bottom, so it's safe against that failure mode.
 #
-# DISABLED as of 2026-08-11: a 20s (LIVE_REFRESH_SEC) reload was too aggressive
-# for this page's actual per-run cost (DB queries + dwell-model inference +
-# chart building) — the reload was firing before a run finished rendering,
-# so the page never settled and just spun continuously. Re-enable only after
-# measuring real wall-clock time for a full script run on the target machine,
-# with the interval set comfortably above that.
-# st_html(
-#     f"""<script>
-#     var _iqmsLoadedAt = Date.now();
-#     setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});
-#     document.addEventListener('visibilitychange', function() {{
-#         if (document.visibilityState === 'visible' && (Date.now() - _iqmsLoadedAt) > 3000) {{
-#             window.parent.location.reload();
-#         }}
-#     }});
-#     </script>""",
-#     height=0,
-# )
+# Re-enabled 2026-08-12 at LIVE_REFRESH_SEC=60s, set from real measured
+# full-run times on the target machine (10.7s-27.6s observed) rather than
+# guessed — a prior 20s guess reloaded before a run finished rendering and
+# made the page spin indefinitely. This leaves >2x margin over the slowest
+# run actually seen.
+st_html(
+    f"""<script>
+    var _iqmsLoadedAt = Date.now();
+    setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});
+    document.addEventListener('visibilitychange', function() {{
+        if (document.visibilityState === 'visible' && (Date.now() - _iqmsLoadedAt) > 3000) {{
+            window.parent.location.reload();
+        }}
+    }});
+    </script>""",
+    height=0,
+)
 
 st.markdown(
     """
