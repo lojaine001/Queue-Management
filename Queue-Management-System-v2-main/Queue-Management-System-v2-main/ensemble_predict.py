@@ -59,6 +59,7 @@ from prediction.pipeline import DB_CONFIG  # noqa: E402
 
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
 CHECKOUT_CAM_ID = os.getenv("CHECKOUT_CAM_ID", "Bosch_Camera_exit")
+ENTRANCE_CAM_ID = os.getenv("ENTRANCE_CAM_ID", "Bosch_Camera_Entrance")
 
 
 def _connect():
@@ -933,15 +934,25 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
 
     _conn_hist = _connect()
     try:
+        # Was missing every filter the rest of this file applies elsewhere:
+        # no camera scope (summed BOTH the entrance AND checkout cameras'
+        # entrance_events rows as if they were the same "people entering"
+        # signal), no dwell_seconds floor, no SIM_ exclusion. That silently
+        # inflated the near-term checkout-arrival count well past anything
+        # in the real data (checkout camera alone logs far more entrance_events
+        # rows than the entrance camera does), which fed directly into the
+        # wait calculation as a fabricated near-term surge.
         df_hist = pd.read_sql(f"""
             SELECT
                 time_bucket('{BUCKET_MINUTES} minutes', timestamp) AS bucket,
                 COUNT(*) AS entry_count
             FROM entrance_events
-            WHERE timestamp >= NOW() - INTERVAL '{BROWSING_GAP_MIN + BUCKET_MINUTES} minutes'
+            WHERE camera_id = %s
+              AND dwell_seconds >= 10
+              AND timestamp >= NOW() - INTERVAL '{BROWSING_GAP_MIN + BUCKET_MINUTES} minutes'
             GROUP BY bucket
             ORDER BY bucket ASC
-        """, _conn_hist)
+        """, _conn_hist, params=(ENTRANCE_CAM_ID,))
     finally:
         _conn_hist.close()
 
