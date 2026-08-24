@@ -209,3 +209,12 @@ button { cursor: pointer; font-family: inherit; }
     gap: 14px;
   }
 }
+
+/* Horizon picker's custom-minutes input — no visible value to the up/down
+   spinner arrows here, just clutter. Chrome/Edge/Safari need the pseudo-
+   element rule; Firefox is handled by the inline appearance:textfield. */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

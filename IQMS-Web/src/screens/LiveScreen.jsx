@@ -112,16 +112,18 @@ function HorizonPicker({ value, onChange, maxHorizon, t }) {
       <input
         type="number"
         min={0}
+        className="no-spinner"
         placeholder={t.horizonCustomPlaceholder}
         value={custom}
         onChange={e => setCustom(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter') submitCustom(); }}
         onBlur={submitCustom}
-        style={s.horizonCustomInput}
+        style={{ ...s.horizonCustomInput, MozAppearance: 'textfield' }}
       />
       {maxHorizon != null && (
         <span style={s.horizonMaxHint}>{t.horizonMaxHint(Math.round(maxHorizon))}</span>
       )}
+      {value > 0 && <div style={s.horizonSourceNote}>{t.horizonSourceNote}</div>}
     </div>
   );
 }
@@ -174,6 +176,7 @@ export default function LiveScreen() {
   const [openCams, setOpenCams] = useState([]);
   const toggleCam = id => setOpenCams(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   const wasOverRef = useRef(false);
+  const wasForecastOverRef = useRef(false);
 
   // 0 = show the live observed average (existing behavior, untouched).
   // >0 = show the forecast at that many minutes ahead via /forecast/wait.
@@ -221,6 +224,14 @@ export default function LiveScreen() {
   const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
   const maxHorizon = forecastWait?.max_horizon_min;
 
+  // Fixed +15 min forecast, checked continuously regardless of whatever
+  // horizon the Horizon picker above is currently showing — this is what
+  // drives the forecast alert below, not the picker's own selection, so
+  // browsing to a different horizon never silently stops the alert.
+  const { data: alertForecastData } = useApi([`${API_URL}/forecast/wait?minutes=15`]);
+  const [alertForecast] = alertForecastData;
+  const forecastWait15 = alertForecast?.wait_min;
+
   // Fire a popup only on the rising edge (crossing into alert), not every
   // refresh. While disabled, keep resetting the tracker so turning alerts
   // back on always gets a fresh chance to fire if already over threshold —
@@ -242,6 +253,26 @@ export default function LiveScreen() {
     }
     wasOverRef.current = isOver;
   }, [avgWait, threshold, alertsEnabled]);
+
+  // Same rising-edge pattern as above, but for the +15 min forecast instead
+  // of the live wait — a warning before the threshold is actually crossed,
+  // not just after. Independent tracker so the two alerts don't interfere.
+  useEffect(() => {
+    if (!alertsEnabled) {
+      wasForecastOverRef.current = false;
+      return;
+    }
+    if (forecastWait15 == null) return;
+    const isOver = forecastWait15 >= threshold;
+    if (isOver && !wasForecastOverRef.current) {
+      const message = t.forecastAlertPopupMessage(Math.round(forecastWait15), threshold);
+      showToast(message, 'error', 6000);
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('IQMS', { body: message });
+      }
+    }
+    wasForecastOverRef.current = isOver;
+  }, [forecastWait15, threshold, alertsEnabled]);
 
   return (
     <div className="screen-page">
@@ -366,6 +397,10 @@ const s = {
     padding: '5px 10px', color: '#e6edf3', fontSize: 13,
   },
   horizonMaxHint: { fontSize: 11, color: '#484f58', marginLeft: 4 },
+  horizonSourceNote: {
+    width: '100%', fontSize: 11.5, color: '#6e7681', lineHeight: 1.4,
+    marginTop: 4,
+  },
 
   bigTitle: { fontSize: 20, fontWeight: 500, color: '#e6edf3' },
   liveBadgeRow: { display: 'flex', alignItems: 'center', gap: 12 },
