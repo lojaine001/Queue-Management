@@ -9,10 +9,10 @@ import Skeleton from '../components/Skeleton';
 
 const SNAP_INTERVAL = 30000;
 const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
-// 0 = "current" (the live observed average, unchanged default behavior).
-// Any other value switches the gauge to the forecast at that many minutes
-// from now via /forecast/wait — no cap enforced here, just quick presets;
-// the real ceiling comes back live from the API as max_horizon_min.
+// 0/5/10/15 all come from /forecast (dashboard_state — the exact numbers
+// the dashboard itself shows, guaranteed to match). +20 is the one horizon
+// the dashboard doesn't keep on hand, so it's the only one computed from
+// the saved forecast (/forecast/wait) instead.
 const HORIZON_PRESETS = [0, 5, 10, 15, 20];
 
 // Count-driven lane color: 0 = idle/closed, 1 = green, 2-3 = orange, 4+ = red
@@ -86,17 +86,7 @@ function AlertsBar({ enabled, onToggle, threshold, onThreshold, t }) {
   );
 }
 
-function HorizonPicker({ value, onChange, maxHorizon, t }) {
-  const [custom, setCustom] = useState('');
-
-  const submitCustom = () => {
-    const n = Number(custom);
-    if (custom !== '' && Number.isFinite(n) && n >= 0) {
-      onChange(n);
-      setCustom('');
-    }
-  };
-
+function HorizonPicker({ value, onChange, t }) {
   return (
     <div style={s.horizonRow}>
       <span style={s.horizonRowLabel}>{t.horizonLabel}</span>
@@ -109,21 +99,11 @@ function HorizonPicker({ value, onChange, maxHorizon, t }) {
           {m === 0 ? t.horizonLive : `+${m}m`}
         </button>
       ))}
-      <input
-        type="number"
-        min={0}
-        className="no-spinner"
-        placeholder={t.horizonCustomPlaceholder}
-        value={custom}
-        onChange={e => setCustom(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') submitCustom(); }}
-        onBlur={submitCustom}
-        style={{ ...s.horizonCustomInput, MozAppearance: 'textfield' }}
-      />
-      {maxHorizon != null && (
-        <span style={s.horizonMaxHint}>{t.horizonMaxHint(Math.round(maxHorizon))}</span>
-      )}
-      {value > 0 && <div style={s.horizonSourceNote}>{t.horizonSourceNote}</div>}
+      {/* 0/5/10/15 read the same source the dashboard itself writes to, so
+          those four always agree exactly. +20 is the one value the dashboard
+          doesn't keep on hand, so it's computed from the saved forecast
+          instead — the only case where a difference is possible. */}
+      {value === 20 && <div style={s.horizonSourceNote}>{t.horizonSourceNote}</div>}
     </div>
   );
 }
@@ -178,8 +158,8 @@ export default function LiveScreen() {
   const wasOverRef = useRef(false);
   const wasForecastOverRef = useRef(false);
 
-  // 0 = show the live observed average (existing behavior, untouched).
-  // >0 = show the forecast at that many minutes ahead via /forecast/wait.
+  // Which "Predicted Wait" tile is shown in the gauge below — one of the
+  // HORIZON_PRESETS values (0/5/10/15/20 minutes from now).
   const [horizonMin, setHorizonMin] = useState(0);
 
   useEffect(() => {
@@ -214,23 +194,32 @@ export default function LiveScreen() {
   const snapshot = lanesData?.snapshot ?? {};
   const avgWait = snapshot.avg_wait_min;
 
-  // Forecast at a chosen horizon — only fetched once a horizon other than
-  // "current" (0) is selected, so this adds no extra load by default.
-  const { data: forecastData } = useApi(
-    horizonMin > 0 ? [`${API_URL}/forecast/wait?minutes=${horizonMin}`] : []
-  );
-  const [forecastWait] = forecastData;
-  const gaugeValue = horizonMin === 0 ? avgWait : forecastWait?.wait_min;
-  const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
-  const maxHorizon = forecastWait?.max_horizon_min;
+  // The dashboard's own numbers, for 0/5/10/15 — this is the same
+  // dashboard_state row the Streamlit dashboard itself reads, so these four
+  // values are guaranteed to agree with it exactly, not just approximately.
+  const { data: forecastData } = useApi([`${API_URL}/forecast`]);
+  const [forecastState] = forecastData;
 
-  // Fixed +15 min forecast, checked continuously regardless of whatever
-  // horizon the Horizon picker above is currently showing — this is what
-  // drives the forecast alert below, not the picker's own selection, so
-  // browsing to a different horizon never silently stops the alert.
-  const { data: alertForecastData } = useApi([`${API_URL}/forecast/wait?minutes=15`]);
-  const [alertForecast] = alertForecastData;
-  const forecastWait15 = alertForecast?.wait_min;
+  // +20 is the one horizon the dashboard doesn't keep a saved value for, so
+  // it's the only one computed from the saved forecast instead — only
+  // fetched when actually selected, so this adds no load otherwise.
+  const { data: forecast20Data } = useApi(
+    horizonMin === 20 ? [`${API_URL}/forecast/wait?minutes=20`] : []
+  );
+  const [forecastWait20] = forecast20Data;
+
+  const gaugeValue = {
+    0:  forecastState?.wait_now_min,
+    5:  forecastState?.wait_5_min,
+    10: forecastState?.wait_10_min,
+    15: forecastState?.wait_15_min,
+    20: forecastWait20?.wait_min,
+  }[horizonMin];
+  const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
+
+  // Same +15 min value the gauge itself shows when +15m is selected — one
+  // shared number for both, instead of a second, potentially-different fetch.
+  const forecastWait15 = forecastState?.wait_15_min;
 
   // Fire a popup only on the rising edge (crossing into alert), not every
   // refresh. While disabled, keep resetting the tracker so turning alerts
@@ -310,7 +299,7 @@ export default function LiveScreen() {
           <div className="section-header" style={{ marginTop: 0 }}>
             <span className="section-title">SNAPSHOT</span>
           </div>
-          <HorizonPicker value={horizonMin} onChange={setHorizonMin} maxHorizon={maxHorizon} t={t} />
+          <HorizonPicker value={horizonMin} onChange={setHorizonMin} t={t} />
           <Gauge current={gaugeValue} label={gaugeLabel} t={t} />
         </div>
       </div>
@@ -392,11 +381,6 @@ const s = {
   horizonChipActive: {
     background: 'rgba(88, 166, 255, 0.12)', border: '1px solid #58a6ff', color: '#58a6ff',
   },
-  horizonCustomInput: {
-    width: 56, background: 'transparent', border: '1px solid #30363d', borderRadius: 999,
-    padding: '5px 10px', color: '#e6edf3', fontSize: 13,
-  },
-  horizonMaxHint: { fontSize: 11, color: '#484f58', marginLeft: 4 },
   horizonSourceNote: {
     width: '100%', fontSize: 11.5, color: '#6e7681', lineHeight: 1.4,
     marginTop: 4,
