@@ -1186,6 +1186,7 @@ def _save_to_db(result: dict) -> None:
     _steps_45 = 45 // BUCKET_MINUTES
     _we: list[float] = [float(v) for v in wait_estimates]  # type: ignore[union-attr]
     _n  = len(_we)
+    _rows_saved = 0
 
     for i, row in prophet_preds.iterrows():
         wait   = round(_we[i], 2)
@@ -1228,11 +1229,12 @@ def _save_to_db(result: dict) -> None:
             status,
             'ensemble',
         ))
+        _rows_saved += 1
 
     conn.commit()
     cur.close()
     conn.close()
-    print(f"[DB] Saved {FORECAST_STEPS} rows to queue_predictions [ok]")
+    print(f"[DB] Saved {_rows_saved} rows to queue_predictions [ok]")
 
 
 if __name__ == "__main__":

@@ -252,6 +252,63 @@ def forecast():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/forecast/wait")
+def forecast_wait(minutes: float = 0):
+    """
+    Wait estimate at any arbitrary horizon (minutes from now) — not limited
+    to the fixed 0/5/10/15 in /forecast. Every ensemble run already saves a
+    prediction row roughly every 3 minutes out several hours, so this just
+    finds the saved row closest to (now + minutes) from the most recent run
+    and returns its wait estimate, rather than needing a new computation.
+
+    Both the Streamlit dashboard and this app can call this for the same
+    "pick any horizon" feature and always agree, since it's one shared read.
+    """
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT MAX(predicted_at) AS latest FROM queue_predictions")
+                latest = (cur.fetchone() or {}).get("latest")
+
+                if latest is None:
+                    return {
+                        "wait_min": None, "horizon_min": minutes,
+                        "matched_for": None, "max_horizon_min": None,
+                        "message": "No forecast data yet.",
+                    }
+
+                cur.execute("""
+                    SELECT prediction_for, est_wait_minutes,
+                           MAX(prediction_for) OVER () AS max_for
+                    FROM queue_predictions
+                    WHERE predicted_at = %s
+                    ORDER BY ABS(EXTRACT(EPOCH FROM (
+                        prediction_for - (NOW() + (%s || ' minutes')::interval)
+                    )))
+                    LIMIT 1
+                """, (latest, minutes))
+                row = cur.fetchone()
+
+        if not row:
+            return {
+                "wait_min": None, "horizon_min": minutes,
+                "matched_for": None, "max_horizon_min": None,
+                "message": "No forecast data yet.",
+            }
+
+        max_horizon_min = (row["max_for"] - datetime.now(timezone.utc)).total_seconds() / 60.0
+
+        return {
+            "wait_min":        round(float(row["est_wait_minutes"]), 1) if row["est_wait_minutes"] is not None else None,
+            "horizon_min":     minutes,
+            "matched_for":     row["prediction_for"].isoformat(),
+            "max_horizon_min": round(max(max_horizon_min, 0.0), 1),
+        }
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/day-recap")
 def day_recap(date: Optional[str] = None):
     """
