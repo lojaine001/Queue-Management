@@ -9,6 +9,11 @@ import Skeleton from '../components/Skeleton';
 
 const SNAP_INTERVAL = 30000;
 const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
+// 0 = "current" (the live observed average, unchanged default behavior).
+// Any other value switches the gauge to the forecast at that many minutes
+// from now via /forecast/wait — no cap enforced here, just quick presets;
+// the real ceiling comes back live from the API as max_horizon_min.
+const HORIZON_PRESETS = [0, 5, 10, 15, 20];
 
 // Count-driven lane color: 0 = idle/closed, 1 = green, 2-3 = orange, 4+ = red
 function countColor(count) {
@@ -81,7 +86,47 @@ function AlertsBar({ enabled, onToggle, threshold, onThreshold, t }) {
   );
 }
 
-function Gauge({ current, t }) {
+function HorizonPicker({ value, onChange, maxHorizon, t }) {
+  const [custom, setCustom] = useState('');
+
+  const submitCustom = () => {
+    const n = Number(custom);
+    if (custom !== '' && Number.isFinite(n) && n >= 0) {
+      onChange(n);
+      setCustom('');
+    }
+  };
+
+  return (
+    <div style={s.horizonRow}>
+      <span style={s.horizonRowLabel}>{t.horizonLabel}</span>
+      {HORIZON_PRESETS.map(m => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          style={{ ...s.horizonChip, ...(value === m ? s.horizonChipActive : {}) }}
+        >
+          {m === 0 ? t.horizonLive : `+${m}m`}
+        </button>
+      ))}
+      <input
+        type="number"
+        min={0}
+        placeholder={t.horizonCustomPlaceholder}
+        value={custom}
+        onChange={e => setCustom(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') submitCustom(); }}
+        onBlur={submitCustom}
+        style={s.horizonCustomInput}
+      />
+      {maxHorizon != null && (
+        <span style={s.horizonMaxHint}>{t.horizonMaxHint(Math.round(maxHorizon))}</span>
+      )}
+    </div>
+  );
+}
+
+function Gauge({ current, label, t }) {
   const clamp = v => Math.max(0, Math.min(GAUGE_MAX_MIN, v ?? 0));
   const currentPct = (clamp(current) / GAUGE_MAX_MIN) * 100;
   // Zone the marker currently sits in, purely for the value label color
@@ -95,7 +140,7 @@ function Gauge({ current, t }) {
 
   return (
     <div style={s.gaugeWrap}>
-      <div style={s.gaugeLabel}>{t.avgWait}</div>
+      <div style={s.gaugeLabel}>{label ?? t.avgWait}</div>
       <div style={s.gaugeBody}>
         <div style={s.gaugeBar}>
           <div style={{ ...s.gaugeZone, background: '#f85149' }} />
@@ -130,6 +175,10 @@ export default function LiveScreen() {
   const toggleCam = id => setOpenCams(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   const wasOverRef = useRef(false);
 
+  // 0 = show the live observed average (existing behavior, untouched).
+  // >0 = show the forecast at that many minutes ahead via /forecast/wait.
+  const [horizonMin, setHorizonMin] = useState(0);
+
   useEffect(() => {
     localStorage.setItem('iqms_alerts_enabled', String(alertsEnabled));
   }, [alertsEnabled]);
@@ -161,6 +210,16 @@ export default function LiveScreen() {
   const lanes = lanesData?.lanes ?? [];
   const snapshot = lanesData?.snapshot ?? {};
   const avgWait = snapshot.avg_wait_min;
+
+  // Forecast at a chosen horizon — only fetched once a horizon other than
+  // "current" (0) is selected, so this adds no extra load by default.
+  const { data: forecastData } = useApi(
+    horizonMin > 0 ? [`${API_URL}/forecast/wait?minutes=${horizonMin}`] : []
+  );
+  const [forecastWait] = forecastData;
+  const gaugeValue = horizonMin === 0 ? avgWait : forecastWait?.wait_min;
+  const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
+  const maxHorizon = forecastWait?.max_horizon_min;
 
   // Fire a popup only on the rising edge (crossing into alert), not every
   // refresh. While disabled, keep resetting the tracker so turning alerts
@@ -220,7 +279,8 @@ export default function LiveScreen() {
           <div className="section-header" style={{ marginTop: 0 }}>
             <span className="section-title">SNAPSHOT</span>
           </div>
-          <Gauge current={avgWait} t={t} />
+          <HorizonPicker value={horizonMin} onChange={setHorizonMin} maxHorizon={maxHorizon} t={t} />
+          <Gauge current={gaugeValue} label={gaugeLabel} t={t} />
         </div>
       </div>
 
@@ -287,6 +347,25 @@ const s = {
   seuilLabel: { fontSize: 14, color: '#8b949e' },
   slider: { flex: 1, maxWidth: 240, accentColor: '#58a6ff' },
   seuilValue: { fontSize: 15, fontWeight: 700, color: '#e6edf3', minWidth: 48 },
+
+  horizonRow: {
+    display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+    marginBottom: 14, padding: '0 2px',
+  },
+  horizonRowLabel: { fontSize: 13, color: '#8b949e', marginRight: 2 },
+  horizonChip: {
+    background: 'transparent', border: '1px solid #30363d', borderRadius: 999,
+    padding: '5px 12px', color: '#8b949e', fontSize: 13, fontWeight: 500,
+    transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+  },
+  horizonChipActive: {
+    background: 'rgba(88, 166, 255, 0.12)', border: '1px solid #58a6ff', color: '#58a6ff',
+  },
+  horizonCustomInput: {
+    width: 56, background: 'transparent', border: '1px solid #30363d', borderRadius: 999,
+    padding: '5px 10px', color: '#e6edf3', fontSize: 13,
+  },
+  horizonMaxHint: { fontSize: 11, color: '#484f58', marginLeft: 4 },
 
   bigTitle: { fontSize: 20, fontWeight: 500, color: '#e6edf3' },
   liveBadgeRow: { display: 'flex', alignItems: 'center', gap: 12 },
