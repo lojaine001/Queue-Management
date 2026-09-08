@@ -171,8 +171,20 @@ class FaceWorker:
                 frame = self._frame
             if frame is None:
                 continue
-            t0    = time.time()
-            faces = self._analyzer.analyze(frame)
+            t0 = time.time()
+            try:
+                faces = self._analyzer.analyze(frame)
+            except Exception as e:
+                # Without this, a single bad frame permanently kills this
+                # background thread — the main tracking loop, entrance
+                # counting, and everything else keep running completely
+                # normally, so nothing else ever shows a symptom. Face/age/
+                # gender data just silently stops forever, with no error
+                # anywhere. Confirmed as the cause of a 9-day gap in
+                # demographics data (Aug 31 onward) that no log surfaced.
+                # Skip this one frame and keep the thread alive instead.
+                print(f"[FaceWorker] analyze() failed on this frame, skipping: {e}", flush=True)
+                continue
             elapsed_ms = (time.time() - t0) * 1000
             with self._lock:
                 self._results   = faces
