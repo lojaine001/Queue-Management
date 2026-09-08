@@ -906,9 +906,17 @@ def main():
 
             # Track the max seen for each lane since the last snapshot write —
             # this frame's count alone would only be the instantaneous value.
+            # Stored 1-indexed (roi_idx + 1): api.py's /live-lanes reads
+            # lane_counts keyed 1..4 (a pre-existing convention, fixed there
+            # once before after confirming it via live logs), while roi_idx
+            # itself is 0-indexed everywhere else in this file — this is a
+            # brand-new dict, so its key convention is set correctly here
+            # rather than inheriting the mismatch that was already present
+            # in lane_snapshot_counts before this change.
             for roi_idx, count in lane_snapshot_counts.items():
-                if count > lane_count_window_max.get(roi_idx, 0):
-                    lane_count_window_max[roi_idx] = count
+                lane_number = roi_idx + 1
+                if count > lane_count_window_max.get(lane_number, 0):
+                    lane_count_window_max[lane_number] = count
 
             for lane_number, (roi_name, roi_pts, roi_zone) in enumerate(roi_polygons, start=1):
                 center_x = int(roi_zone.centroid.x)
