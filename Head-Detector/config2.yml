@@ -81,7 +81,7 @@ queue_min_dwell_sec: 3.0
 queue_snapshot_min_dwell_sec: 1.0
 
 # How often (seconds) to write a queue_state_snapshots row while running.
-snapshot_interval: 3
+snapshot_interval: 2
 
 # ── Caddy / basket dataset collection ────────────────────────────────────────
 # Save one raw frame every N seconds to caddy_frames/ for future training.

@@ -568,6 +568,11 @@ def main():
     track_equipment: dict[int, str] = {}  # track_id → equipment label (updated each frame)
     lane_last_insert: dict[str, tuple[int, float, int]] = {}  # roi_name → (track_id, dwell_seconds, active_heads_in_lane)
     recent_track_outcomes = {}  # track_id -> visual outcome overlay for 1 second after death
+    # Max per-lane count seen since the last snapshot write, not just whatever
+    # frame happened to land on the write. A point-in-time read at a fixed
+    # interval can under-report a brief pile-up that came and went between
+    # writes — taking the max over the window catches it instead.
+    lane_count_window_max: dict[int, int] = {}
     last_snapshot_time = 0.0
     last_live_snap_time = 0.0
     last_caddy_frame_time = 0.0
@@ -899,6 +904,12 @@ def main():
                 roi_idx = track_info["roi_idx"]
                 lane_snapshot_counts[roi_idx] = lane_snapshot_counts.get(roi_idx, 0) + 1
 
+            # Track the max seen for each lane since the last snapshot write —
+            # this frame's count alone would only be the instantaneous value.
+            for roi_idx, count in lane_snapshot_counts.items():
+                if count > lane_count_window_max.get(roi_idx, 0):
+                    lane_count_window_max[roi_idx] = count
+
             for lane_number, (roi_name, roi_pts, roi_zone) in enumerate(roi_polygons, start=1):
                 center_x = int(roi_zone.centroid.x)
                 center_y = int(roi_zone.centroid.y)
@@ -1045,18 +1056,21 @@ def main():
                 dwells = [current_time - track_start_times[tid]
                           for tid in active_ids if tid in track_start_times]
                 long_dwells = [d for d in dwells if d >= QUEUE_SNAPSHOT_MIN_DWELL_SEC]
-                # Use the same per-lane count that is shown on the overlay (0.25 s threshold).
-                queue_count = sum(lane_snapshot_counts.values())
+                # Max per-lane count seen since the last write, not just
+                # whatever single frame the write happened to land on — a
+                # short-lived pile-up between writes would otherwise never
+                # show up even though a customer standing there saw it.
+                queue_count = sum(lane_count_window_max.values())
                 avg_dwell = float(sum(long_dwells) / len(long_dwells)) if long_dwells else 0.0
                 max_dwell = float(max(long_dwells)) if long_dwells else 0.0
-                # Persist the per-lane counts already computed for the overlay.
                 systems_logger.debug(
                     f"[SNAPSHOT] Attempting write | cam={camID} | queue_count={queue_count} "
-                    f"| lane_counts={lane_snapshot_counts} | db.enabled={db.enabled}"
+                    f"| lane_counts={lane_count_window_max} | db.enabled={db.enabled}"
                 )
                 db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell,
-                                      lane_counts=lane_snapshot_counts)
+                                      lane_counts=lane_count_window_max)
                 last_snapshot_time = current_time
+                lane_count_window_max = {}
 
             # ── Caddy dataset collection (raw frame, low framerate) ───────────
             if (CADDY_COLLECT_INTERVAL_SEC > 0
