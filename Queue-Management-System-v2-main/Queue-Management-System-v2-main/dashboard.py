@@ -345,6 +345,13 @@ def _build_dashboard_dwell_lstm_model(service_history: pd.DataFrame, mode: str):
 
     X_arr = np.array(X_train, dtype=float).reshape(-1, seq_len, 1)
     y_arr = np.array(y_train, dtype=float)
+    # Streamlit keeps this process alive across every rerun, and this model
+    # gets rebuilt from scratch on each one — without resetting Keras's
+    # internal state first, its global name-scope stack can end up
+    # corrupted after enough reruns, surfacing as an unrelated-looking
+    # AttributeError deep inside Keras internals (name_scope_stack.pop()
+    # on a NoneType) rather than anything about this function's own data.
+    tf.keras.backend.clear_session()
     model = tf.keras.Sequential([
         tf.keras.layers.Input(shape=(seq_len, 1)),
         tf.keras.layers.LSTM(24),
