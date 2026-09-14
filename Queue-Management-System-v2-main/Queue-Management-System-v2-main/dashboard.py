@@ -1,3 +1,4 @@
+import gc
 import os
 import json
 import time as _time
@@ -19,7 +20,21 @@ import psycopg2
 import streamlit as st
 from dotenv import find_dotenv, load_dotenv
 from plotly.subplots import make_subplots
-from streamlit.components.v1 import html as st_html
+
+def _st_html_compat(raw_html: str, *, height: int = 0, **kwargs):
+    if hasattr(st, "html"):
+        try:
+            return st.html(raw_html, height=height, **kwargs)
+        except TypeError:
+            return st.html(raw_html, **kwargs)
+    from streamlit.components.v1 import html as legacy_html
+    try:
+        return legacy_html(raw_html, height=height, **kwargs)
+    except TypeError:
+        return legacy_html(raw_html, **kwargs)
+
+
+st_html = _st_html_compat
 
 try:
     import tensorflow as tf
@@ -346,19 +361,31 @@ def _build_dashboard_dwell_lstm_model(service_history: pd.DataFrame, mode: str):
     X_arr = np.array(X_train, dtype=float).reshape(-1, seq_len, 1)
     y_arr = np.array(y_train, dtype=float)
     # Streamlit keeps this process alive across every rerun, and this model
-    # gets rebuilt from scratch on each one — without resetting Keras's
-    # internal state first, its global name-scope stack can end up
-    # corrupted after enough reruns, surfacing as an unrelated-looking
-    # AttributeError deep inside Keras internals (name_scope_stack.pop()
-    # on a NoneType) rather than anything about this function's own data.
-    tf.keras.backend.clear_session()
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(seq_len, 1)),
-        tf.keras.layers.LSTM(24),
-        tf.keras.layers.Dense(1),
-    ])
-    model.compile(optimizer="adam", loss="mse")
-    model.fit(X_arr, y_arr, epochs=DWELL_LSTM_EPOCHS, batch_size=min(16, len(X_arr)), verbose=0)
+    # gets rebuilt from scratch on each one. Keras can leave a stale
+    # name-scope stack behind on repeated rebuilds; clear it aggressively and
+    # retry once if the first fit still trips the internal stack corruption.
+    def _build_lstm_model():
+        model = tf.keras.Sequential([
+            tf.keras.layers.Input(shape=(seq_len, 1)),
+            tf.keras.layers.LSTM(24),
+            tf.keras.layers.Dense(1),
+        ])
+        model.compile(optimizer="adam", loss="mse")
+        return model
+
+    model = None
+    for attempt in range(2):
+        try:
+            tf.keras.backend.clear_session()
+            gc.collect()
+            model = _build_lstm_model()
+            model.fit(X_arr, y_arr, epochs=DWELL_LSTM_EPOCHS, batch_size=min(16, len(X_arr)), verbose=0)
+            break
+        except Exception:
+            if attempt == 1:
+                raise
+            continue
+
     return {
         "model": model,
         "scaler": scaler,
