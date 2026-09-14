@@ -1499,7 +1499,15 @@ st.set_page_config(page_title="IQMS - Live Dashboard", page_icon="📊", layout=
 # guessed — a prior 20s guess reloaded before a run finished rendering and
 # made the page spin indefinitely. This leaves >2x margin over the slowest
 # run actually seen.
-st_html(
+# This block only works if its <script> tag actually executes. st.html()
+# (preferred by the compat shim above, for other content) renders via
+# innerHTML and does not reliably run embedded scripts per Streamlit's own
+# docs -- silently turning this into a no-op with no visible error, which
+# would explain auto-refresh quietly stopping after appearing fixed.
+# Bypass the compat shim here and always use the legacy iframe-based
+# renderer, which does execute scripts.
+from streamlit.components.v1 import html as _legacy_html
+_legacy_html(
     f"""<script>
     var _iqmsLoadedAt = Date.now();
     setTimeout(function(){{ window.parent.location.reload(); }}, {LIVE_REFRESH_SEC * 1000});
