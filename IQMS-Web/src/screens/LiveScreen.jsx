@@ -155,8 +155,10 @@ export default function LiveScreen() {
   );
   const [openCams, setOpenCams] = useState([]);
   const toggleCam = id => setOpenCams(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-  const wasOverRef = useRef(false);
-  const wasForecastOverRef = useRef(false);
+  // Tracks the rising edge for the single alert below, plus the horizon it
+  // was last computed against (see that effect for why the horizon matters).
+  const wasAlertOverRef = useRef(false);
+  const prevHorizonRef = useRef(0);
 
   // Which "Predicted Wait" tile is shown in the gauge below — one of the
   // HORIZON_PRESETS values (0/5/10/15/20 minutes from now).
@@ -192,7 +194,6 @@ export default function LiveScreen() {
 
   const lanes = lanesData?.lanes ?? [];
   const snapshot = lanesData?.snapshot ?? {};
-  const avgWait = snapshot.avg_wait_min;
 
   // The dashboard's own numbers, for 0/5/10/15 — this is the same
   // dashboard_state row the Streamlit dashboard itself reads, so these four
@@ -217,51 +218,40 @@ export default function LiveScreen() {
   }[horizonMin];
   const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
 
-  // Same +15 min value the gauge itself shows when +15m is selected — one
-  // shared number for both, instead of a second, potentially-different fetch.
-  const forecastWait15 = forecastState?.wait_15_min;
-
-  // Fire a popup only on the rising edge (crossing into alert), not every
-  // refresh. While disabled, keep resetting the tracker so turning alerts
-  // back on always gets a fresh chance to fire if already over threshold —
-  // otherwise a crossing that happened while OFF silently "used up" the
-  // rising edge and nothing would ever show once you turned it back on.
+  // Single alert, tied to whichever horizon is currently selected — watches
+  // gaugeValue, the exact same number the gauge itself displays, so the
+  // alert can never disagree with what's on screen. (Previously: two
+  // independent hardcoded alerts — one silently watching the 5-min forecast
+  // mislabeled as "current", one always fixed to +15min regardless of the
+  // horizon picker — which could both fire in the same poll and stack as
+  // two near-identical bars.)
+  //
+  // Fires only on the rising edge (crossing into alert), not every refresh.
+  // While disabled, keep resetting the tracker so turning alerts back on
+  // always gets a fresh chance to fire if already over threshold — otherwise
+  // a crossing that happened while OFF silently "used up" the rising edge.
+  // A horizon switch changes what gaugeValue *means* (a different metric,
+  // not a real change over time), so it resyncs silently instead of being
+  // treated as a fresh crossing.
   useEffect(() => {
     if (!alertsEnabled) {
-      wasOverRef.current = false;
+      wasAlertOverRef.current = false;
+      prevHorizonRef.current = horizonMin;
       return;
     }
-    if (avgWait == null) return;
-    const isOver = avgWait >= threshold;
-    if (isOver && !wasOverRef.current) {
-      const message = t.alertPopupMessage(Math.round(avgWait), threshold);
+    if (gaugeValue == null) return;
+    const isOver = gaugeValue >= threshold;
+    const horizonChanged = prevHorizonRef.current !== horizonMin;
+    prevHorizonRef.current = horizonMin;
+    if (isOver && !wasAlertOverRef.current && !horizonChanged) {
+      const message = t.alertPopupMessage(Math.round(gaugeValue), threshold, horizonMin);
       showToast(message, 'error', 6000);
       if ('Notification' in window && Notification.permission === 'granted') {
         new Notification('IQMS', { body: message });
       }
     }
-    wasOverRef.current = isOver;
-  }, [avgWait, threshold, alertsEnabled]);
-
-  // Same rising-edge pattern as above, but for the +15 min forecast instead
-  // of the live wait — a warning before the threshold is actually crossed,
-  // not just after. Independent tracker so the two alerts don't interfere.
-  useEffect(() => {
-    if (!alertsEnabled) {
-      wasForecastOverRef.current = false;
-      return;
-    }
-    if (forecastWait15 == null) return;
-    const isOver = forecastWait15 >= threshold;
-    if (isOver && !wasForecastOverRef.current) {
-      const message = t.forecastAlertPopupMessage(Math.round(forecastWait15), threshold);
-      showToast(message, 'error', 6000);
-      if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification('IQMS', { body: message });
-      }
-    }
-    wasForecastOverRef.current = isOver;
-  }, [forecastWait15, threshold, alertsEnabled]);
+    wasAlertOverRef.current = isOver;
+  }, [gaugeValue, threshold, alertsEnabled, horizonMin]);
 
   return (
     <div className="screen-page">
