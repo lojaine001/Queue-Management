@@ -110,11 +110,13 @@ def _today_hours():
 # so a browser reload always lands right when a new prediction is due.
 if "sched_interval" not in st.session_state:
     _qp_interval = st.query_params.get("sched_interval", None)
-    _interval_options = [5, 10, 15, 30, 60]
+    # Kept in sync with the select_slider options list further down
+    # (both must agree, or a valid slider value gets rejected here).
+    _interval_options = [3, 5, 10, 15, 30, 60]
     if _qp_interval is not None and str(_qp_interval).isdigit() and int(_qp_interval) in _interval_options:
         st.session_state["sched_interval"] = int(_qp_interval)
     else:
-        st.session_state["sched_interval"] = 15
+        st.session_state["sched_interval"] = 3
 REFRESH_SEC = int(st.session_state["sched_interval"]) * 60
 # Live camera-driven tiles (In Queue Now, Entries Last Hour, Predicted Wait)
 # reflect data that changes every few seconds — they shouldn't wait on the
@@ -2513,7 +2515,7 @@ def _sync_interval_to_qp():
 with _col_interval:
     st.select_slider(
         "Interval (min)",
-        options=[5, 10, 15, 30, 60],
+        options=[3, 5, 10, 15, 30, 60],
         key="sched_interval",
         disabled=_sched_running,
         on_change=_sync_interval_to_qp,
