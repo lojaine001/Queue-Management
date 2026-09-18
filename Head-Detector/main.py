@@ -573,6 +573,13 @@ def main():
     # interval can under-report a brief pile-up that came and went between
     # writes — taking the max over the window catches it instead.
     lane_count_window_max: dict[int, int] = {}
+    # Last time (time.time()) each lane had any tracked person in it, 1-indexed
+    # to match lane_count_window_max's convention. Drives the rolling-window
+    # "is this lane currently active" check below — a much steadier signal
+    # than "did anyone show up since the last snapshot" (SNAPSHOT_INTERVAL,
+    # ~2s), which would flicker a lane to "closed" the instant it's briefly
+    # empty between customers.
+    lane_last_active_ts: dict[int, float] = {}
     last_snapshot_time = 0.0
     last_live_snap_time = 0.0
     last_caddy_frame_time = 0.0
@@ -588,6 +595,12 @@ def main():
     # Caddy/basket image collection. Set interval to 0 to disable.
     CADDY_COLLECT_INTERVAL_SEC = float(config2.get('caddy_collect_interval_sec', 30.0))
     CADDY_COLLECT_MAX_GB       = float(config2.get('caddy_collect_max_gb', 2.0))
+    # Rolling window for "is this lane currently active" — a lane counts as
+    # open if it's had a tracked person within the last N seconds. 120s (2
+    # min) sits in the middle of the requested 1-3 min range: long enough
+    # that a lane doesn't flicker closed between two customers, short enough
+    # to reflect a lane that's actually been closed for a while.
+    LANE_ACTIVE_WINDOW_SEC = float(config2.get('lane_active_window_sec', 120.0))
 
     try:
         while True:
@@ -917,6 +930,8 @@ def main():
                 lane_number = roi_idx + 1
                 if count > lane_count_window_max.get(lane_number, 0):
                     lane_count_window_max[lane_number] = count
+                if count > 0:
+                    lane_last_active_ts[lane_number] = current_time
 
             for lane_number, (roi_name, roi_pts, roi_zone) in enumerate(roi_polygons, start=1):
                 center_x = int(roi_zone.centroid.x)
@@ -1071,11 +1086,23 @@ def main():
                 queue_count = sum(lane_count_window_max.values())
                 avg_dwell = float(sum(long_dwells) / len(long_dwells)) if long_dwells else 0.0
                 max_dwell = float(max(long_dwells)) if long_dwells else 0.0
+                # Real-time open-lane count: a lane counts as active if it's
+                # had a tracked person within the last LANE_ACTIVE_WINDOW_SEC.
+                # This is what actually gets written as active_lanes below —
+                # previously nothing was passed here at all, so every
+                # snapshot silently fell back to log_queue_snapshot's
+                # hardcoded active_lanes=2 default regardless of real state.
+                active_lanes_count = sum(
+                    1 for last_ts in lane_last_active_ts.values()
+                    if current_time - last_ts <= LANE_ACTIVE_WINDOW_SEC
+                )
                 systems_logger.debug(
                     f"[SNAPSHOT] Attempting write | cam={camID} | queue_count={queue_count} "
-                    f"| lane_counts={lane_count_window_max} | db.enabled={db.enabled}"
+                    f"| lane_counts={lane_count_window_max} | active_lanes={active_lanes_count} "
+                    f"| db.enabled={db.enabled}"
                 )
                 db.log_queue_snapshot(camID, queue_count, avg_dwell, max_dwell,
+                                      active_lanes=active_lanes_count,
                                       lane_counts=lane_count_window_max)
                 last_snapshot_time = current_time
                 lane_count_window_max = {}
