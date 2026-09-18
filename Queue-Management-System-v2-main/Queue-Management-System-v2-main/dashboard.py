@@ -1842,11 +1842,13 @@ _dwell_models = st.session_state.get(_dwell_cache_key, {})
 _dwell_model_meta = st.session_state.get(_dwell_meta_cache_key, {})
 
 live_lane_source = _is_live_lane_snapshot(snap)
-detected_lanes = int(snap["active_lanes"]) if live_lane_source else DEFAULT_LANES
 
-# Infer active lanes from recent service_events (overrides snapshot if available).
-# Lane *count* uses a 30-min window so a temporarily quiet lane doesn't cause flicker.
-# Throughput fallback still uses the user-selected shorter window.
+# Fallback inference from recent service_events, used only when there's no
+# fresh live snapshot to read (e.g. Head-Detector just restarted, or is
+# down). This is a much slower signal -- built from completed transactions
+# over a 30-min window so a temporarily quiet lane doesn't cause flicker --
+# so it no longer overrides the live snapshot the way it used to; it only
+# fills in when the live signal isn't available at all.
 _lane_window = int(st.session_state.get("lane_infer_window_min", _LANE_INFER_WINDOW_MIN))
 _svc_recent = load_recent_service_events(_lane_window)
 _inferred_lanes: "int | None" = None
@@ -1869,8 +1871,17 @@ else:
             _inferred_lanes = int(min(max(round(len(_svc_ok) / max(_cap, 1)), 1), 5))
             _inferred_lanes_source = "throughput"
 
-if _inferred_lanes is not None:
+# Primary source: the live 1-3 min rolling-window count written directly
+# from Norfair tracking output at Head-Detector (main.py, active_lanes).
+# Previously the 30-min service_events inference above always overrode
+# this when it had data -- which, in an actively running store, was
+# almost always -- so the fast signal was rarely what actually got shown.
+if live_lane_source:
+    detected_lanes = int(snap["active_lanes"])
+elif _inferred_lanes is not None:
     detected_lanes = _inferred_lanes
+else:
+    detected_lanes = DEFAULT_LANES
 queue_count = int(snap["queue_count"]) if snap is not None and pd.notna(snap["queue_count"]) else 0
 snapshot_ts_local, snapshot_age_min = _snapshot_age_minutes(snap["timestamp"] if snap is not None else None)
 service_minutes = _estimated_service_minutes(snap)
@@ -2274,14 +2285,23 @@ alert_minutes_today = alert_slots * BUCKET_MIN
 
 
 status_class, status_label = _status_meta(wait_15m)
-if _inferred_lanes is not None:
-    lane_source_label = "Inferred lanes"
-elif live_lane_source:
+# Same priority as detected_lanes above: live snapshot first, then the
+# slower service_events inference, then the hardcoded default -- so the
+# label/note here always describes where the number actually came from,
+# not just whichever source happened to have data.
+if live_lane_source:
     lane_source_label = "Live lanes"
+elif _inferred_lanes is not None:
+    lane_source_label = "Inferred lanes"
 else:
     lane_source_label = "Default lanes"
 
-if _inferred_lanes is not None:
+if live_lane_source:
+    lane_source_note = (
+        f"Detected queue state is {_lane_phrase(detected_lanes)} open "
+        f"(real-time, from tracked camera activity)."
+    )
+elif _inferred_lanes is not None:
     if _inferred_lanes_source == "lane_id":
         lane_source_note = (
             f"Detected queue state is {_lane_phrase(detected_lanes)} open "
@@ -2292,8 +2312,6 @@ if _inferred_lanes is not None:
             f"Detected queue state is {_lane_phrase(detected_lanes)} open "
             f"(estimated from service throughput in the last {_lane_window} min — no per-lane data yet)."
         )
-elif live_lane_source:
-    lane_source_note = f"Detected queue state is {_lane_phrase(detected_lanes)} open."
 else:
     lane_source_note = (
         f"No recent lane snapshot in the last {SNAPSHOT_MAX_AGE_MIN} min. "
@@ -3774,22 +3792,23 @@ with st.expander("Active Lanes by Time of Day — historical pattern", expanded=
         if _use_p2.any():
             fig_lanes_hist.add_trace(go.Bar(x=[], y=[], name="Snapshot (observed)",
                                             marker_color="#94a3b8"))
-        # Current inferred value as reference line
-        if _inferred_lanes is not None:
+        # Current value as reference line — same priority as detected_lanes
+        # above: live snapshot first, then the service_events inference.
+        if live_lane_source:
+            fig_lanes_hist.add_hline(
+                y=detected_lanes,
+                line=dict(color="#64748b", width=1.5, dash="dot"),
+                annotation_text=f"Now: {detected_lanes} lane{'s' if detected_lanes != 1 else ''} (live)",
+                annotation_position="top left",
+                annotation_font=dict(color="#64748b", size=11),
+            )
+        elif _inferred_lanes is not None:
             fig_lanes_hist.add_hline(
                 y=_inferred_lanes,
                 line=dict(color="#7c3aed", width=2, dash="dot"),
                 annotation_text=f"Now: {_inferred_lanes} lane{'s' if _inferred_lanes != 1 else ''} (inferred)",
                 annotation_position="top left",
                 annotation_font=dict(color="#7c3aed", size=11),
-            )
-        elif live_lane_source:
-            fig_lanes_hist.add_hline(
-                y=detected_lanes,
-                line=dict(color="#64748b", width=1.5, dash="dot"),
-                annotation_text=f"Now: {detected_lanes} lane{'s' if detected_lanes != 1 else ''} (snapshot)",
-                annotation_position="top left",
-                annotation_font=dict(color="#64748b", size=11),
             )
         fig_lanes_hist.update_layout(
             height=240, margin=dict(l=0, r=20, t=10, b=0),
