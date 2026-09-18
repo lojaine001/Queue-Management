@@ -230,20 +230,23 @@ export default function LiveScreen() {
   // While disabled, keep resetting the tracker so turning alerts back on
   // always gets a fresh chance to fire if already over threshold — otherwise
   // a crossing that happened while OFF silently "used up" the rising edge.
-  // A horizon switch changes what gaugeValue *means* (a different metric,
-  // not a real change over time), so it resyncs silently instead of being
-  // treated as a fresh crossing.
+  // A horizon switch changes what gaugeValue *means* (a different metric),
+  // so it resets the tracker too -- but *before* evaluating, not instead of
+  // it: picking a horizon that's already over threshold should alert right
+  // away, not go silent until the value happens to dip and rise again.
   useEffect(() => {
+    const horizonChanged = prevHorizonRef.current !== horizonMin;
+    prevHorizonRef.current = horizonMin;
+    if (horizonChanged) {
+      wasAlertOverRef.current = false;
+    }
     if (!alertsEnabled) {
       wasAlertOverRef.current = false;
-      prevHorizonRef.current = horizonMin;
       return;
     }
     if (gaugeValue == null) return;
     const isOver = gaugeValue >= threshold;
-    const horizonChanged = prevHorizonRef.current !== horizonMin;
-    prevHorizonRef.current = horizonMin;
-    if (isOver && !wasAlertOverRef.current && !horizonChanged) {
+    if (isOver && !wasAlertOverRef.current) {
       const message = t.alertPopupMessage(Math.round(gaugeValue), threshold, horizonMin);
       showToast(message, 'error', 6000);
       if ('Notification' in window && Notification.permission === 'granted') {
