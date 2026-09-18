@@ -957,7 +957,7 @@ def load_snapshot():
     with _conn() as conn:
         row = pd.read_sql(
             """
-            SELECT queue_count, avg_dwell_sec, active_lanes, timestamp
+            SELECT queue_count, avg_dwell_sec, active_lanes, lane_counts, timestamp
             FROM queue_state_snapshots
             WHERE camera_id = %(cam)s
             ORDER BY timestamp DESC LIMIT 1
@@ -1882,6 +1882,25 @@ elif _inferred_lanes is not None:
     detected_lanes = _inferred_lanes
 else:
     detected_lanes = DEFAULT_LANES
+
+# "Open" (detected_lanes, above) and "occupied right now" are different
+# questions on purpose: detected_lanes uses a 1-3 min rolling window so a
+# lane briefly empty between two customers doesn't flicker closed -- which
+# means a lane can count as "open" for a couple minutes after the person
+# who was in it has already left. occupied_lanes_now answers the other
+# question directly: how many lanes have someone in them in this exact
+# snapshot, from the same per-lane counts Head-Detector already writes.
+occupied_lanes_now: "int | None" = None
+if live_lane_source and snap is not None:
+    _lc_raw = snap.get("lane_counts")
+    if isinstance(_lc_raw, str):
+        try:
+            _lc_raw = json.loads(_lc_raw)
+        except (TypeError, ValueError):
+            _lc_raw = None
+    if isinstance(_lc_raw, dict):
+        occupied_lanes_now = sum(1 for v in _lc_raw.values() if (v or 0) and int(v) > 0)
+
 queue_count = int(snap["queue_count"]) if snap is not None and pd.notna(snap["queue_count"]) else 0
 snapshot_ts_local, snapshot_age_min = _snapshot_age_minutes(snap["timestamp"] if snap is not None else None)
 service_minutes = _estimated_service_minutes(snap)
@@ -2297,9 +2316,16 @@ else:
     lane_source_label = "Default lanes"
 
 if live_lane_source:
+    if occupied_lanes_now is not None:
+        _occupied_note = (
+            f" {occupied_lanes_now} lane{'s' if occupied_lanes_now != 1 else ''} "
+            f"{'has' if occupied_lanes_now == 1 else 'have'} a customer right now."
+        )
+    else:
+        _occupied_note = ""
     lane_source_note = (
         f"Detected queue state is {_lane_phrase(detected_lanes)} open "
-        f"(real-time, from tracked camera activity)."
+        f"(real-time, from tracked camera activity)." + _occupied_note
     )
 elif _inferred_lanes is not None:
     if _inferred_lanes_source == "lane_id":
