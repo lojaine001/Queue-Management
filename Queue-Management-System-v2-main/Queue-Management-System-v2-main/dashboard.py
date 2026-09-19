@@ -961,7 +961,7 @@ def load_snapshot():
     with _conn() as conn:
         row = pd.read_sql(
             """
-            SELECT queue_count, avg_dwell_sec, active_lanes, lane_counts, timestamp
+            SELECT queue_count, avg_dwell_sec, active_lanes, timestamp
             FROM queue_state_snapshots
             WHERE camera_id = %(cam)s
             ORDER BY timestamp DESC LIMIT 1
@@ -1887,24 +1887,6 @@ elif _inferred_lanes is not None:
 else:
     detected_lanes = DEFAULT_LANES
 
-# "Open" (detected_lanes, above) and "occupied right now" are different
-# questions on purpose: detected_lanes uses a 1-3 min rolling window so a
-# lane briefly empty between two customers doesn't flicker closed -- which
-# means a lane can count as "open" for a couple minutes after the person
-# who was in it has already left. occupied_lanes_now answers the other
-# question directly: how many lanes have someone in them in this exact
-# snapshot, from the same per-lane counts Head-Detector already writes.
-occupied_lanes_now: "int | None" = None
-if live_lane_source and snap is not None:
-    _lc_raw = snap.get("lane_counts")
-    if isinstance(_lc_raw, str):
-        try:
-            _lc_raw = json.loads(_lc_raw)
-        except (TypeError, ValueError):
-            _lc_raw = None
-    if isinstance(_lc_raw, dict):
-        occupied_lanes_now = sum(1 for v in _lc_raw.values() if (v or 0) and int(v) > 0)
-
 queue_count = int(snap["queue_count"]) if snap is not None and pd.notna(snap["queue_count"]) else 0
 snapshot_ts_local, snapshot_age_min = _snapshot_age_minutes(snap["timestamp"] if snap is not None else None)
 service_minutes = _estimated_service_minutes(snap)
@@ -2338,31 +2320,31 @@ else:
     lane_source_label = "No camera data"
 
 if live_lane_source:
-    if occupied_lanes_now is not None:
-        _occupied_note = (
-            f" {occupied_lanes_now} lane{'s' if occupied_lanes_now != 1 else ''} "
-            f"{'has' if occupied_lanes_now == 1 else 'have'} a customer right now."
-        )
-    else:
-        _occupied_note = ""
+    # One number, not two: detected_lanes is already the smoothed reading,
+    # so this is what "currently occupied" means -- no separate raw/
+    # instantaneous count alongside it. Two numbers both claiming to mean
+    # "occupied right now" is exactly the confusing state this replaced.
     lane_source_note = (
-        f"{_lane_phrase(detected_lanes)} occupied "
-        f"(smoothed over the last few minutes, from tracked camera activity)." + _occupied_note
+        f"Currently occupied: {detected_lanes} of {MAX_LANES} lanes have a customer "
+        f"(smoothed over the last few minutes, from tracked camera activity)."
     )
 elif _inferred_lanes is not None:
     if _inferred_lanes_source == "lane_id":
         lane_source_note = (
-            f"{_lane_phrase(detected_lanes)} estimated occupied "
+            f"Currently occupied: about {_lane_phrase(detected_lanes)} "
             f"({detected_lanes} distinct lane{'s' if detected_lanes != 1 else ''} with service completions in the last {_LANE_COUNT_WINDOW_MIN} min)."
         )
     else:
         lane_source_note = (
-            f"{_lane_phrase(detected_lanes)} estimated occupied "
+            f"Currently occupied: about {_lane_phrase(detected_lanes)} "
             f"(from service throughput in the last {_lane_window} min — no per-lane data yet)."
         )
 else:
     lane_source_note = f"No recent camera data in the last {SNAPSHOT_MAX_AGE_MIN} min."
 # Deliberately never compared to detected_lanes -- see the note above.
+# Stated first in the banner (see the concatenation below) since this is
+# the number that actually drives the forecast; occupancy is informational
+# context shown alongside it.
 lane_parameter_note = f"Forecast uses {_lane_phrase(selected_lanes)} (manually set)."
 status_text = (
     f"{status_label} - Predicted wait with {_lane_phrase(selected_lanes)}: {_format_wait_capped(wait_10m)}"
@@ -2395,7 +2377,7 @@ st.markdown(
 <div class="status-banner {status_class}">
   <div class="status-banner-head">Lane-Aware Prediction Status</div>
   <div class="status-banner-body">{status_text}</div>
-  <div class="status-banner-sub">{lane_source_note} {lane_parameter_note}</div>
+  <div class="status-banner-sub">{lane_parameter_note} {lane_source_note}</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -3283,7 +3265,7 @@ _arrivals_note = (
     + (" Arrivals capped to observed rate." if _arrivals_capped else "")
 ) if not pred_df.empty else ""
 st.markdown(
-    f'<div class="detail-note">{lane_source_note} {lane_parameter_note} The trend below is recalculated in the dashboard '
+    f'<div class="detail-note">{lane_parameter_note} {lane_source_note} The trend below is recalculated in the dashboard '
     f'from the saved arrival forecast and current queue state.'
     + (f" {_arrivals_note}" if _arrivals_note else "")
     + (f" {_arrival_calib_note}" if _arrival_calib_note else "")
@@ -3734,7 +3716,8 @@ else:
 
 _section_title("Lane Scenarios", f"wait at +10 min across 1–{MAX_LANES} lane options")
 lane_summary = (
-    f"{_lane_phrase(detected_lanes)} occupied. Forecast uses {_lane_phrase(selected_lanes)} (manually set)."
+    f"Forecast uses {_lane_phrase(selected_lanes)} (manually set). "
+    f"Currently occupied: {detected_lanes} of {MAX_LANES} lanes."
 )
 st.markdown(f'<div class="detail-note">{lane_summary}</div>', unsafe_allow_html=True)
 
