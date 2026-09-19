@@ -509,10 +509,14 @@ def _metric_card_html(label, value, tone="blue", delta_html="", supporting_text=
     """
 
 
-def _lane_card_html(lane_count, wait_value, is_active=False, is_default=False):
+def _lane_card_html(lane_count, wait_value, is_active=False):
+    # No "default"/"fallback" tier here on purpose -- that used to mean
+    # "this happens to match detected occupancy," which implied occupancy
+    # was a valid stand-in for the manual staffing setting. It isn't: every
+    # non-active card is just a what-if comparison, full stop.
     tone = "purple" if is_active else "blue"
-    chip = "Current live setting" if is_active else "Default assumption" if is_default else "Comparison"
-    lane_note = "Used for the main forecast" if is_active else "Fallback lane baseline" if is_default else "What-if scenario"
+    chip = "Current live setting" if is_active else "Comparison"
+    lane_note = "Used for the main forecast" if is_active else "What-if scenario"
     return f"""
     <div class="metric-card {tone} lane-card {'lane-current' if is_active else ''}">
       <div class="lane-card-top">
@@ -1926,9 +1930,13 @@ if "forecast_active_lanes" not in st.session_state:
                     _init_cur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
                     _init_row = _init_cur.fetchone()
                     _db_lanes = int(_init_row[0]) if _init_row and _init_row[0] else None
-            st.session_state["forecast_active_lanes"] = _db_lanes if _db_lanes else detected_lanes
+            # Staffing/capacity is a manual input by design -- a camera can tell
+            # you whether a lane is occupied right now, not whether it's staffed,
+            # so it must never seed this value, not even as a one-time default.
+            # Falls back to DEFAULT_LANES, never to occupancy-derived detected_lanes.
+            st.session_state["forecast_active_lanes"] = _db_lanes if _db_lanes else DEFAULT_LANES
         except Exception:
-            st.session_state["forecast_active_lanes"] = detected_lanes
+            st.session_state["forecast_active_lanes"] = DEFAULT_LANES
     st.session_state["_dashboard_last_written_lanes"] = st.session_state["forecast_active_lanes"]
 else:
     try:
@@ -2308,12 +2316,26 @@ status_class, status_label = _status_meta(wait_15m)
 # slower service_events inference, then the hardcoded default -- so the
 # label/note here always describes where the number actually came from,
 # not just whichever source happened to have data.
+#
+# IMPORTANT, by design: everything below describes OCCUPANCY -- a lane
+# currently has a customer in it -- never staffing/availability. A camera
+# can only ever measure the former; it cannot tell you whether a quiet
+# lane is actually closed or just has no one in it right now, so it must
+# never be treated as "closed" or fed back into the forecast's lane count.
+# "Forecast active lanes" (lane_parameter_note, below) is a manual
+# staffing input by design and is kept completely separate on purpose --
+# the two numbers are shown side by side, never compared, never framed as
+# one overriding the other. If a genuine "possibly unstaffed" signal is
+# wanted later, it belongs as a separate feature with a much longer idle
+# window (15-30+ min) surfaced as a suggestion for a person to confirm --
+# not as an automatic input here. Not built (deliberately) as of this
+# comment.
 if live_lane_source:
-    lane_source_label = "Live lanes"
+    lane_source_label = "Occupied now"
 elif _inferred_lanes is not None:
-    lane_source_label = "Inferred lanes"
+    lane_source_label = "Est. occupancy"
 else:
-    lane_source_label = "Default lanes"
+    lane_source_label = "No camera data"
 
 if live_lane_source:
     if occupied_lanes_now is not None:
@@ -2324,30 +2346,24 @@ if live_lane_source:
     else:
         _occupied_note = ""
     lane_source_note = (
-        f"Detected queue state is {_lane_phrase(detected_lanes)} open "
-        f"(real-time, from tracked camera activity)." + _occupied_note
+        f"{_lane_phrase(detected_lanes)} occupied "
+        f"(smoothed over the last few minutes, from tracked camera activity)." + _occupied_note
     )
 elif _inferred_lanes is not None:
     if _inferred_lanes_source == "lane_id":
         lane_source_note = (
-            f"Detected queue state is {_lane_phrase(detected_lanes)} open "
+            f"{_lane_phrase(detected_lanes)} estimated occupied "
             f"({detected_lanes} distinct lane{'s' if detected_lanes != 1 else ''} with service completions in the last {_LANE_COUNT_WINDOW_MIN} min)."
         )
     else:
         lane_source_note = (
-            f"Detected queue state is {_lane_phrase(detected_lanes)} open "
-            f"(estimated from service throughput in the last {_lane_window} min — no per-lane data yet)."
+            f"{_lane_phrase(detected_lanes)} estimated occupied "
+            f"(from service throughput in the last {_lane_window} min — no per-lane data yet)."
         )
 else:
-    lane_source_note = (
-        f"No recent lane snapshot in the last {SNAPSHOT_MAX_AGE_MIN} min. "
-        f"Predictions fall back to {_lane_phrase(DEFAULT_LANES)} open."
-    )
-lane_parameter_note = (
-    f"Forecast parameter is set to {_lane_phrase(selected_lanes)}."
-    if selected_lanes == detected_lanes
-    else f"Forecast parameter overrides the detected state: {_lane_phrase(selected_lanes)} selected."
-)
+    lane_source_note = f"No recent camera data in the last {SNAPSHOT_MAX_AGE_MIN} min."
+# Deliberately never compared to detected_lanes -- see the note above.
+lane_parameter_note = f"Forecast uses {_lane_phrase(selected_lanes)} (manually set)."
 status_text = (
     f"{status_label} - Predicted wait with {_lane_phrase(selected_lanes)}: {_format_wait_capped(wait_10m)}"
     if wait_10m is not None
@@ -2441,7 +2457,7 @@ def _sync_days_to_qp():
     st.query_params["training_days"] = str(st.session_state.get("training_span_days", int(os.getenv("DATA_SPAN_DAYS", 30))))
 
 def _sync_lanes_to_qp():
-    st.query_params["lanes"] = str(st.session_state.get("forecast_active_lanes", detected_lanes))
+    st.query_params["lanes"] = str(st.session_state.get("forecast_active_lanes", DEFAULT_LANES))
 
 def _sync_history_range_to_qp():
     st.query_params["history_range_hours"] = str(st.session_state.get("history_range_hours", 24))
@@ -3718,7 +3734,7 @@ else:
 
 _section_title("Lane Scenarios", f"wait at +10 min across 1–{MAX_LANES} lane options")
 lane_summary = (
-    f"Detected queue state is {_lane_phrase(detected_lanes)}. Dashboard forecast parameter is {_lane_phrase(selected_lanes)}."
+    f"{_lane_phrase(detected_lanes)} occupied. Forecast uses {_lane_phrase(selected_lanes)} (manually set)."
 )
 st.markdown(f'<div class="detail-note">{lane_summary}</div>', unsafe_allow_html=True)
 
@@ -3729,9 +3745,8 @@ if lane_waits:
         with col:
             wait_value = lane_waits.get(lane_count, {}).get("wait_10m")
             is_active = lane_count == selected_lanes
-            is_default = lane_count == detected_lanes and selected_lanes == detected_lanes
             st.markdown(
-                _lane_card_html(lane_count, wait_value, is_active=is_active, is_default=is_default),
+                _lane_card_html(lane_count, wait_value, is_active=is_active),
                 unsafe_allow_html=True,
             )
 else:
@@ -3824,7 +3839,7 @@ with st.expander("Active Lanes by Time of Day — historical pattern", expanded=
             fig_lanes_hist.add_hline(
                 y=detected_lanes,
                 line=dict(color="#64748b", width=1.5, dash="dot"),
-                annotation_text=f"Now: {detected_lanes} lane{'s' if detected_lanes != 1 else ''} (live)",
+                annotation_text=f"Now: {detected_lanes} occupied (live)",
                 annotation_position="top left",
                 annotation_font=dict(color="#64748b", size=11),
             )
@@ -3832,7 +3847,7 @@ with st.expander("Active Lanes by Time of Day — historical pattern", expanded=
             fig_lanes_hist.add_hline(
                 y=_inferred_lanes,
                 line=dict(color="#7c3aed", width=2, dash="dot"),
-                annotation_text=f"Now: {_inferred_lanes} lane{'s' if _inferred_lanes != 1 else ''} (inferred)",
+                annotation_text=f"Now: {_inferred_lanes} occupied (estimated)",
                 annotation_position="top left",
                 annotation_font=dict(color="#7c3aed", size=11),
             )
