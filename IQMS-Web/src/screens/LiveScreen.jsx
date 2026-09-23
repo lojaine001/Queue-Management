@@ -23,10 +23,60 @@ function countColor(count) {
   return { color: '#ff3b30', bg: '#3a1210', borderWidth: 6 };
 }
 
+// Renders how many people are actually in the lane, not just whether it's
+// busy -- inline SVG (no icon library needed) so it stays self-contained
+// and, unlike an emoji, is actually colorable. Grey outline when empty,
+// yellow otherwise; 3+ uses a group glyph with the middle person drawn
+// last so it sits in front of the two behind it.
+function peopleIcon(count, size = 18) {
+  const YELLOW = '#F5B82E';
+  const GREY = '#5A5F6A';
+
+  if (count <= 0) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={GREY} strokeWidth="1.8" aria-hidden="true">
+        <circle cx="12" cy="7" r="4" />
+        <path d="M12 13c-4.42 0-8 2.69-8 6v2h16v-2c0-3.31-3.58-6-8-6z" />
+      </svg>
+    );
+  }
+  if (count === 1) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill={YELLOW} aria-hidden="true">
+        <circle cx="12" cy="7" r="4" />
+        <path d="M12 13c-4.42 0-8 2.69-8 6v2h16v-2c0-3.31-3.58-6-8-6z" />
+      </svg>
+    );
+  }
+  if (count === 2) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 30 22" fill={YELLOW} aria-hidden="true">
+        <circle cx="10" cy="7" r="3.6" />
+        <path d="M10 12c-3.9 0-7 2.4-7 5.4v1.6h14v-1.6c0-3-3.1-5.4-7-5.4z" />
+        <circle cx="20" cy="7" r="3.6" />
+        <path d="M20 12c-3.9 0-7 2.4-7 5.4v1.6h14v-1.6c0-3-3.1-5.4-7-5.4z" />
+      </svg>
+    );
+  }
+  // 3+ : group icon, middle person larger and drawn on top.
+  return (
+    <svg width={size} height={size} viewBox="0 0 34 24" fill={YELLOW} aria-hidden="true">
+      <circle cx="8" cy="8" r="3.2" />
+      <path d="M8 13c-3.5 0-6.2 2.2-6.2 5v1.8h12.4v-1.8c0-2.8-2.7-5-6.2-5z" />
+      <circle cx="26" cy="8" r="3.2" />
+      <path d="M26 13c-3.5 0-6.2 2.2-6.2 5v1.8h12.4v-1.8c0-2.8-2.7-5-6.2-5z" />
+      <circle cx="17" cy="6.5" r="4.2" />
+      <path d="M17 11.5c-4.6 0-8.3 2.8-8.3 6.3v2.2h16.6v-2.2c0-3.5-3.7-6.3-8.3-6.3z" />
+    </svg>
+  );
+}
+
 function LaneCard({ lane, t }) {
   const count = lane.waiting ?? 0;
   const isClosed = lane.status === 'closed';
   const st = countColor(isClosed ? 0 : count);
+  // Ring color stays status-driven (green/orange/grey/red) -- only the
+  // icon inside it now reflects occupancy count, per spec.
   const iconColor = isClosed ? '#8b949e' : st.color;
   const fillMax = lane.fill_max || 10;
   const fillRatio = isClosed ? 0 : Math.min(1, count / fillMax);
@@ -35,14 +85,7 @@ function LaneCard({ lane, t }) {
     <div style={{ ...s.laneCard, borderLeftColor: st.color, borderLeftWidth: st.borderWidth, background: st.bg }}>
       <div style={s.laneLeft}>
         <div style={{ ...s.laneIcon, background: iconColor + '33', border: `2px solid ${iconColor}` }}>
-          {/* A plain emoji here ignores CSS color in every browser -- it
-              renders its own fixed glyph regardless of lane status, which
-              is why it looked washed out. A real SVG can actually be
-              colored, and set to yellow for visibility as requested. */}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="#facc15" aria-hidden="true">
-            <circle cx="12" cy="7" r="4" />
-            <path d="M12 13c-4.42 0-8 2.69-8 6v2h16v-2c0-3.31-3.58-6-8-6z" />
-          </svg>
+          {peopleIcon(isClosed ? 0 : count, 18)}
         </div>
         <div>
           <div style={s.laneName}>LANE {Number(lane.lane_id) + 1}</div>
