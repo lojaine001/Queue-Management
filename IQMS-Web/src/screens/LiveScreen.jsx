@@ -35,7 +35,14 @@ function LaneCard({ lane, t }) {
     <div style={{ ...s.laneCard, borderLeftColor: st.color, borderLeftWidth: st.borderWidth, background: st.bg }}>
       <div style={s.laneLeft}>
         <div style={{ ...s.laneIcon, background: iconColor + '33', border: `2px solid ${iconColor}` }}>
-          <span style={{ color: iconColor, fontSize: 14 }}>👤</span>
+          {/* A plain emoji here ignores CSS color in every browser -- it
+              renders its own fixed glyph regardless of lane status, which
+              is why it looked washed out. A real SVG can actually be
+              colored, and set to yellow for visibility as requested. */}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="#facc15" aria-hidden="true">
+            <circle cx="12" cy="7" r="4" />
+            <path d="M12 13c-4.42 0-8 2.69-8 6v2h16v-2c0-3.31-3.58-6-8-6z" />
+          </svg>
         </div>
         <div>
           <div style={s.laneName}>LANE {Number(lane.lane_id) + 1}</div>
