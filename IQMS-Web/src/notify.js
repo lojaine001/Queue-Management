@@ -59,3 +59,69 @@ export async function showAppNotification(title, body, tag) {
   // original way there, so this isn't a regression for those browsers.
   new Notification(title, options);
 }
+
+// -- Stage 2: Web Push (works even with no tab open) --------------------
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+// Subscribes this device for push and tells the server its own
+// threshold/horizon, so a server-triggered push can only ever fire at the
+// exact point this device's own in-page alert would -- never a separate,
+// possibly-disagreeing number. Safe to call again whenever threshold or
+// horizon changes: pushManager.subscribe() returns the existing
+// subscription without re-prompting if one already exists for this app,
+// and /push-subscribe is an upsert.
+export async function subscribeToPush(apiUrl, thresholdMin, horizonMin) {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  if (Notification.permission !== 'granted') return null;
+
+  try {
+    const reg = swRegistration || (await navigator.serviceWorker.ready);
+    const keyRes = await fetch(`${apiUrl}/vapid-public-key`);
+    if (!keyRes.ok) return null;
+    const { public_key } = await keyRes.json();
+
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(public_key),
+    });
+    const json = sub.toJSON();
+
+    await fetch(`${apiUrl}/push-subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        endpoint: json.endpoint,
+        keys: json.keys,
+        threshold_min: thresholdMin,
+        horizon_min: horizonMin,
+      }),
+    });
+    return sub;
+  } catch (err) {
+    console.warn('Push subscription failed:', err);
+    return null;
+  }
+}
+
+export async function unsubscribeFromPush(apiUrl) {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const reg = swRegistration || (await navigator.serviceWorker.getRegistration());
+    const sub = await reg?.pushManager.getSubscription();
+    if (!sub) return;
+    await fetch(`${apiUrl}/push-unsubscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    });
+    await sub.unsubscribe();
+  } catch (err) {
+    console.warn('Push unsubscribe failed:', err);
+  }
+}

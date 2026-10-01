@@ -6,7 +6,10 @@ import { useToast } from '../context/ToastContext';
 import CameraPlaceholder from '../components/CameraPlaceholder';
 import UpdatedAgo from '../components/UpdatedAgo';
 import Skeleton from '../components/Skeleton';
-import { requestNotificationPermission, notificationPermissionState, showAppNotification } from '../notify';
+import {
+  requestNotificationPermission, notificationPermissionState, showAppNotification,
+  subscribeToPush, unsubscribeFromPush,
+} from '../notify';
 
 const SNAP_INTERVAL = 30000;
 const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
@@ -244,6 +247,21 @@ export default function LiveScreen() {
   useEffect(() => {
     localStorage.setItem('iqms_alert_threshold', String(threshold));
   }, [threshold]);
+
+  // Keeps the server-side push subscription in sync with this device's own
+  // settings -- fires on first grant, and again any time threshold/horizon
+  // changes (push-subscribe is an upsert, and pushManager.subscribe()
+  // returns the existing subscription rather than re-prompting if one
+  // already exists, so this is cheap to call repeatedly). Unsubscribes if
+  // alerts get turned off, so a disabled alert can't still push.
+  useEffect(() => {
+    if (notifyPermission !== 'granted') return;
+    if (!alertsEnabled) {
+      unsubscribeFromPush(API_URL);
+      return;
+    }
+    subscribeToPush(API_URL, threshold, horizonMin);
+  }, [notifyPermission, alertsEnabled, threshold, horizonMin]);
 
   const { data, loading, error, lastUpdated } = useApi([
     `${API_URL}/live-lanes`,
