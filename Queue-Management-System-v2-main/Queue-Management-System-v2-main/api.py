@@ -15,9 +15,17 @@ from typing import Optional
 
 import psycopg2
 import psycopg2.extras
+from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Every other script in this codebase (dashboard.py, ensemble_predict.py,
+# run_scheduler.py, push_alert_checker.py, ...) loads .env this way --
+# this file never did, so anything set only in .env (not a real OS-level
+# env var) was silently invisible to it. Caught via VAPID_PUBLIC_KEY
+# returning "not configured" despite being set in .env.
+load_dotenv(find_dotenv(usecwd=True))
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
