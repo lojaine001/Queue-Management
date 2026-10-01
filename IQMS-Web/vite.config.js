@@ -11,6 +11,13 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3001,
       strictPort: false,
+      // Required to reach this dev server through a Cloudflare tunnel:
+      // host:true makes it listen on all interfaces, not just localhost,
+      // and allowedHosts is needed because Vite 5 blocks requests whose
+      // Host header it doesn't recognize -- the tunnel's *.trycloudflare.com
+      // hostname would otherwise get "Blocked request" with no other clue.
+      host: true,
+      allowedHosts: ['.trycloudflare.com'],
       proxy: {
         '/api': {
           target: apiTarget,
