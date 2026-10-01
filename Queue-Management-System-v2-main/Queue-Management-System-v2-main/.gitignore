@@ -153,6 +153,10 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+
+# VAPID keypair (Web Push) -- generated locally via `vapid --gen`,
+# never committed. See VAPID_SETUP.md.
+*.pem
 .venv
 env/
 venv/
