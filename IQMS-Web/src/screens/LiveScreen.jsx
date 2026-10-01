@@ -6,6 +6,7 @@ import { useToast } from '../context/ToastContext';
 import CameraPlaceholder from '../components/CameraPlaceholder';
 import UpdatedAgo from '../components/UpdatedAgo';
 import Skeleton from '../components/Skeleton';
+import { requestNotificationPermission, notificationPermissionState, showAppNotification } from '../notify';
 
 const SNAP_INTERVAL = 30000;
 const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
@@ -116,7 +117,14 @@ function Toggle({ on, onChange }) {
   );
 }
 
-function AlertsBar({ enabled, onToggle, threshold, onThreshold, t }) {
+function AlertsBar({ enabled, onToggle, threshold, onThreshold, notifyPermission, onEnableNotifications, t }) {
+  // Permission must be requested from a direct click, not automatically --
+  // so this button is the only place that ever asks. Hidden once granted
+  // (nothing to do) or once denied (asking again wouldn't show a prompt,
+  // it'd just silently fail -- the browser remembers "denied" until the
+  // user changes it themselves in site settings).
+  const showEnableButton = notifyPermission === 'default';
+
   return (
     <div style={s.alertsBar}>
       <span style={s.bellIcon}>🔔</span>
@@ -132,6 +140,14 @@ function AlertsBar({ enabled, onToggle, threshold, onThreshold, t }) {
         style={s.slider}
       />
       <span className="mono" style={s.seuilValue}>{threshold} min</span>
+      {showEnableButton && (
+        <>
+          <span style={s.divider} />
+          <button onClick={onEnableNotifications} style={s.enableNotifBtn}>
+            {t.enableNotifications}
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -203,6 +219,13 @@ export default function LiveScreen() {
   const [threshold, setThreshold] = useState(
     () => Number(localStorage.getItem('iqms_alert_threshold')) || 8
   );
+  const [notifyPermission, setNotifyPermission] = useState(() => notificationPermissionState());
+  const handleEnableNotifications = () => {
+    // The only place permission is ever requested -- a direct result of
+    // this click, which is what mobile browsers require to show the
+    // prompt at all rather than silently ignoring it.
+    requestNotificationPermission().then(setNotifyPermission);
+  };
   const [openCams, setOpenCams] = useState([]);
   const toggleCam = id => setOpenCams(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   // Tracks the rising edge for the single alert below, plus the horizon it
@@ -221,14 +244,6 @@ export default function LiveScreen() {
   useEffect(() => {
     localStorage.setItem('iqms_alert_threshold', String(threshold));
   }, [threshold]);
-
-  // Ask for browser-notification permission once alerts are turned on,
-  // so the rising-edge effect below can actually fire a native popup.
-  useEffect(() => {
-    if (alertsEnabled && 'Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  }, [alertsEnabled]);
 
   const { data, loading, error, lastUpdated } = useApi([
     `${API_URL}/live-lanes`,
@@ -299,9 +314,9 @@ export default function LiveScreen() {
     if (isOver && !wasAlertOverRef.current) {
       const message = t.alertPopupMessage(Math.round(gaugeValue), threshold, horizonMin);
       showToast(message, 'error', 6000);
-      if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification('IQMS', { body: message });
-      }
+      // tag keeps a repeated alert replacing the previous one in the OS
+      // tray instead of stacking a new notification alongside it.
+      showAppNotification('IQMS', message, 'iqms-wait-alert');
     }
     wasAlertOverRef.current = isOver;
   }, [gaugeValue, threshold, alertsEnabled, horizonMin]);
@@ -311,6 +326,7 @@ export default function LiveScreen() {
       <AlertsBar
         enabled={alertsEnabled} onToggle={setAlertsEnabled}
         threshold={threshold} onThreshold={setThreshold}
+        notifyPermission={notifyPermission} onEnableNotifications={handleEnableNotifications}
         t={t}
       />
 
@@ -410,6 +426,11 @@ const s = {
   seuilLabel: { fontSize: 14, color: '#8b949e' },
   slider: { flex: 1, maxWidth: 240, accentColor: '#58a6ff' },
   seuilValue: { fontSize: 15, fontWeight: 700, color: '#e6edf3', minWidth: 48 },
+  enableNotifBtn: {
+    background: 'rgba(88, 166, 255, 0.12)', border: '1px solid #58a6ff',
+    borderRadius: 999, padding: '6px 14px', color: '#58a6ff',
+    fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap',
+  },
 
   horizonRow: {
     display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
