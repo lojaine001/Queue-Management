@@ -108,7 +108,7 @@ def get_where_clause(source: str) -> str:
     Parameters
     ----------
     source : str
-        "REAL"  — exclude simulator cameras (camera_id NOT LIKE 'SIM_%')
+        "REAL"  — entrance camera only (camera_id = CAM_ID, default 'Bosch_Camera_Entrance')
         "SIM"   — include only simulator cameras (camera_id LIKE 'SIM_%')
         "ALL"   — no filter (empty string returned)
 
@@ -117,11 +117,13 @@ def get_where_clause(source: str) -> str:
     str
         A SQL fragment starting with "WHERE …", or "" for ALL.
     """
+    cam_id = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
     if source == "REAL":
-        return "WHERE camera_id NOT LIKE 'SIM_%'"
+        return f"WHERE camera_id = '{cam_id}'"
     if source == "SIM":
         return "WHERE camera_id LIKE 'SIM_%'"
     return ""
+
 
 
 def is_open(ts: pd.Timestamp) -> bool:

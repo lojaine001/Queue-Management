@@ -148,13 +148,13 @@ def _build_openvino_provider_options(device: str, precision: str) -> dict[str, s
     if ort_major_minor and ort_major_minor < (1, 17):
         return {
             'device_type': f'{normalized_device}_{normalized_precision}',
-            'cache_dir': '.',
+            'cache_dir': 'ov_cache',
         }
 
     return {
         'device_type': normalized_device,
         'precision': normalized_precision,
-        'cache_dir': '.',
+        'cache_dir': 'ov_cache',
     }
 
 

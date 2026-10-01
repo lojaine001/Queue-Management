@@ -7,6 +7,8 @@ Run with:
 from __future__ import annotations
 
 import os
+import sys
+from zoneinfo import ZoneInfo
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -16,6 +18,11 @@ import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+from prediction.forecast_state import finite, freshness, lane_scenarios, scenario_for, wait_at_horizon
 
 SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
 
@@ -176,135 +183,45 @@ def get_alerts():
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def _forecast_state():
+    conn = _conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT d.*, f.revision AS current_settings_revision FROM dashboard_state d LEFT JOIN forecast_settings f ON f.id=d.id WHERE d.id=1")
+            return cur.fetchone() or {}
+    finally:
+        conn.close()
+
+
 @app.get("/forecast")
 def forecast():
-    """
-    Reads the pre-computed values that the dashboard already calculates and
-    writes to dashboard_state on every refresh. This guarantees the app shows
-    exactly the same numbers as the dashboard — no separate computation needed.
-    """
+    """Return the lane simulations published by the background worker."""
     try:
-        with _conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT queue_now, service_min,
-                           wait_0m, wait_5m, wait_10m, wait_15m,
-                           lane1_wait_15m, lane2_wait_15m, lane3_wait_15m, lane4_wait_15m,
-                           open_lanes, updated_at
-                    FROM dashboard_state
-                    WHERE id = 1
-                """)
-                state = cur.fetchone()
-
-        def _f(v): return round(float(v), 1) if v is not None else None
-
-        if not state:
-            # dashboard_state not populated yet — dashboard hasn't run since last restart
-            return {
-                "wait_now_min": None, "wait_5_min": None,
-                "wait_10_min": None, "wait_15_min": None,
-                "current_lanes": 1, "lane_scenarios": [],
-            }
-
-        current_lanes = int(state["open_lanes"] or 1)
-        wait_now = _f(state["wait_0m"])
-        wait_5   = _f(state["wait_5m"])
-        wait_10  = _f(state["wait_10m"])
-        wait_15  = _f(state["wait_15m"])
-
-        # Per-lane scenario waits at +10 min horizon.
-        # lane{n}_wait_10m is not stored in dashboard_state, so we derive it
-        # proportionally from wait_10m: demand is ~constant at this horizon,
-        # so wait scales linearly with 1/lanes.
-        scenarios = []
-        for n in range(1, 5):
-            if wait_10 is not None and current_lanes > 0:
-                estimated = round(wait_10 * current_lanes / n, 1)
-            else:
-                estimated = 0.0
-            if estimated > 10:
-                color = "red"
-            elif estimated > 7:
-                color = "orange"
-            elif estimated > 4:
-                color = "yellow"
-            else:
-                color = "green"
-            scenarios.append({
-                "lanes":        n,
-                "est_wait_min": estimated,
-                "color":        color,
-                "is_current":   n == current_lanes,
-            })
-
+        state = _forecast_state()
+        scenario = scenario_for(state)
+        def value(key):
+            number = finite(scenario.get(key) if scenario else state.get(key))
+            return round(number, 1) if number is not None else None
         return {
-            "wait_now_min":   round(wait_now, 1),
-            "wait_5_min":     wait_5,
-            "wait_10_min":    wait_10,
-            "wait_15_min":    wait_15,
-            "current_lanes":  current_lanes,
-            "lane_scenarios": scenarios,
-            "queue_now":      int(state["queue_now"]) if state["queue_now"] is not None else None,
-            "updated_at":     state["updated_at"].isoformat() if state["updated_at"] else None,
+            "wait_now_min": value("wait_0m"), "wait_5_min": value("wait_5m"),
+            "wait_10_min": value("wait_10m"), "wait_15_min": value("wait_15m"),
+            "current_lanes": int(state.get("open_lanes") or 1),
+            "lane_scenarios": lane_scenarios(state),
+            "queue_now": state.get("queue_now"),
+            "simulation_available": bool(scenario.get("slots")),
+            **freshness(state),
         }
-
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/forecast/wait")
 def forecast_wait(minutes: float = 0):
-    """
-    Wait estimate at any arbitrary horizon (minutes from now) — not limited
-    to the fixed 0/5/10/15 in /forecast. Every ensemble run already saves a
-    prediction row roughly every 3 minutes out several hours, so this just
-    finds the saved row closest to (now + minutes) from the most recent run
-    and returns its wait estimate, rather than needing a new computation.
-
-    Both the Streamlit dashboard and this app can call this for the same
-    "pick any horizon" feature and always agree, since it's one shared read.
-    """
+    """Read a horizon relative to the shared forecast's calculation time."""
     try:
-        with _conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT MAX(predicted_at) AS latest FROM queue_predictions")
-                latest = (cur.fetchone() or {}).get("latest")
-
-                if latest is None:
-                    return {
-                        "wait_min": None, "horizon_min": minutes,
-                        "matched_for": None, "max_horizon_min": None,
-                        "message": "No forecast data yet.",
-                    }
-
-                cur.execute("""
-                    SELECT prediction_for, est_wait_minutes,
-                           MAX(prediction_for) OVER () AS max_for
-                    FROM queue_predictions
-                    WHERE predicted_at = %s
-                    ORDER BY ABS(EXTRACT(EPOCH FROM (
-                        prediction_for - (NOW() + (%s || ' minutes')::interval)
-                    )))
-                    LIMIT 1
-                """, (latest, minutes))
-                row = cur.fetchone()
-
-        if not row:
-            return {
-                "wait_min": None, "horizon_min": minutes,
-                "matched_for": None, "max_horizon_min": None,
-                "message": "No forecast data yet.",
-            }
-
-        max_horizon_min = (row["max_for"] - datetime.now(timezone.utc)).total_seconds() / 60.0
-
-        return {
-            "wait_min":        round(float(row["est_wait_minutes"]), 1) if row["est_wait_minutes"] is not None else None,
-            "horizon_min":     minutes,
-            "matched_for":     row["prediction_for"].isoformat(),
-            "max_horizon_min": round(max(max_horizon_min, 0.0), 1),
-        }
-
+        return wait_at_horizon(_forecast_state(), minutes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -586,34 +503,27 @@ def day_recap(date: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+def _shared_forecast_chart(horizon_minutes):
+    state = _forecast_state()
+    slots = scenario_for(state).get("slots", [])
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(minutes=horizon_minutes)
+    result = []
+    for row in slots:
+        stamp = datetime.fromisoformat(row["prediction_for"])
+        if now <= stamp <= end:
+            result.append({"time": stamp.astimezone(ZoneInfo(STORE_TZ)).strftime("%H:%M"),
+                           "prediction_for": row["prediction_for"],
+                           "arrivals": round(row["arrivals"], 1) if row.get("arrivals") is not None else None,
+                           "wait_min": round(row["wait_min"], 1) if row.get("wait_min") is not None else None})
+    return {"slots": result, "current_lanes": state.get("open_lanes"), **freshness(state)}
+
+
 @app.get("/forecast-chart")
 def forecast_chart():
-    """Returns 60-min time series of predicted arrivals and wait for the app chart."""
+    """The current lane's dashboard simulation, over the next 60 minutes."""
     try:
-        with _conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0)    AS arrivals,
-                        COALESCE(est_wait_minutes, 0) AS wait_min
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW()
-                      AND prediction_for <= NOW() + INTERVAL '60 minutes'
-                    ORDER BY prediction_for ASC, predicted_at DESC
-                """)
-                rows = cur.fetchall()
-
-        return {
-            "slots": [
-                {
-                    "time":     row["prediction_for"].strftime("%H:%M"),
-                    "arrivals": round(float(row["arrivals"]), 1),
-                    "wait_min": round(float(row["wait_min"]), 1),
-                }
-                for row in rows
-            ]
-        }
+        return _shared_forecast_chart(60)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -668,32 +578,8 @@ def day_wait_chart(date: Optional[str] = None):
 
 @app.get("/forecast-chart-3h")
 def forecast_chart_3h():
-    """Returns 3-hour time series of predicted arrivals and wait for the app chart."""
     try:
-        with _conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0)    AS arrivals,
-                        COALESCE(est_wait_minutes, 0) AS wait_min
-                    FROM queue_predictions
-                    WHERE prediction_for >= NOW()
-                      AND prediction_for <= NOW() + INTERVAL '3 hours'
-                    ORDER BY prediction_for ASC, predicted_at DESC
-                """)
-                rows = cur.fetchall()
-
-        return {
-            "slots": [
-                {
-                    "time":     row["prediction_for"].strftime("%H:%M"),
-                    "arrivals": round(float(row["arrivals"]), 1),
-                    "wait_min": round(float(row["wait_min"]), 1),
-                }
-                for row in rows
-            ]
-        }
+        return _shared_forecast_chart(180)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -790,13 +676,24 @@ def set_lanes(body: SetLanesRequest):
         raise HTTPException(status_code=400, detail="lanes must be between 1 and 4")
     try:
         with _conn() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM dashboard_state WHERE id = 1 FOR UPDATE")
+                state = cur.fetchone() or {}
+                scenario = scenario_for(state, body.lanes)
+                if not scenario or freshness(state)["stale"]:
+                    raise HTTPException(status_code=409, detail="Wait for a fresh background forecast before changing lanes.")
                 cur.execute(
-                    "UPDATE dashboard_state SET open_lanes = %s, updated_at = NOW() WHERE id = 1",
-                    (body.lanes,),
+                    """UPDATE dashboard_state
+                       SET open_lanes = %s, wait_0m = %s, wait_5m = %s, wait_10m = %s, wait_15m = %s
+                       WHERE id = 1""",
+                    (body.lanes, finite(scenario.get("wait_0m")), finite(scenario.get("wait_5m")),
+                     finite(scenario.get("wait_10m")), finite(scenario.get("wait_15m"))),
                 )
             conn.commit()
-        return {"status": "ok", "lanes": body.lanes}
+        # Changing the lane selection does not make the simulation's inputs newer.
+        return {"status": "ok", "lanes": body.lanes, **freshness(state)}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -825,3 +722,16 @@ def post_alert_response(body: AlertResponse):
         return {"status": "recorded", "response": body.response}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/statistics/summary")
+def statistics_summary():
+    """Background demographic/traffic snapshot, with its own freshness timestamp."""
+    conn=_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('SELECT * FROM dashboard_statistics WHERE id=1')
+            row=dict(cur.fetchone() or {})
+        if not row:return {"available":False,"stale":True}
+        return {"available":True,**row,**freshness({"updated_at":row["updated_at"]})}
+    finally:conn.close()

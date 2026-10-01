@@ -27,3 +27,4 @@ uniface
 pygame
 streamlit
 plotly
+psutil>=5.9

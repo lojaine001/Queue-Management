@@ -71,6 +71,52 @@ class Box():
 
 
 
+def nms_raw_outputs(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    iou_th: float = 0.4,
+    score_th: float = 0.25,
+    max_per_class: int = 20,
+) -> np.ndarray:
+    """CPU replacement for the NonMaxSuppression op cut out of the *_nonms_* models.
+
+    Same semantics as the ONNX NMS that was in the graph: per class, keep
+    score > score_th, greedily drop IoU > iou_th, at most max_per_class boxes.
+
+    boxes: float32[1, A, 4] x1y1x2y2, scores: float32[1, C, A]
+    returns float32[N, 7]: [batchno, classid, score, x1, y1, x2, y2]
+    """
+    boxes = boxes[0]
+    results = []
+    for classid, class_scores in enumerate(scores[0]):
+        idxs = np.where(class_scores > score_th)[0]
+        if len(idxs) == 0:
+            continue
+        idxs = idxs[np.argsort(-class_scores[idxs], kind='stable')]
+        b = boxes[idxs]
+        areas = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+        keep: List[int] = []
+        suppressed = np.zeros(len(idxs), dtype=bool)
+        for i in range(len(idxs)):
+            if suppressed[i]:
+                continue
+            keep.append(i)
+            if len(keep) >= max_per_class:
+                break
+            xx1 = np.maximum(b[i, 0], b[i + 1:, 0])
+            yy1 = np.maximum(b[i, 1], b[i + 1:, 1])
+            xx2 = np.minimum(b[i, 2], b[i + 1:, 2])
+            yy2 = np.minimum(b[i, 3], b[i + 1:, 3])
+            inter = np.clip(xx2 - xx1, 0, None) * np.clip(yy2 - yy1, 0, None)
+            ious = inter / (areas[i] + areas[i + 1:] - inter + 1e-9)
+            suppressed[i + 1:] |= ious > iou_th
+        for i in keep:
+            results.append([0, classid, class_scores[idxs[i]], *b[i]])
+    if not results:
+        return np.zeros((0, 7), dtype=np.float32)
+    return np.asarray(results, dtype=np.float32)
+
+
 class AbstractModel(ABC):
     """AbstractModel
     Base class of the model.
@@ -434,7 +480,11 @@ class YOLOv9(AbstractModel):
         # Inference
         inferece_image = np.asarray([resized_image], dtype=self._input_dtypes[0])
         outputs = super().__call__(input_datas=[inferece_image])
-        boxes = outputs[0]
+        if self._output_names == ['x1y1x2y2', 'main01_scores']:
+            # NPU-compatible *_nonms_* model: NMS was cut out of the graph, run it here.
+            boxes = nms_raw_outputs(outputs[0], outputs[1])
+        else:
+            boxes = outputs[0]
         # PostProcess
         result_boxes = \
             self._postprocess(

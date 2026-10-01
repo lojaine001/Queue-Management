@@ -111,12 +111,15 @@ def get_capture_thread(cap_url: str, cap_loop: bool):
 
 
 class OnnxDetector:
-    def __init__(self, device='cpu', model_path='yolov9s.onnx', score_threshold=0.3, conf_threshold=0.4, iou_threshold=0.4):
+    def __init__(self, device='cpu', model_path='yolov9s.onnx', score_threshold=0.3, conf_threshold=0.4, iou_threshold=0.4,
+                 openvino_device='CPU', openvino_precision='FP32'):
         self.model = YOLOv9(model_path=model_path,
                             score_threshold=score_threshold,
                             conf_thresold=conf_threshold,
                             iou_threshold=iou_threshold,
-                            device=device)
+                            device=device,
+                            openvino_device=openvino_device,
+                            openvino_precision=openvino_precision)
 
     def __call__(self, image):
         h, w, _ = image.shape
@@ -127,7 +130,7 @@ class OnnxDetector:
 class FaceWorker:
     """Runs face analysis in a dedicated background thread.
 
-    Main loop calls submit(frame) — non-blocking, always returns immediately.
+    Main loop calls submit(frame) -- non-blocking, always returns immediately.
     The worker processes the most recent frame at its own pace (~1 fps given
     the cost of face analysis). results() always returns the latest cached output.
     """
@@ -176,7 +179,7 @@ class FaceWorker:
                 faces = self._analyzer.analyze(frame)
             except Exception as e:
                 # Without this, a single bad frame permanently kills this
-                # background thread — the main tracking loop, entrance
+                # background thread -- the main tracking loop, entrance
                 # counting, and everything else keep running completely
                 # normally, so nothing else ever shows a symptom. Face/age/
                 # gender data just silently stops forever, with no error
@@ -193,7 +196,7 @@ class FaceWorker:
 
 
 def _line_signed_dist(cx: float, cy: float, p1: list, p2: list) -> float:
-    """Return signed perpendicular distance from (cx,cy) to the infinite line through p1→p2.
+    """Return signed perpendicular distance from (cx,cy) to the infinite line through p1->p2.
     Positive = side +1, negative = side -1. Magnitude = pixels from the line."""
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
@@ -203,11 +206,28 @@ def _line_signed_dist(cx: float, cy: float, p1: list, p2: list) -> float:
     return (dy * cx - dx * cy + p2[0] * p1[1] - p2[1] * p1[0]) / length
 
 
+def _parse_bool(v):
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return True
+    val = str(v).strip().lower()
+    if val in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif val in ('no', 'false', 'f', 'n', '0'):
+        return False
+    return True
+
+
 def commandline_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--img_size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--device', default='cpu', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--view_img', default=True, help='display results')
+    parser.add_argument('--view_img', '--view-img', '--img_view', '--img-view',
+                        dest='view_img', nargs='?', const=True, default=True,
+                        type=_parse_bool, help='display results')
+    parser.add_argument('--no-view-img', '--no_view_img', '--no-view_img',
+                        dest='view_img', action='store_false', help='disable display results')
     parser.add_argument('--save_demo', action='store_true', help='save_demos')
     args = parser.parse_args()
     return args
@@ -338,9 +358,9 @@ def main():
         if len(entry_line_points) >= 2:
             line_p1 = entry_line_points[0]
             line_p2 = entry_line_points[1]
-            print(f"[COUNTER] Line crossing mode | line={line_p1}→{line_p2} | direction={entry_line_direction}")
+            print(f"[COUNTER] Line crossing mode | line={line_p1}->{line_p2} | direction={entry_line_direction}")
         else:
-            print("[COUNTER] WARNING: counting_mode=line_crossing but entry_line_points not set — falling back to roi")
+            print("[COUNTER] WARNING: counting_mode=line_crossing but entry_line_points not set -- falling back to roi")
             counting_mode = 'roi'
     else:
         print("[COUNTER] ROI counting mode")
@@ -351,6 +371,8 @@ def main():
         score_threshold=score,
         conf_threshold=min_score,
         iou_threshold=iou_score,
+        openvino_device=config2.get('openvino_device', 'CPU'),
+        openvino_precision=config2.get('openvino_precision', 'FP32'),
     )
 
     points = stored_config.get('points', [])
@@ -445,7 +467,7 @@ def main():
     prev_track_ids = set() # track_ids active in the previous frame
     counted_entry_times = deque(db.get_today_entry_timestamps(camera_id=str(camID)))
     track_crossed:  set[int]        = set()   # tracks that already triggered a count
-    band_candidate: dict[int, list] = {}      # track_id → [dist1, dist2, ...] for 3-frame confirm
+    band_candidate: dict[int, list] = {}      # track_id -> [dist1, dist2, ...] for 3-frame confirm
     face_analyzed_tracks: set[int]  = set()   # tracks that received at least one real face result
     _face_frame_counter: int        = 0
 
@@ -482,7 +504,7 @@ def main():
                 cv2.polylines(viz_img, [pts], True, (0, 255, 255), 3, lineType=cv2.LINE_AA)
 
             if counting_mode == 'line_crossing' and line_p1 and line_p2:
-                # Middle line — faded grey
+                # Middle line -- faded grey
                 cv2.line(viz_img, tuple(line_p1), tuple(line_p2), (120, 120, 120), 1, cv2.LINE_AA)
 
                 # Band lines (offset perpendicular to the entry line)
@@ -520,7 +542,7 @@ def main():
                 if class_id != 0:
                     continue
 
-                # In line_crossing mode track everyone in frame — the line acts as the gate
+                # In line_crossing mode track everyone in frame -- the line acts as the gate
                 if counting_mode == 'line_crossing':
                     p_dets.append(p_box)
                     p_confs.append(p_score)
@@ -618,7 +640,7 @@ def main():
                 _raw = obj.estimate
                 _cx = int((_raw[0][0] + _raw[1][0]) / 2)
                 _cy = int((_raw[0][1] + _raw[1][1]) / 2)
-                _cy_bottom = int(_raw[1][1])  # feet position — more accurate for line crossing
+                _cy_bottom = int(_raw[1][1])  # feet position -- more accurate for line crossing
 
                 if obj.hit_counter >= max_age:
                     _x1, _y1 = int(_raw[0][0]), int(_raw[0][1])
@@ -638,7 +660,7 @@ def main():
                         "best_conf": 0.0,
                         "has_bag": False,
                         "entry_dt": datetime.now(),
-                        "crossing_history": [],  # (cx, cy_bottom) — last 5 positions for smoothing
+                        "crossing_history": [],  # (cx, cy_bottom) -- last 5 positions for smoothing
                     }
 
                 # ── Line crossing check ───────────────────────────────────────
@@ -661,7 +683,7 @@ def main():
                     if track_id not in track_crossed:
                         _prox = max(entry_line_width * 3, 60)
                         if track_id in band_candidate:
-                            # Candidate already started — keep accumulating as person
+                            # Candidate already started -- keep accumulating as person
                             # walks deeper. Only clear if they walk back far outside.
                             if signed_dist > _prox:
                                 band_candidate.pop(track_id, None)
@@ -679,7 +701,7 @@ def main():
                                     if (_was_outside and _is_inside) or _crossed_undetected:
                                         systems_logger.info(
                                             f"[COUNTER] 3-frame confirm id={track_id} "
-                                            f"dist: {dists[0]:.1f}→{dists[-1]:.1f}"
+                                            f"dist: {dists[0]:.1f}->{dists[-1]:.1f}"
                                         )
                                         track_crossed.add(track_id)
                                         counted_entry_times.append(current_time)
@@ -692,7 +714,7 @@ def main():
                 person_conf = 0.0
                 if hasattr(obj.last_detection, "data") and obj.last_detection.data:
                     person_conf = obj.last_detection.data.get("confidence", 0.0)
-                    # Bag: latch True — once detected with a bag, stays True
+                    # Bag: latch True -- once detected with a bag, stays True
                     if obj.last_detection.data.get("has_bag", False):
                         track_data[track_id]["has_bag"] = True
                     faces = obj.last_detection.data.get("faces", [])
@@ -740,13 +762,16 @@ def main():
                 dwell = current_time - track_start_times[track_id]
                 # In line_crossing mode only insert if person actually crossed the line
                 if counting_mode == 'line_crossing' and track_id not in track_crossed:
-                    systems_logger.debug(f"[DB] Skipped id={track_id} — never crossed entry line")
+                    systems_logger.debug(f"[DB] Skipped id={track_id} -- never crossed entry line")
                     track_start_times.pop(track_id, None)
                     track_data.pop(track_id, None)
                     person_loggers.pop(track_id, None)
                     band_candidate.pop(track_id, None)
                     continue
-                if dwell >= min_elapsed_time:
+                # In line_crossing mode, the person was already verified crossing the line with 3-frame confirmation.
+                # Threshold should not reject normal walking customers who traverse the entrance quickly (e.g. 0.5s - 2s).
+                effective_min_dwell = min(min_elapsed_time, 0.5) if counting_mode == 'line_crossing' else min_elapsed_time
+                if dwell >= effective_min_dwell:
                     td = track_data.get(track_id, {})
 
                     # Gender: highest confidence-weighted vote
@@ -771,11 +796,11 @@ def main():
                                           f"| gender={gender} | age={age} | bag={has_bag} | conf={conf:.2f}")
                 else:
                     # Crossed the line but was tracked for less than min_elapsed_time
-                    # before the track died — this insert never happens, and until
+                    # before the track died -- this insert never happens, and until
                     # now nothing logged why. If this fires often, min_elapsed_time
                     # is too strict for how briefly people stay visible near the door.
                     systems_logger.info(
-                        f"[DB] Crossed but NOT inserted — dwell too short | track_id={track_id} "
+                        f"[DB] Crossed but NOT inserted -- dwell too short | track_id={track_id} "
                         f"| dwell={dwell:.2f}s | min_elapsed_time={min_elapsed_time}s"
                     )
                 track_start_times.pop(track_id, None)

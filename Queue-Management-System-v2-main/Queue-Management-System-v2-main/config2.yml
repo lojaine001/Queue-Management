@@ -14,6 +14,10 @@ save_snapshots: False
 
 min_iou: 0.1
 
+# OpenVINO settings for the YOLOv9 person detector (used with --device openvino)
+openvino_device: NPU       # CPU | GPU | NPU
+openvino_precision: FP16   # FP32 | FP16 (use FP16 on NPU/GPU)
+
 tip_offset: 0.5
 
 entry_confirmation_seconds: 1.5  # delay before a person track becomes a counted entry
@@ -27,7 +31,7 @@ avg_person_width: 55
 # Increase to reduce CPU load on the entrance pipeline
 face_skip_frames: 3
 
-min_elapsed_time: 4 #seconds
+min_elapsed_time: 1 #seconds
 
 min_face_size: 0  # 0 = no size filter (all detected faces pass through)
 

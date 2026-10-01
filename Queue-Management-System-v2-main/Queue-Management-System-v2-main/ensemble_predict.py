@@ -67,7 +67,7 @@ def _connect():
     psycopg2.connect + SET timezone. Without this, a naive local
     datetime (e.g. "13:48") gets stored as if it were already UTC,
     shifting every prediction_for by the local UTC offset (2h in
-    summer) — which silently makes /forecast-chart's "NOW() to +60min"
+    summer) -- which silently makes /forecast-chart's "NOW() to +60min"
     window never match the rows this script just wrote.
     """
     conn = psycopg2.connect(**DB_CONFIG)
@@ -318,11 +318,11 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     )
     where_clause = get_where_clause(source)
 
-    # ── 1. Load data ─────────────────────────────────────────────────────────
+    # -- 1. Load data ---------------------------------------------------------
     conn = _connect()
     _log(f"[DB] Connected to PostgreSQL database={DB_CONFIG.get('dbname')} host={DB_CONFIG.get('host')} [ok]")
 
-    clean_filter = f"timestamp >= NOW() - INTERVAL '{data_span_days} days' AND dwell_seconds >= 10"
+    clean_filter = f"timestamp >= NOW() - INTERVAL '{data_span_days} days' AND dwell_seconds >= 2"
     if where_clause:
         data_filter = f"{where_clause} AND {clean_filter}"
     else:
@@ -364,7 +364,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         if len(df_real_r) > 1 else 0
     )
 
-    # ── 2. Bootstrap ─────────────────────────────────────────────────────────
+    # -- 2. Bootstrap ---------------------------------------------------------
     if bootstrap and real_span_days < MIN_REAL_DAYS_FOR_SIM:
         df_sim = build_sim_history(days=7)
         df = (
@@ -373,7 +373,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
             .sort_values("ds")
             .reset_index(drop=True)
         )
-        print(f"[Ensemble] Bootstrap ON — {len(df_real_r)} real + {len(df_sim)} synthetic rows")
+        print(f"[Ensemble] Bootstrap ON -- {len(df_real_r)} real + {len(df_sim)} synthetic rows")
     else:
         df = df_real_r.sort_values("ds").reset_index(drop=True)
         if bootstrap and real_span_days >= MIN_REAL_DAYS_FOR_SIM:
@@ -388,25 +388,64 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     if df.empty:
         raise RuntimeError("No valid data to train. Check --source filter or DB contents.")
 
-    # ── 3. Outlier cap ───────────────────────────────────────────────────────
+    # -- 3. Outlier cap (configurable) --------------------------------------
+    OUTLIER_CAP = os.getenv("OUTLIER_CAP", "50")
+    OUTLIER_QUANTILE = float(os.getenv("OUTLIER_QUANTILE", "0.99"))
+    OUTLIER_BURST_THRESHOLD = float(os.getenv("OUTLIER_BURST_THRESHOLD", "40"))
+    BURST_BYPASS = os.getenv("BURST_BYPASS", "true").strip().lower() in {"1", "true", "yes", "on"}
+
     non_zero = df.loc[df["y"] > 0, "y"]
+    burst_days = set()
     if not non_zero.empty:
-        cap_value = max(float(non_zero.quantile(0.99)), 30.0)
-        df["y"] = df["y"].clip(upper=cap_value)
-        _log(f"[Data] Outlier cap applied at y<={cap_value:.2f} from {len(non_zero)} non-zero buckets")
+        try:
+            if OUTLIER_CAP.strip().lower() in {"", "none", "0", "false"}:
+                cap_value = None
+            else:
+                cap_env = float(OUTLIER_CAP)
+                cap_value = max(float(non_zero.quantile(OUTLIER_QUANTILE)), cap_env)
+        except Exception:
+            cap_value = None
+
+        df["date_only"] = pd.to_datetime(df["ds"]).dt.date
+        burst_days = set(df.loc[df["y"] >= OUTLIER_BURST_THRESHOLD, "date_only"].unique())
+        if cap_value is not None:
+            if burst_days and BURST_BYPASS:
+                _log(f"[Data] Burst days detected: {len(burst_days)} -- bypassing cap for those days")
+                mask_no_burst = ~df["date_only"].isin(burst_days)
+                df.loc[mask_no_burst, "y"] = df.loc[mask_no_burst, "y"].clip(upper=cap_value)
+                _log(f"[Data] Outlier cap applied at y<={cap_value:.2f} excluding burst days")
+            else:
+                df["y"] = df["y"].clip(upper=cap_value)
+                _log(f"[Data] Outlier cap applied at y<={cap_value:.2f} from {len(non_zero)} non-zero buckets")
+        else:
+            _log("[Data] Outlier cap disabled by environment")
     else:
         _log("[Data] No non-zero buckets before closed-hour fill")
 
-    # ── 3b. 15-min rolling median smooth (5 × 3-min buckets) ─────────────────
-    df["y"] = (
-        df["y"]
-        .rolling(window=5, center=True, min_periods=1)
-        .median()
-        .round(2)
-    )
-    _log("[Data] Applied 15-min rolling median smooth to training data")
+    # -- 3b. 15-min rolling median smooth (5 x 3-min buckets) -----------------
+    SMOOTH_WINDOW = int(os.getenv("SMOOTH_WINDOW", "5"))
+    if SMOOTH_WINDOW > 1:
+        smoothed = (
+            df["y"]
+            .rolling(window=SMOOTH_WINDOW, center=True, min_periods=1)
+            .median()
+            .round(2)
+        )
+        if BURST_BYPASS and "date_only" in df.columns and burst_days:
+            mask_no_burst = ~df["date_only"].isin(burst_days)
+            df.loc[mask_no_burst, "y"] = smoothed.loc[mask_no_burst]
+            _log(f"[Data] Applied rolling median smooth (window={SMOOTH_WINDOW}) bypassing burst days ({len(burst_days)} days)")
+        elif BURST_BYPASS and (df["y"] >= OUTLIER_BURST_THRESHOLD).any():
+            burst_mask = df["y"] >= OUTLIER_BURST_THRESHOLD
+            df.loc[~burst_mask, "y"] = smoothed.loc[~burst_mask]
+            _log(f"[Data] Applied rolling median smooth (window={SMOOTH_WINDOW}) bypassing individual burst buckets")
+        else:
+            df["y"] = smoothed
+            _log(f"[Data] Applied rolling median smooth to training data (window={SMOOTH_WINDOW})")
+    else:
+        _log(f"[Data] Rolling median smoothing skipped (SMOOTH_WINDOW={SMOOTH_WINDOW})")
 
-    # ── 4. Closed-hour zeros ─────────────────────────────────────────────────
+    # -- 4. Closed-hour zeros -------------------------------------------------
     df = add_closed_zeros(df[["ds", "y"]].copy(), days=data_span_days)
 
     _open_mask_train = df["ds"].map(lambda t: is_open(pd.Timestamp(t)))
@@ -427,7 +466,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         f"-> {_fmt_ts(future_df['ds'].max() if not future_df.empty else None)}"
     )
 
-    # ── MODEL 1 — PROPHET ────────────────────────────────────────────────────
+    # -- MODEL 1 -- PROPHET ----------------------------------------------------
     _prophet_meta = {}
     if os.path.exists(PROPHET_META_PATH):
         try:
@@ -471,16 +510,17 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         if not _models_fresh:
             _reasons.append("model stale/missing")
         _reason = ", ".join(_reasons) if _reasons else "cache disabled"
-        _cps = 0.30 if data_span_days <= 10 else (0.15 if data_span_days <= 20 else 0.1)
+        _has_weekly = data_span_days >= 14
+        _cps = 0.10 if data_span_days <= 14 else (0.15 if data_span_days <= 30 else 0.1)
         _prophet_params = {
             "daily_seasonality": False,
-            "weekly_seasonality": data_span_days >= 7,
+            "weekly_seasonality": _has_weekly,
             "yearly_seasonality": False,
             "changepoint_prior_scale": _cps,
             "seasonality_prior_scale": 10.0,
             "interval_width": 0.80,
-            "daily_fourier_order": 10,
-            "weekly_fourier_order": 5 if data_span_days >= 7 else 0,
+            "daily_fourier_order": 8,
+            "weekly_fourier_order": 3 if _has_weekly else 0,
         }
         _log(
             f"\n[Prophet] Training ({_reason}, span={data_span_days}d) | "
@@ -489,16 +529,16 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         _log(f"[Prophet:Params] {json.dumps(_prophet_params, sort_keys=True)}")
         prophet_model = Prophet(
             daily_seasonality=False,   # replaced by custom higher-order below
-            weekly_seasonality=(data_span_days >= 7),
+            weekly_seasonality=False,  # custom weekly added explicitly below when data_span_days >= 14
             yearly_seasonality=False,
             changepoint_prior_scale=_cps,
             seasonality_prior_scale=10.0,
             interval_width=0.80,
         )
-        # Higher Fourier order → captures sharp morning/lunch/evening transitions
-        prophet_model.add_seasonality(name='daily',  period=1,   fourier_order=10)
-        if data_span_days >= 7:
-            prophet_model.add_seasonality(name='weekly', period=7, fourier_order=5)
+        # Custom Fourier order -> captures smooth daily transitions without negative swings
+        prophet_model.add_seasonality(name='daily', period=1, fourier_order=8)
+        if _has_weekly:
+            prophet_model.add_seasonality(name='weekly', period=7, fourier_order=3)
         prophet_model.fit(df)
         with open(PROPHET_PATH, "wb") as _f:
             pickle.dump(prophet_model, _f)
@@ -538,7 +578,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     )
     _log(f"[Prophet] Forecast first6: {_prophet_preview}")
 
-    # ── MODEL 2 — LSTM ───────────────────────────────────────────────────────
+    # -- MODEL 2 -- LSTM -------------------------------------------------------
     _log("\n[LSTM] Preparing sequences...")
 
     def _make_sequences(data, seq_len):
@@ -618,7 +658,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
             _log("[LSTM] Trained and saved [ok]")
         else:
             _log(
-                f"[LSTM] Skipping training — only {len(y_open_values)} open-hour value(s) "
+                f"[LSTM] Skipping training -- only {len(y_open_values)} open-hour value(s) "
                 f"available, need at least {SEQUENCE_LEN} for one sequence. Falling back to "
                 "a naive flat forecast for this run instead of crashing the whole ensemble "
                 "(Prophet + XGBoost still run normally)."
@@ -633,7 +673,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
             f"({len(opening_profile_scaled)} buckets over first {LSTM_OPENING_BLEND_MINUTES} min)"
         )
 
-    # Seed from the last SEQUENCE_LEN open-hour values — not the raw tail
+    # Seed from the last SEQUENCE_LEN open-hour values -- not the raw tail
     # which may end in overnight zeros and cause near-zero rollout predictions.
     if _lstm_has_enough_data:
         last_seq = y_open_scaled[-SEQUENCE_LEN:].copy() if len(y_open_scaled) >= SEQUENCE_LEN \
@@ -669,9 +709,9 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         lstm_vals = scaler.inverse_transform(
             lstm_vals.reshape(-1, 1)
         ).flatten().clip(min=0)
-        _log(f"[LSTM] Using naive flat fallback ({len(future_timestamps)} steps) — insufficient data for real rollout")
+        _log(f"[LSTM] Using naive flat fallback ({len(future_timestamps)} steps) -- insufficient data for real rollout")
 
-    # ── MODEL 3 — XGBOOST ───────────────────────────────────────────────────
+    # -- MODEL 3 -- XGBOOST ---------------------------------------------------
     _log("\n[XGBoost] Building features...")
 
     FEATURE_COLS = [
@@ -729,7 +769,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         })
         _log("[XGBoost] Trained and saved [ok]")
 
-    # Seed from real observed data only — df["y"] ends with add_closed_zeros synthetic
+    # Seed from real observed data only -- df["y"] ends with add_closed_zeros synthetic
     # zeros for overnight/post-close gaps, which poison lag_1/lag_2/lag_3 and
     # rolling_mean at the opening of each day and cause near-zero predictions.
     _real_seed = df_real_r.sort_values("ds").reset_index(drop=True)
@@ -776,7 +816,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         morning_floor = max(0.0, floor_share * opening_baseline)
         lstm_vals[i] = max(float(lstm_vals[i]), morning_floor)
 
-    # ── ENSEMBLE ─────────────────────────────────────────────────────────────
+    # -- ENSEMBLE -------------------------------------------------------------
     _log("\n[Ensemble] Combining predictions (Prophet 40% / LSTM 30% / XGBoost 30%)...")
     ensemble_vals_raw = (W_PROPHET * prophet_vals + W_LSTM * lstm_vals + W_XGB * xgb_vals).clip(min=0)
     ensemble_vals = ensemble_vals_raw.copy()
@@ -798,8 +838,8 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         f"ensemble_mean={float(np.mean(ensemble_vals)):.2f}"
     )
 
-    # ── Wait estimates ────────────────────────────────────────────────────────
-    # Scoped to the actual checkout camera only — MAX(active_lanes)/SUM(queue_count)
+    # -- Wait estimates --------------------------------------------------------
+    # Scoped to the actual checkout camera only -- MAX(active_lanes)/SUM(queue_count)
     # across every camera_id ever recorded was picking up months-stale rows from
     # unrelated/renamed cameras (including a case-duplicate "Bosch_Camera_Exit"
     # vs "Bosch_Camera_exit"), inflating the lane count the wait model assumes.
@@ -826,7 +866,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         else:
             snap_age_min = (pd.Timestamp.now(tz="UTC").tz_localize(None) - snap_ts).total_seconds() / 60.0
 
-    # ── Dwell model: XGBoost on service_events → per-bucket prediction ────────
+    # -- Dwell model: XGBoost on service_events -> per-bucket prediction --------
     print("\n[Dwell] Loading service events for dwell model...")
     _conn_svc = _connect()
     try:
@@ -901,7 +941,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
         })
         print(f"[Dwell] Trained and saved [ok]  (median={avg_dwell_min:.2f} min)")
     else:
-        print(f"[Dwell] Not enough data ({len(df_svc)} events) — using flat median fallback ({avg_dwell_min:.2f} min)")
+        print(f"[Dwell] Not enough data ({len(df_svc)} events) -- using flat median fallback ({avg_dwell_min:.2f} min)")
 
     # Per-bucket dwell predictions for future timestamps
     if dwell_model is not None:
@@ -910,7 +950,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
                        for ts in future_timestamps]
         _dwell_raw = dwell_model.predict(pd.DataFrame(_dwell_rows))
         per_bucket_dwell = np.clip(_dwell_raw, DWELL_MIN_FLOOR, DWELL_MAX_CAP).tolist()
-        print(f"[Dwell] Per-bucket predictions — min={min(per_bucket_dwell):.2f} max={max(per_bucket_dwell):.2f} mean={np.mean(per_bucket_dwell):.2f} min")
+        print(f"[Dwell] Per-bucket predictions -- min={min(per_bucket_dwell):.2f} max={max(per_bucket_dwell):.2f} mean={np.mean(per_bucket_dwell):.2f} min")
     else:
         per_bucket_dwell = avg_dwell_min  # scalar fallback
 
@@ -922,15 +962,15 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     else:
         current_queue = 0
         active_lanes  = DEFAULT_LANES
-        print("[Wait] No snapshot — using defaults")
+        print("[Wait] No snapshot -- using defaults")
 
-    # ── Browsing-gap shift ────────────────────────────────────────────────────
+    # -- Browsing-gap shift ----------------------------------------------------
     # A customer who enters the store at time T reaches checkout at T + gap.
     # So checkout arrivals at future step i = entrance arrivals from (i - lag) steps ago.
     # For the initial `lag` steps, we pull actual recent entrance counts from DB.
     BROWSING_GAP_MIN = int(os.getenv("BROWSING_GAP_MIN", 25))
     browsing_lag_steps = max(1, round(BROWSING_GAP_MIN / BUCKET_MINUTES))
-    print(f"[Wait] Browsing gap = {BROWSING_GAP_MIN} min ({browsing_lag_steps} buckets) — shifting entrance → checkout...")
+    print(f"[Wait] Browsing gap = {BROWSING_GAP_MIN} min ({browsing_lag_steps} buckets) -- shifting entrance -> checkout...")
 
     _conn_hist = _connect()
     try:
@@ -948,7 +988,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
                 COUNT(*) AS entry_count
             FROM entrance_events
             WHERE camera_id = %s
-              AND dwell_seconds >= 10
+              AND dwell_seconds >= 2
               AND timestamp >= NOW() - INTERVAL '{BROWSING_GAP_MIN + BUCKET_MINUTES} minutes'
             GROUP BY bucket
             ORDER BY bucket ASC
@@ -989,7 +1029,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
     # 45-minute horizon
     wait_45m = float(wait_rows[WAIT_45M_INDEX]["wait_min"]) if len(wait_rows) > WAIT_45M_INDEX else wait_30m
 
-    # Lane scenario comparisons — wait at +15 min for 1, 2, 3 lanes
+    # Lane scenario comparisons -- wait at +15 min for 1, 2, 3 lanes
     lane_waits_15m: dict[int, float] = {}
     for n_lanes in [1, 2, 3]:
         _rows, _w15, _, _ = compute_wait_estimates(
@@ -1001,7 +1041,7 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
             max_wait_min=MAX_WAIT_MIN,
         )
         lane_waits_15m[n_lanes] = float(_w15) if _w15 is not None else 0.0
-    print(f"[Wait] Lane scenarios @ +15m — 1 lane: {lane_waits_15m[1]:.1f} min | "
+    print(f"[Wait] Lane scenarios @ +15m -- 1 lane: {lane_waits_15m[1]:.1f} min | "
           f"2 lanes: {lane_waits_15m[2]:.1f} min | 3 lanes: {lane_waits_15m[3]:.1f} min")
 
     return {
@@ -1040,9 +1080,9 @@ def _print_results(result: dict) -> None:
     browsing_gap_min   = result["browsing_gap_min"]
 
     print("\n" + "=" * 85)
-    print("  ENSEMBLE PREDICTED CUSTOMER ENTRIES — NEXT 60 MINUTES")
+    print("  ENSEMBLE PREDICTED CUSTOMER ENTRIES -- NEXT 60 MINUTES")
     print("=" * 85)
-    print(f"  {'Time':<10} {'Prophet':>10} {'LSTM':>10} {'XGBoost':>10} {'Ensemble':>10} {'→Checkout':>12}")
+    print(f"  {'Time':<10} {'Prophet':>10} {'LSTM':>10} {'XGBoost':>10} {'Ensemble':>10} {'->Checkout':>12}")
     print("-" * 85)
     for i, row in prophet_preds.iterrows():
         print(
@@ -1054,7 +1094,7 @@ def _print_results(result: dict) -> None:
             f" {checkout_arrivals[i]:>12.1f}"
         )
     print("=" * 85)
-    print(f"  (→Checkout = entrance shifted {browsing_gap_min} min forward for browsing gap)")
+    print(f"  (->Checkout = entrance shifted {browsing_gap_min} min forward for browsing gap)")
 
     print("\n" + "=" * 75)
     print("  QUEUE WAIT TIME ESTIMATES  (checkout arrivals + queue model)")
@@ -1265,6 +1305,11 @@ if __name__ == "__main__":
         result = run_ensemble_forecast(source=args.source, bootstrap=args.bootstrap, data_span_days=args.days)
         _print_results(result)
         _save_to_db(result)
+        try:
+            from prediction.wait_forecast import refresh_wait_forecast
+            refresh_wait_forecast(days=args.days)
+        except Exception as _wf_err:
+            _log(f"[Wait Forecast] Warning: refresh_wait_forecast failed: {_wf_err}")
         _elapsed = (datetime.now() - _main_started).total_seconds()
         _log(f"\n[Run] Ensemble forecast finished successfully in {_elapsed:.1f}s")
     except Exception as exc:

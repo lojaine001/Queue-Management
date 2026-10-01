@@ -48,11 +48,20 @@ def _register_windows_runtime_dirs() -> None:
         os.environ['PATH'] = os.pathsep.join(new_parts + path_parts)
 
 
-def _get_providers(device: str):
+def _get_providers(device: str, openvino_device: str = 'CPU', openvino_precision: str = 'FP32'):
     device_name = str(device or 'cpu').strip().lower()
     if device_name == 'openvino':
         _register_windows_runtime_dirs()
-        return ['OpenVINOExecutionProvider', 'CPUExecutionProvider']
+        ov_device = openvino_device.upper()
+        ov_precision = openvino_precision.upper()
+        if ov_device == 'CPU' and ov_precision != 'FP32':
+            ov_precision = 'FP32'  # FP16 on CPU makes ORT silently fall back
+        ov_options = {
+            'device_type': ov_device,
+            'precision': ov_precision,
+            'cache_dir': 'ov_cache',  # first NPU/GPU compile is slow; cached after that
+        }
+        return [('OpenVINOExecutionProvider', ov_options), 'CPUExecutionProvider']
     if device_name == 'cuda':
         return ['CUDAExecutionProvider', 'CPUExecutionProvider']
     return ['CPUExecutionProvider']
@@ -65,11 +74,15 @@ class YOLOv9:
                  score_threshold: float = 0.1,
                  conf_thresold: float = 0.4,
                  iou_threshold: float = 0.4,
-                 device: str = "CPU") -> None:
+                 device: str = "CPU",
+                 openvino_device: str = "CPU",
+                 openvino_precision: str = "FP32") -> None:
         self.model_path = model_path
         self.class_mapping_path = class_mapping_path
 
         self.device = device
+        self.openvino_device = openvino_device
+        self.openvino_precision = openvino_precision
         self.score_threshold = score_threshold
         self.conf_thresold = conf_thresold
         self.iou_threshold = iou_threshold
@@ -79,12 +92,23 @@ class YOLOv9:
     def create_session(self) -> None:
         opt_session = onnxruntime.SessionOptions()
         opt_session.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
-        providers = _get_providers(self.device)
-        session = onnxruntime.InferenceSession(
-            self.model_path,
-            sess_options=opt_session,
-            providers=providers,
-        )
+        providers = _get_providers(self.device, self.openvino_device, self.openvino_precision)
+        try:
+            session = onnxruntime.InferenceSession(
+                self.model_path,
+                sess_options=opt_session,
+                providers=providers,
+            )
+        except Exception as exc:
+            if providers == ['CPUExecutionProvider']:
+                raise
+            print(f"[ORT] WARNING: {providers[0]} init failed, falling back to CPU. Reason: {exc}")
+            providers = ['CPUExecutionProvider']
+            session = onnxruntime.InferenceSession(
+                self.model_path,
+                sess_options=opt_session,
+                providers=providers,
+            )
         self.session = session
         self.model_inputs = self.session.get_inputs()
         self.input_names = [self.model_inputs[i].name for i in range(len(self.model_inputs))]
@@ -94,11 +118,12 @@ class YOLOv9:
         self.input_height, self.input_width = self.input_shape[2:]
 
         enabled_providers = self.session.get_providers()
+        requested_names = [p[0] if isinstance(p, tuple) else p for p in providers]
         print(f"YOLOv9 requested providers: {providers}")
         print(f"YOLOv9 enabled providers: {enabled_providers}")
-        if 'OpenVINOExecutionProvider' in providers:
+        if 'OpenVINOExecutionProvider' in requested_names:
             if 'OpenVINOExecutionProvider' in enabled_providers:
-                print('OpenVINO is active for this session.')
+                print(f'OpenVINO is active for this session (device {self.openvino_device}).')
             else:
                 print('OpenVINO was requested but is not active; ONNX Runtime fell back to CPU.')
 

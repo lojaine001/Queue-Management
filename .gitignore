@@ -41,3 +41,10 @@ Thumbs.db
 # Environment / secrets
 .env
 *.env
+
+# Scheduler ownership, status and per-run logs
+.runtime/
+
+# OpenVINO compiled-model cache (NPU/GPU)
+ov_cache/
+*.blob

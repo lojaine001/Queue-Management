@@ -3,7 +3,9 @@ ip_address: '192.168.1.48:554/?inst=2'
 username: service
 password: 'Cam10003!'
 
-custom_model: models/yolov9_s_discrete_headpose_post_0100_1x3x480x640.onnx
+# NPU-compatible copy (static input, NMS runs on CPU in utils/yolo.py).
+# Original: models/yolov9_s_discrete_headpose_post_0100_1x3x480x640.onnx
+custom_model: models/yolov9_s_discrete_headpose_nonms_1x3x480x640.onnx
 disable_headpose_identification_mode: True
 
 score: 0.15
@@ -22,14 +24,14 @@ rois:
         - 188  
   - name: lane2
     points:
-    - - 130
-      - 407
-    - - 244
+    - - 120
+      - 440
+    - - 230
       - 17
     - - 309
       - 17
-    - - 350
-      - 407
+    - - 400
+      - 440
   - name: lane3
     points:
     - - 345

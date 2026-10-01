@@ -7,7 +7,7 @@ entrance-event data to fill gaps in queue_predictions.
 Each past open-hour bucket gets:
   - Prophet  prediction  (direct model.predict on historical timestamps)
   - XGBoost  prediction  (features built from actual historical lag values)
-  - LSTM     prediction  (actual historical sliding window as seed — batch)
+  - LSTM     prediction  (actual historical sliding window as seed -- batch)
   - Ensemble             (weighted average of the three)
 
 Existing rows in queue_predictions are left untouched (ON CONFLICT DO NOTHING).
@@ -65,14 +65,40 @@ LSTM_OPENING_BLEND_MINUTES = int(os.getenv("LSTM_OPENING_BLEND_MINUTES", 60))
 LSTM_OPENING_FLOOR_SHARE_MAX = float(os.getenv("LSTM_OPENING_FLOOR_SHARE_MAX", 0.65))
 LSTM_OPENING_FLOOR_SHARE_MIN = float(os.getenv("LSTM_OPENING_FLOOR_SHARE_MIN", 0.20))
 
+STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
+
+
+def _connect():
+    conn = psycopg2.connect(**DB_CONFIG)
+    with conn.cursor() as cur:
+        cur.execute("SET timezone = %s", (STORE_TZ,))
+    conn.commit()
+    return conn
+
+
+def _local_wall_to_utc_dt(value):
+    if value is None:
+        return None
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(STORE_TZ)
+    else:
+        ts = ts.tz_convert(STORE_TZ)
+    return ts.tz_convert("UTC").to_pydatetime()
+
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODELS_DIR = SCRIPT_DIR / "models"
 LEGACY_MODEL_DIRS = [Path.cwd() / "models", ROOT_DIR / "models"]
 MODELS_DIR.mkdir(exist_ok=True)
 
 
+from prediction.model_bundle import current_bundle
+_READ_BUNDLE = current_bundle(MODELS_DIR)
+
+
 def _resolve_model_path(filename: str) -> Path:
-    preferred = MODELS_DIR / filename
+    preferred = _READ_BUNDLE / filename
     if preferred.exists():
         return preferred
     for model_dir in LEGACY_MODEL_DIRS:
@@ -129,24 +155,12 @@ def _add_closed_zeros_over_range(
     end: pd.Timestamp,
     interval_min: int = BUCKET_MINUTES,
 ) -> pd.DataFrame:
-    """Fill closed-hour buckets only over the actual historical data range."""
+    """Fill all missing buckets (both closed hours and open hours with 0 arrivals) with 0."""
     start = pd.Timestamp(start).floor(f"{interval_min}min")
     end = pd.Timestamp(end).ceil(f"{interval_min}min")
-    rows = []
-    t = start
-    while t <= end:
-        if not is_open(pd.Timestamp(t)):
-            rows.append({"ds": t, "y": 0})
-        t += pd.Timedelta(minutes=interval_min)
-    if not rows:
-        return df.sort_values("ds").reset_index(drop=True)
-    zeros = pd.DataFrame(rows)
-    return (
-        pd.concat([df, zeros], ignore_index=True)
-        .drop_duplicates(subset="ds")
-        .sort_values("ds")
-        .reset_index(drop=True)
-    )
+    full_idx = pd.date_range(start, end, freq=f"{interval_min}min", name="ds")
+    df_dedup = df.drop_duplicates(subset="ds").set_index("ds")
+    return df_dedup.reindex(full_idx, fill_value=0.0).reset_index()
 
 
 def _db_val(v):
@@ -189,21 +203,27 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
     """
     _check_models()
 
-    # ── 1. Load trained models ────────────────────────────────────────────────
     print("[Backtest] Loading trained models...")
     lstm_model = tf.keras.models.load_model(LSTM_PATH)
     with open(SCALER_PATH, "rb") as fh:
         scaler = pickle.load(fh)
     xgb_model = xgb.XGBRegressor()
     xgb_model.load_model(XGB_PATH)
-    print("[Backtest] Models loaded ✓")
+    prophet_model = None
+    if os.path.exists(PROPHET_PATH):
+        try:
+            with open(PROPHET_PATH, "rb") as fh:
+                prophet_model = pickle.load(fh)
+        except Exception:
+            prophet_model = None
+    print("[Backtest] Models loaded [OK]")
 
-    # ── 2. Load historical entrance data ──────────────────────────────────────
+    # -- 2. Load historical entrance data --------------------------------------
     where = get_where_clause(source)
-    clean = f"timestamp >= NOW() - INTERVAL '{days} days' AND dwell_seconds >= 10"
+    clean = f"timestamp >= NOW() - INTERVAL '{days} days' AND dwell_seconds >= 2"
     data_filter = f"{where} AND {clean}" if where else f"WHERE {clean}"
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = _connect()
     df_raw = pd.read_sql(
         f"""
         SELECT
@@ -226,13 +246,23 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
         print("[Backtest] No historical data. Aborting.")
         return 0
 
-    # Apply 15-min rolling median smooth to open-hour data only (before adding closed-hour zeros)
-    df_raw["y"] = (
-        df_raw["y"]
-        .rolling(window=5, center=True, min_periods=1)
-        .median()
-        .round(2)
-    )
+    # Smoothing with burst bypass
+    SMOOTH_WINDOW = int(os.getenv("SMOOTH_WINDOW", "3"))
+    BURST_BYPASS = os.getenv("BURST_BYPASS", "true").lower() in ("true", "1", "yes")
+    OUTLIER_BURST_THRESHOLD = float(os.getenv("OUTLIER_BURST_THRESHOLD", "40"))
+
+    if SMOOTH_WINDOW > 1:
+        smoothed = (
+            df_raw["y"]
+            .rolling(window=SMOOTH_WINDOW, center=True, min_periods=1)
+            .median()
+            .round(2)
+        )
+        if BURST_BYPASS and (df_raw["y"] >= OUTLIER_BURST_THRESHOLD).any():
+            burst_mask = df_raw["y"] >= OUTLIER_BURST_THRESHOLD
+            df_raw["y"] = np.where(burst_mask, df_raw["y"], smoothed)
+        else:
+            df_raw["y"] = smoothed
     opening_profile_raw = _build_lstm_opening_profile_raw(df_raw[["ds", "y"]])
 
     # Build complete time-series over the actual historical data range.
@@ -268,7 +298,7 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
         ).flatten().clip(min=0)
         for arr_i, slot_i in enumerate(seq_indices):
             lstm_vals[slot_i] = float(preds_real[arr_i])
-    print("[Backtest] LSTM predictions done ✓")
+    print("[Backtest] LSTM predictions done [OK]")
 
     # ── 5. XGBoost (features from actual historical lags) ─────────────────────
     df_feat = df_full.copy()
@@ -291,7 +321,7 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
             merged.loc[valid_mask, FEATURE_COLS]
         ).clip(min=0)
         xgb_vals[valid_mask.values] = xgb_preds
-    print("[Backtest] XGBoost predictions done ✓")
+    print("[Backtest] XGBoost predictions done [OK]")
 
     opening_span = max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
     opening_fade_span = max(1, opening_span - BUCKET_MINUTES)
@@ -311,25 +341,34 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
         morning_floor = max(0.0, floor_share * opening_baseline)
         lstm_vals[i] = max(float(lstm_vals[i]), morning_floor)
 
-    # ── 6. Ensemble (Prophet excluded — leakage risk; renormalize LSTM+XGBoost) ──
-    _w_total = W_LSTM + W_XGB
-    ensemble_vals = (
-        (W_LSTM / _w_total) * lstm_vals + (W_XGB / _w_total) * xgb_vals
-    ).clip(min=0).round(1)
+    # ── 6. Ensemble (Prophet + LSTM + XGBoost) ──
+    prophet_vals = np.zeros(n)
+    if prophet_model is not None:
+        prophet_preds = prophet_model.predict(past_slots[["ds"]])
+        prophet_vals = prophet_preds["yhat"].clip(lower=0).values
+        ensemble_vals = (
+            W_PROPHET * prophet_vals + W_LSTM * lstm_vals + W_XGB * xgb_vals
+        ).clip(min=0).round(1)
+    else:
+        _w_total = W_LSTM + W_XGB
+        ensemble_vals = (
+            (W_LSTM / _w_total) * lstm_vals + (W_XGB / _w_total) * xgb_vals
+        ).clip(min=0).round(1)
 
-    # ── 7. Save to DB ─────────────────────────────────────────────────────────
+    # -- 7. Save to DB ---------------------------------------------------------
     conflict_action = (
         """DO UPDATE SET
             predicted_at  = EXCLUDED.predicted_at,
             prophet_yhat  = EXCLUDED.prophet_yhat,
             lstm_yhat     = EXCLUDED.lstm_yhat,
             xgb_yhat      = EXCLUDED.xgb_yhat,
-            ensemble_yhat = EXCLUDED.ensemble_yhat"""
+            ensemble_yhat = EXCLUDED.ensemble_yhat,
+            source        = EXCLUDED.source"""
         if overwrite
         else "DO NOTHING"
     )
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = _connect()
     cur  = conn.cursor()
     cur.execute("""
         DO $$ BEGIN
@@ -358,8 +397,8 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
             """,
             (
                 predicted_at,
-                row["ds"].to_pydatetime(),
-                None,                        # prophet_yhat — NULL (leakage risk)
+                _local_wall_to_utc_dt(row["ds"]),
+                _db_val(prophet_vals[i]) if prophet_model is not None else None,
                 _db_val(lstm_vals[i]),
                 _db_val(xgb_vals[i]),
                 _db_val(ensemble_vals[i]),
@@ -374,7 +413,7 @@ def run_backtest(days: int = 30, source: str = "REAL", overwrite: bool = False) 
     cur.close()
     conn.close()
     action_word = "updated" if overwrite else "inserted"
-    print(f"[Backtest] {saved}/{n} rows {action_word} in queue_predictions ✓")
+    print(f"[Backtest] {saved}/{n} rows {action_word} in queue_predictions [OK]")
     return saved
 
 
@@ -386,6 +425,6 @@ if __name__ == "__main__":
                         help="Overwrite existing rows (default: skip existing)")
     args = parser.parse_args()
 
-    print(f"\n[Backtest] Starting — {args.days} days back, source={args.source}, overwrite={args.overwrite}")
+    print(f"\n[Backtest] Starting -- {args.days} days back, source={args.source}, overwrite={args.overwrite}")
     n_saved = run_backtest(days=args.days, source=args.source, overwrite=args.overwrite)
-    print(f"[Backtest] All done — {n_saved} rows saved.\n")
+    print(f"[Backtest] All done -- {n_saved} rows saved.\n")

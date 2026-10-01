@@ -1,4 +1,3 @@
-import gc
 import os
 import json
 import time as _time
@@ -10,8 +9,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import xgboost as xgb
-from sklearn.preprocessing import MinMaxScaler
+
+_OPTIONAL_DEPS_STATUS = {}
+try:
+    import xgboost as xgb
+    _OPTIONAL_DEPS_STATUS["xgboost"] = {"available": True}
+except ImportError as _exc:
+    xgb = None
+    _OPTIONAL_DEPS_STATUS["xgboost"] = {
+        "available": False,
+        "error": str(_exc),
+        "install_cmd": "pip install xgboost",
+    }
 
 warnings.filterwarnings("ignore", ".*SQLAlchemy.*")
 warnings.filterwarnings("ignore", ".*DataFrame concatenation with empty or all-NA.*")
@@ -35,14 +44,6 @@ def _st_html_compat(raw_html: str, *, height: int = 0, **kwargs):
 
 
 st_html = _st_html_compat
-
-try:
-    import tensorflow as tf
-    TF_AVAILABLE = True
-    tf.get_logger().setLevel("ERROR")
-except Exception:
-    tf = None
-    TF_AVAILABLE = False
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -75,6 +76,12 @@ from prediction.core import (  # noqa: E402
 )
 from prediction.pipeline import load_lane_history_agg  # noqa: E402
 from prediction.dwell_modifier import compute_dwell_modifier_from_recent  # noqa: E402
+from prediction.scheduler_control import scheduler_state, start_scheduler, request_stop, run_hidden
+from prediction.runtime import RUNTIME, read_json
+from prediction.model_bundle import current_bundle
+from prediction.forecast_state import waiting_backlog, horizon_value, payload_from, freshness
+from prediction.shared_forecast_store import read_settings, update_settings, read_state, select_lanes
+from prediction.dwell_models import _build_dashboard_dwell_model, _build_dashboard_dwell_lstm_model
 
 CAMERA_ID = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
 # Queue depth / lane occupancy come from the checkout camera specifically —
@@ -123,6 +130,10 @@ def _today_hours():
 # Scheduler interval drives everything time-based on this page: the
 # @st.cache_data TTL below, and the page auto-refresh timer further down —
 # so a browser reload always lands right when a new prediction is due.
+_running_config = scheduler_state()
+if _running_config.get("alive"):
+    st.session_state["sched_interval"] = int(_running_config["interval_min"])
+    st.session_state["training_span_days"] = int(_running_config["days"])
 if "sched_interval" not in st.session_state:
     _qp_interval = st.query_params.get("sched_interval", None)
     # Kept in sync with the select_slider options list further down
@@ -179,6 +190,17 @@ def _conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
+def _find_venv_python() -> str:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / ".venv" / "Scripts" / "python.exe"
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+PYTHON_BIN = _find_venv_python()
+
+
 def _run_prediction(data_span_days: int = 30):
     _here  = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(_here, "ensemble_predict.py")
@@ -186,16 +208,12 @@ def _run_prediction(data_span_days: int = 30):
     env    = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     print(
         f"[Dashboard] Starting prediction subprocess: source=REAL days={data_span_days} "
-        f"script={script} cwd={cwd}",
+        f"script={script} cwd={cwd} python={PYTHON_BIN}",
         flush=True,
     )
-    result = subprocess.run(
-        [sys.executable, script, "--source", "REAL", "--days", str(data_span_days)],
-        env=env,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
+    result = run_hidden(
+        [PYTHON_BIN, script, "--source", "REAL", "--days", str(data_span_days)],
+        env=env, cwd=cwd)
     # Echo to this process's own console too (Streamlit terminal), not just
     # the UI's error box — capture_output means it's no longer live-streamed,
     # but it's still visible here right after the subprocess finishes.
@@ -204,7 +222,7 @@ def _run_prediction(data_span_days: int = 30):
     if result.stderr:
         print(result.stderr, flush=True)
     print(f"[Dashboard] Prediction subprocess finished: returncode={result.returncode}", flush=True)
-    return result.returncode == 0, result.stdout, result.stderr
+    return result.returncode == 0, result.stdout, (result.stderr or result.stdout)
 
 
 def _to_local_timestamp(value):
@@ -251,177 +269,9 @@ def _plotly_local_iso_series(values):
     return [_plotly_local_iso(v) for v in values]
 
 
-def _build_dashboard_dwell_model(service_history: pd.DataFrame, mode: str):
-    train = service_history.dropna(subset=["dwell_min"]).copy()
-    if train.empty:
-        return None, {"mode": mode, "status": "empty", "reason": "No dwell history buckets."}
-
-    train["dwell_min"] = pd.to_numeric(train["dwell_min"], errors="coerce")
-    train["n_events"] = pd.to_numeric(train.get("n_events"), errors="coerce").fillna(1)
-    train = train.dropna(subset=["dwell_min"])
-    if train.empty:
-        return None, {"mode": mode, "status": "empty", "reason": "No valid dwell values."}
-
-    train["ds"] = _to_local_series(train["ds"])
-    train = train[train["ds"].apply(lambda t: is_open(pd.Timestamp(t)))]
-    train["dwell_min"] = train["dwell_min"].clip(DWELL_MIN_FLOOR, DWELL_MAX_CAP)
-    train["hour"] = train["ds"].apply(lambda t: pd.Timestamp(t).hour)
-    train["minute_of_hour"] = train["ds"].apply(lambda t: pd.Timestamp(t).minute)
-    train["day_of_week"] = train["ds"].apply(lambda t: pd.Timestamp(t).dayofweek)
-    train["is_weekend"] = (train["day_of_week"] >= 5).astype(int)
-
-    bucket_count = int(len(train))
-    event_count = int(train["n_events"].sum())
-    if mode == "safe":
-        if bucket_count < DWELL_MIN_TRAIN_BUCKETS or event_count < DWELL_MIN_TRAIN_EVENTS:
-            return None, {
-                "mode": mode,
-                "status": "fallback",
-                "reason": (
-                    f"Need at least {DWELL_MIN_TRAIN_BUCKETS} dwell buckets and "
-                    f"{DWELL_MIN_TRAIN_EVENTS} service events."
-                ),
-                "bucket_count": bucket_count,
-                "event_count": event_count,
-            }
-
-    model = xgb.XGBRegressor(
-        n_estimators=200, max_depth=4, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8, random_state=42, verbosity=0,
-    )
-    fit_kwargs = {}
-    if mode == "safe":
-        fit_kwargs["sample_weight"] = train["n_events"].clip(lower=1).to_numpy(dtype=float)
-    model.fit(train[_DWELL_FEAT], train["dwell_min"], **fit_kwargs)
-    return model, {
-        "mode": mode,
-        "status": "trained",
-        "reason": "Weighted bucket model." if mode == "safe" else "Legacy bucket model.",
-        "bucket_count": bucket_count,
-        "event_count": event_count,
-    }
 
 
-def _build_dashboard_dwell_lstm_model(service_history: pd.DataFrame, mode: str):
-    if not TF_AVAILABLE:
-        return None, {"mode": mode, "status": "unavailable", "reason": "TensorFlow not available."}
 
-    train = service_history.dropna(subset=["dwell_min"]).copy()
-    if train.empty:
-        return None, {"mode": mode, "status": "empty", "reason": "No dwell history buckets."}
-
-    train["dwell_min"] = pd.to_numeric(train["dwell_min"], errors="coerce")
-    train["n_events"] = pd.to_numeric(train.get("n_events"), errors="coerce").fillna(1)
-    train = train.dropna(subset=["dwell_min"])
-    if train.empty:
-        return None, {"mode": mode, "status": "empty", "reason": "No valid dwell values."}
-
-    train["ds"] = _to_local_series(train["ds"])
-    train = train[train["ds"].apply(lambda t: is_open(pd.Timestamp(t)))]
-    train = train.sort_values("ds").reset_index(drop=True)
-    train["dwell_min"] = train["dwell_min"].clip(DWELL_MIN_FLOOR, DWELL_MAX_CAP)
-
-    bucket_count = int(len(train))
-    event_count = int(train["n_events"].sum())
-    min_buckets = max(DWELL_MIN_TRAIN_BUCKETS, DWELL_LSTM_MIN_BUCKETS) if mode == "safe" else max(12, DWELL_LSTM_SEQ_LEN + 4)
-    min_events = max(DWELL_MIN_TRAIN_EVENTS, DWELL_LSTM_MIN_EVENTS) if mode == "safe" else 1
-    if bucket_count < min_buckets or event_count < min_events:
-        return None, {
-            "mode": mode,
-            "status": "fallback",
-            "reason": f"Need at least {min_buckets} dwell buckets and {min_events} service events.",
-            "bucket_count": bucket_count,
-            "event_count": event_count,
-        }
-
-    values = train["dwell_min"].to_numpy(dtype=float)
-    seq_len = max(4, min(DWELL_LSTM_SEQ_LEN, len(values) - 1))
-    if len(values) <= seq_len:
-        return None, {
-            "mode": mode,
-            "status": "fallback",
-            "reason": f"Need more than {seq_len} buckets for LSTM sequences.",
-            "bucket_count": bucket_count,
-            "event_count": event_count,
-        }
-
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled = scaler.fit_transform(values.reshape(-1, 1)).flatten()
-    X_train, y_train = [], []
-    for i in range(len(scaled) - seq_len):
-        X_train.append(scaled[i:i + seq_len])
-        y_train.append(scaled[i + seq_len])
-    if not X_train:
-        return None, {
-            "mode": mode,
-            "status": "fallback",
-            "reason": "Not enough sequential dwell samples.",
-            "bucket_count": bucket_count,
-            "event_count": event_count,
-        }
-
-    X_arr = np.array(X_train, dtype=float).reshape(-1, seq_len, 1)
-    y_arr = np.array(y_train, dtype=float)
-    # Streamlit keeps this process alive across every rerun, and this model
-    # gets rebuilt from scratch on each one. Keras can leave a stale
-    # name-scope stack behind on repeated rebuilds; clear it aggressively and
-    # retry once if the first fit still trips the internal stack corruption.
-    def _build_lstm_model():
-        model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(seq_len, 1)),
-            tf.keras.layers.LSTM(24),
-            tf.keras.layers.Dense(1),
-        ])
-        model.compile(optimizer="adam", loss="mse")
-        return model
-
-    model = None
-    for attempt in range(2):
-        try:
-            tf.keras.backend.clear_session()
-            gc.collect()
-            model = _build_lstm_model()
-            model.fit(X_arr, y_arr, epochs=DWELL_LSTM_EPOCHS, batch_size=min(16, len(X_arr)), verbose=0)
-            break
-        except Exception:
-            if attempt == 1:
-                raise
-            continue
-
-    return {
-        "model": model,
-        "scaler": scaler,
-        "seq_len": seq_len,
-        "history_values": values,
-    }, {
-        "mode": mode,
-        "status": "trained",
-        "reason": "Sequential open-hour dwell model.",
-        "bucket_count": bucket_count,
-        "event_count": event_count,
-    }
-
-
-def _predict_dashboard_dwell_lstm(model_pack, slots) -> list[float]:
-    if model_pack is None or not slots:
-        return []
-    values = np.array(model_pack["history_values"], dtype=float)
-    seq_len = int(model_pack["seq_len"])
-    scaler = model_pack["scaler"]
-    model = model_pack["model"]
-    if len(values) < seq_len:
-        pad_val = float(np.median(values)) if len(values) else float(DEFAULT_DWELL_MIN)
-        values = np.concatenate([np.full(seq_len - len(values), pad_val), values])
-    history = values[-seq_len:].astype(float)
-    preds = []
-    for _ in slots:
-        scaled_seq = scaler.transform(history.reshape(-1, 1)).reshape(1, seq_len, 1)
-        next_scaled = float(model.predict(scaled_seq, verbose=0)[0][0])
-        next_val = float(scaler.inverse_transform(np.array([[next_scaled]])).flatten()[0])
-        next_val = float(np.clip(next_val, DWELL_MIN_FLOOR, DWELL_MAX_CAP))
-        preds.append(next_val)
-        history = np.append(history[1:], next_val)
-    return preds
 
 
 def _insert_overnight_gaps(df: pd.DataFrame, ds_col: str = "ds", threshold_min: int = 60) -> pd.DataFrame:
@@ -596,20 +446,28 @@ def _fmt_yhat(val):
         return "—"
 
 
-def _lane_recommendation(lane_waits, selected_lanes, wait_10m):
+def _lane_recommendation(lane_waits, selected_lanes, wait_val):
     """Return a recommendation string when changing lanes would cross a threshold."""
-    if not lane_waits or wait_10m is None:
+    if not lane_waits or wait_val is None:
         return None
-    if wait_10m >= WAIT_BUSY_MIN and selected_lanes < MAX_LANES:
+    if wait_val >= WAIT_BUSY_MIN and selected_lanes < MAX_LANES:
         next_lanes = selected_lanes + 1
-        next_wait = lane_waits.get(next_lanes, {}).get("wait_10m")
+        next_wait = lane_waits.get(next_lanes, {}).get("wait_0m")
+        if next_wait is None:
+            next_wait = lane_waits.get(next_lanes, {}).get("wait_now")
+        if next_wait is None:
+            next_wait = lane_waits.get(next_lanes, {}).get("wait_10m")
         if next_wait is not None and next_wait < WAIT_BUSY_MIN:
-            return f"Opening {_lane_phrase(next_lanes)} would bring +10 min wait to {next_wait:.1f} min (below busy threshold)"
+            return f"Opening {_lane_phrase(next_lanes)} would bring wait now to {next_wait:.1f} min (below busy threshold)"
         if next_wait is not None:
-            return f"Opening {_lane_phrase(next_lanes)} would reduce +10 min wait to {next_wait:.1f} min"
-    if wait_10m < WAIT_BUSY_MIN and selected_lanes > 1:
+            return f"Opening {_lane_phrase(next_lanes)} would reduce wait now to {next_wait:.1f} min"
+    if wait_val < WAIT_BUSY_MIN and selected_lanes > 1:
         fewer_lanes = selected_lanes - 1
-        fewer_wait = lane_waits.get(fewer_lanes, {}).get("wait_10m")
+        fewer_wait = lane_waits.get(fewer_lanes, {}).get("wait_0m")
+        if fewer_wait is None:
+            fewer_wait = lane_waits.get(fewer_lanes, {}).get("wait_now")
+        if fewer_wait is None:
+            fewer_wait = lane_waits.get(fewer_lanes, {}).get("wait_10m")
         if fewer_wait is not None and fewer_wait < WAIT_BUSY_MIN:
             return f"Reducing to {_lane_phrase(fewer_lanes)} would still keep wait at {fewer_wait:.1f} min (below busy threshold)"
     return None
@@ -674,7 +532,7 @@ def _weighted_arrival_blend(frame: pd.DataFrame, cols: list[str]) -> pd.Series:
 
 
 def _run_prediction_ui(data_span_days: int = 30):
-    with st.spinner(f"Running prediction model on last {data_span_days} days... (1-3 min)"):
+    with st.spinner(f"Running prediction using {data_span_days} days of data…"):
         ok, _out, err = _run_prediction(data_span_days=data_span_days)
     if ok:
         st.cache_data.clear()
@@ -690,13 +548,10 @@ def _run_backtest(data_span_days: int = 30, overwrite: bool = False):
     script = os.path.join(_here, "backtest_predict.py")
     cwd    = os.path.dirname(os.path.dirname(_here))
     env    = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    cmd    = [sys.executable, script, "--days", str(data_span_days)]
+    cmd    = [PYTHON_BIN, script, "--days", str(data_span_days)]
     if overwrite:
         cmd.append("--overwrite")
-    result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", env=env, cwd=cwd,
-    )
+    result = run_hidden(cmd, env=env, cwd=cwd)
     return result.returncode == 0, result.stdout, result.stderr
 
 
@@ -714,70 +569,19 @@ def _run_backtest_ui(data_span_days: int = 30):
 
 # ── Auto-prediction scheduler (background process) ────────────────────────────
 
-_HERE_DIR   = os.path.dirname(os.path.abspath(__file__))
-_SCHED_SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(_HERE_DIR)), "run_scheduler.py"
-)
-_PID_FILE = os.path.join(_HERE_DIR, ".scheduler.pid")
 
 
 def _scheduler_pid() -> int | None:
-    """Return the running scheduler PID, or None if not running."""
-    try:
-        with open(_PID_FILE) as fh:
-            pid = int(fh.read().strip())
-        try:
-            import psutil
-            if not psutil.pid_exists(pid):
-                raise ProcessLookupError
-        except ImportError:
-            # psutil not installed — fall back to os.kill(pid, 0)
-            os.kill(pid, 0)
-        return pid
-    except Exception:
-        pass
-    try:
-        os.remove(_PID_FILE)
-    except FileNotFoundError:
-        pass
-    return None
+    state = scheduler_state()
+    return state.get("pid") if state.get("alive") else None
 
 
 def _start_scheduler(interval_min: int, data_span_days: int) -> int:
-    """Launch run_scheduler.py in the background and save its PID."""
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    proc = subprocess.Popen(
-        [
-            sys.executable, _SCHED_SCRIPT,
-            "--interval", str(interval_min),
-            "--days",     str(data_span_days),
-        ],
-        cwd=os.path.dirname(os.path.dirname(_HERE_DIR)),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-    )
-    with open(_PID_FILE, "w") as fh:
-        fh.write(str(proc.pid))
-    return proc.pid
+    return start_scheduler(interval_min, data_span_days)
 
 
 def _stop_scheduler() -> bool:
-    """Kill the running scheduler process."""
-    pid = _scheduler_pid()
-    if pid is None:
-        return False
-    try:
-        import psutil
-        psutil.Process(pid).terminate()
-    except Exception:
-        pass
-    try:
-        os.remove(_PID_FILE)
-    except FileNotFoundError:
-        pass
-    return True
+    return request_stop()
 
 
 def _status_label(wait_value):
@@ -1031,7 +835,7 @@ def load_predictions():
                 WHERE prediction_for >= NOW()
                   AND prediction_for <= NOW() + INTERVAL '24 hours'
                 ORDER BY prediction_for, predicted_at DESC
-                LIMIT 20
+                LIMIT 60
                 """,
                 conn,
             )
@@ -1048,7 +852,7 @@ def load_predictions():
                 WHERE prediction_for >= NOW()
                   AND prediction_for <= NOW() + INTERVAL '24 hours'
                 ORDER BY prediction_for, predicted_at DESC
-                LIMIT 20
+                LIMIT 60
                 """,
                 conn,
             )
@@ -1280,7 +1084,7 @@ def load_model_breakdown():
     return df
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=REFRESH_SEC)
 def load_training_stats():
     """Count and date span of clean real entrance_events used for model training."""
     with _conn() as conn:
@@ -1293,10 +1097,11 @@ def load_training_stats():
                     MAX(timestamp)::date AS last_day,
                     (MAX(timestamp) - MIN(timestamp)) AS span
                 FROM entrance_events
-                WHERE camera_id NOT LIKE 'SIM_%%'
-                  AND dwell_seconds >= 10
+                WHERE camera_id = %s
+                  AND dwell_seconds >= 2
                 """,
                 conn,
+                params=(CAMERA_ID,),
             )
             return row.iloc[0] if not row.empty else None
         except Exception:
@@ -1304,7 +1109,7 @@ def load_training_stats():
             return None
 
 
-@st.cache_data(ttl=REFRESH_SEC)
+@st.cache_data(ttl=60)
 def load_raw_arrivals(days: int):
     """Bucketed entrance arrivals for the last N days (training data view)."""
     with _conn() as conn:
@@ -1315,13 +1120,14 @@ def load_raw_arrivals(days: int):
                     time_bucket('{BUCKET_MIN} minutes', timestamp) AS ds,
                     COUNT(*) AS arrivals
                 FROM entrance_events
-                WHERE camera_id NOT LIKE 'SIM_%%'
-                  AND dwell_seconds >= 10
+                WHERE camera_id = %s
+                  AND dwell_seconds >= 2
                   AND timestamp >= NOW() - INTERVAL '{days} days'
                 GROUP BY ds
                 ORDER BY ds
                 """,
                 conn,
+                params=(CAMERA_ID,),
             )
         except Exception:
             conn.rollback()
@@ -1481,7 +1287,7 @@ def load_full_model_predictions(days: int = 30):
 
 @st.cache_data(ttl=REFRESH_SEC)
 def load_prophet_training_fit():
-    fit_path = Path(__file__).resolve().parent / "models" / f"prophet_training_fit_{BUCKET_MIN}m.csv"
+    fit_path = current_bundle(Path(__file__).resolve().parent / "models") / f"prophet_training_fit_{BUCKET_MIN}m.csv"
     if not fit_path.exists():
         return pd.DataFrame()
     try:
@@ -1832,7 +1638,14 @@ if "training_span_days" not in st.session_state:
     )
 
 
+_shared_settings = read_settings()
+for _setting_name, _setting_value in _shared_settings["config"].items():
+    st.session_state[_setting_name] = _setting_value
+
 # ── Load all data ──────────────────────────────────────────────────────────────
+
+_loading_notice = st.empty()
+_loading_notice.info("Loading live data and forecasts…")
 
 try:
     snap = load_snapshot()
@@ -1849,7 +1662,9 @@ try:
     demo_gender, demo_age, demo_hourly = load_demographics_today()
     model_breakdown = load_model_breakdown()
     training_stats = load_training_stats()
-    _span = int(st.session_state["training_span_days"])
+    _disp_days = int(np.ceil(int(st.session_state.get("history_range_hours", 24)) / 24.0))
+    _train_days = int(st.session_state.get("training_span_days", 30))
+    _span = max(_train_days, _disp_days, 7)
     raw_arrivals = load_raw_arrivals(_span)
     service_history = load_service_history(_span)
     full_model_preds = load_full_model_predictions(_span)
@@ -1859,6 +1674,7 @@ try:
         _open_mask = _ds_local.apply(lambda t: is_open(pd.Timestamp(t)))
         full_model_preds = full_model_preds[_open_mask].reset_index(drop=True)
 except Exception as exc:
+    _loading_notice.empty()
     st.error(f"Database error: {exc}")
     st.stop()
 
@@ -1936,6 +1752,15 @@ except Exception:
     _dwell_mod = 1.0
 service_minutes = service_minutes * _dwell_mod
 
+try:
+    with _conn() as _lane_read_conn:
+        with _lane_read_conn.cursor() as _lane_read_cur:
+            _lane_read_cur.execute("SELECT open_lanes FROM dashboard_state WHERE id = 1")
+            _lane_row = _lane_read_cur.fetchone()
+            _lanes_at_read = _lane_row[0] if _lane_row else None
+except Exception:
+    _lanes_at_read = None
+
 if "forecast_active_lanes" not in st.session_state:
     _qp_lanes = st.query_params.get("lanes", None)
     if _qp_lanes is not None and str(_qp_lanes).isdigit() and int(_qp_lanes) in range(1, 6):
@@ -1966,6 +1791,7 @@ else:
                 and _sync_db_lanes != st.session_state.get("_dashboard_last_written_lanes")
                 and _sync_db_lanes != st.session_state.get("forecast_active_lanes")):
             st.session_state["forecast_active_lanes"] = _sync_db_lanes
+            st.session_state["_dashboard_last_written_lanes"] = _sync_db_lanes
     except Exception:
         pass
 selected_lanes = int(st.session_state["forecast_active_lanes"])
@@ -1979,323 +1805,67 @@ selected_lanes = max(1, min(MAX_LANES, selected_lanes))
 _in_service = min(queue_count, selected_lanes)
 _waiting_backlog = max(0.0, float(queue_count - selected_lanes))
 
-wait_0m  = None
-wait_5m  = None
-wait_10m = None
-wait_15m = None
-wait_20m = None
-wait_30m = None
-wait_45m = None
-lane_waits = {}
+# Shared waits are published by the background worker, never by a browser session.
+_shared_state = read_state()
+_shared_forecast = payload_from(_shared_state)
+_shared_freshness = freshness(_shared_state)
+_forecast_as_of = pd.Timestamp(_shared_forecast.get("as_of") or datetime.now(timezone.utc))
+_forecast_queue_count = int(_shared_forecast.get("queue_now", queue_count))
+_in_service = min(_forecast_queue_count, selected_lanes)
+_waiting_backlog = waiting_backlog(_forecast_queue_count, selected_lanes)
+service_minutes = float(_shared_forecast.get("service_min", service_minutes))
+_shared_scenario = _shared_forecast.get("lanes", {}).get(str(selected_lanes), {})
+_shared_rows = pd.DataFrame(_shared_scenario.get("slots", []))
 forecast_waits = pd.DataFrame(columns=["ds", "wait_min"])
 pred_future = pd.DataFrame(columns=["ds", "arrivals"])
+if not _shared_rows.empty:
+    _shared_rows["ds"] = _to_local_series(_shared_rows["prediction_for"])
+    forecast_waits = _shared_rows[["ds", "wait_min"]].copy()
+    pred_future = _shared_rows[["ds", "arrivals"]].copy()
+wait_0m, wait_5m, wait_10m, wait_15m = [_shared_scenario.get(f"wait_{_m}m") for _m in (0, 5, 10, 15)]
+wait_20m, wait_30m, wait_45m = [horizon_value(forecast_waits.to_dict("records"), _m, _forecast_as_of, os.getenv("STORE_TZ", "Europe/Paris"), BUCKET_MIN) for _m in (20, 30, 45)]
+lane_waits = {}
+for _lane_key, _scenario in _shared_forecast.get("lanes", {}).items():
+    _rows = [{"ds": row["prediction_for"], "wait_min": row["wait_min"]} for row in _scenario.get("slots", [])]
+    _w0 = _scenario.get("wait_0m")
+    if _w0 is None:
+        _w0 = horizon_value(_rows, 0, _forecast_as_of, os.getenv("STORE_TZ", "Europe/Paris"), BUCKET_MIN)
+    if _w0 is None and _forecast_queue_count is not None:
+        _w0 = round(waiting_backlog(_forecast_queue_count, int(_lane_key)) * service_minutes / max(int(_lane_key), 1), 1)
+    lane_waits[int(_lane_key)] = {
+        "wait_0m": _w0,
+        "wait_now": _w0,
+        **{f"wait_{_m}m": horizon_value(_rows, _m, _forecast_as_of, os.getenv("STORE_TZ", "Europe/Paris"), BUCKET_MIN) for _m in (10, 15, 30, 45)},
+    }
+if not lane_waits:
+    for _lk in range(1, MAX_LANES + 1):
+        _w0 = round(waiting_backlog(queue_count, _lk) * service_minutes / max(_lk, 1), 1)
+        lane_waits[_lk] = {"wait_0m": _w0, "wait_now": _w0}
+_dwell_pred_by_model = _shared_forecast.get("dwell_by_model", {})
+_dwell_per_slot_base = _shared_forecast.get("dwell_values") or None
+_dwell_per_slot = list(_dwell_per_slot_base) if _dwell_per_slot_base else None
+_base_dwell = _dwell_per_slot_base[0] if _dwell_per_slot_base else service_minutes
+if _in_service == selected_lanes and BUCKET_MIN > _base_dwell / 2:
+    _first_dwell = BUCKET_MIN * _base_dwell / (BUCKET_MIN - _base_dwell / 2)
+    _dwell_per_slot = [_first_dwell] + (_dwell_per_slot[1:] if _dwell_per_slot else [service_minutes] * max(0, len(pred_future)-1))
+_dwell_model_meta = _shared_forecast.get("dwell_meta") or _dwell_model_meta
 _arrival_calib = _load_arrival_calibration_debug()
-_arrival_calib_note = ""
-_arrival_calib_debug_rows: list[dict[str, str]] = []
-_arrival_cols_used: list[str] = []
-_arrival_models_selected: list[str] = []
-_arrival_calib_active = False
+_arrival_calib_debug_rows = []
+_arrival_models_selected = _shared_forecast.get("config", {}).get("arrival_models", [])
+_model_col_map = {"prophet": "prophet_yhat", "lstm": "lstm_yhat", "xgboost": "xgb_yhat"}
+_arrival_cols_used = [_model_col_map[_name] for _name in _arrival_models_selected]
+_selected_models = _arrival_models_selected
+_arrival_calib_active = _shared_forecast.get("calibration_applied", False)
+_arrival_calib_note = "Shared background forecast; arrival calibration " + ("enabled." if _arrival_calib_active else "disabled.")
+if _shared_forecast.get("calibration", {}).get("requested") and not _arrival_calib_active:
+    _arrival_calib_note = "Arrival calibration was requested but not applied: " + _shared_forecast["calibration"].get("reason", "No validated correction available.")
+_arrivals_capped = _shared_forecast.get("arrivals_capped", False)
+_pred_display = pred_future[(pred_future["ds"] >= _now_local_ts()) & (pred_future["ds"] <= _now_local_ts()+pd.Timedelta(minutes=FORECAST_DISPLAY_MIN))]["arrivals"] if not pred_future.empty else pd.Series(dtype=float)
+_pred_mean = _pred_display.mean()
+_pred_min = _pred_display.min()
+_pred_max = _pred_display.max()
 
-_arrivals_capped = False
-_pred_mean = _pred_min = _pred_max = float("nan")
-_dwell_per_slot = None
-_dwell_per_slot_base = None
-_dwell_pred_by_model: dict[str, list[float]] = {}
-_model_col_map = {"ensemble": "ensemble_yhat", "prophet": "prophet_yhat",
-                  "lstm": "lstm_yhat", "xgboost": "xgb_yhat"}
-_selected_models = st.session_state.get("arrival_models") or ["prophet", "lstm", "xgboost"]
-if not pred_df.empty:
-    _model_col_map = {"ensemble": "ensemble_yhat", "prophet": "prophet_yhat",
-                      "lstm": "lstm_yhat", "xgboost": "xgb_yhat"}
-    _selected_models = st.session_state.get("arrival_models") or ["prophet", "lstm", "xgboost"]
-    _arrival_models_selected = list(_selected_models)
-    _valid_cols = [_model_col_map[m] for m in _selected_models
-                   if _model_col_map.get(m) in pred_df.columns]
-    if not _valid_cols:
-        for _fb in ["prophet_yhat", "lstm_yhat", "xgb_yhat", "ensemble_yhat", "arrivals"]:
-            if _fb in pred_df.columns:
-                _valid_cols = [_fb]
-                break
-    _arrival_cols_used = list(_valid_cols)
-    _arrival_calib_active = any(col == "ensemble_yhat" for col in _valid_cols)
-    _pred_ds_local = _to_local_series(pred_df["ds"])
-    _open_pred_mask = _pred_ds_local.apply(lambda t: is_open(pd.Timestamp(t)))
-    pred_df = pred_df[_open_pred_mask].reset_index(drop=True)
-    pred_future = pred_df[["ds"]].copy()
-    pred_future["ds"] = _to_local_series(pred_future["ds"])
-    if _valid_cols:
-        pred_future["arrivals"] = _weighted_arrival_blend(pred_df, _valid_cols)
-    else:
-        pred_future["arrivals"] = 0.0
-
-    # Apply calibration to non-ensemble blends. ensemble_yhat already has k baked in
-    # from ensemble_predict.py; prophet/lstm/xgb raw columns do not.
-    _cal_enabled = bool(st.session_state.get("calibration_enabled", True))
-    _cal_global_pre  = float(_arrival_calib.get("k_global", 1.0) or 1.0)
-    _cal_hourly_pre  = _arrival_calib.get("k_by_hour", {}) or {}
-    if _cal_enabled and not _arrival_calib_active and _arrival_calib.get("loaded") and not pred_future.empty:
-        _k_per_slot = [
-            float(_cal_hourly_pre.get(str(int(pd.Timestamp(t).hour)), _cal_global_pre))
-            for t in pred_future["ds"]
-        ]
-        pred_future["arrivals"] = (
-            (pred_future["arrivals"] * pd.Series(_k_per_slot, index=pred_future.index))
-            .clip(lower=0)
-        )
-        _arrival_calib_active = True
-
-    _actual_rate = (entries_delta[0] if entries_delta else 0) / max(1.0, 60.0 / BUCKET_MIN)
-    if _actual_rate > 0 and pred_future["arrivals"].mean() > _actual_rate * 5:
-        pred_future["arrivals"] = pred_future["arrivals"].clip(upper=_actual_rate * 5)
-        _arrivals_capped = True
-    _smooth_win = max(1, round(int(st.session_state.get("pred_smooth_min", PRED_SMOOTH_MIN)) / BUCKET_MIN))
-    pred_future["arrivals"] = (
-        pred_future["arrivals"]
-        .rolling(window=_smooth_win, center=True, min_periods=1)
-        .mean()
-    )
-    # Compute stats AFTER capping and smoothing — must match the chart bars
-    _display_cutoff = _now_local_ts() + pd.Timedelta(minutes=FORECAST_DISPLAY_MIN)
-    _pred_display = pred_future[pred_future["ds"] <= _display_cutoff]["arrivals"]
-    _pred_mean = _pred_display.mean(skipna=True) if not _pred_display.empty else pred_future["arrivals"].mean(skipna=True)
-    _pred_min  = _pred_display.min(skipna=True) if not _pred_display.empty else pred_future["arrivals"].min(skipna=True)
-    _pred_max  = _pred_display.max(skipna=True) if not _pred_display.empty else pred_future["arrivals"].max(skipna=True)
-    _cal_hour = int(pd.Timestamp(pred_future.iloc[0]["ds"]).hour) if not pred_future.empty else int(_now_local_ts().hour)
-    _cal_global = float(_arrival_calib.get("k_global", 1.0) or 1.0)
-    _cal_hourly_map = _arrival_calib.get("k_by_hour", {}) or {}
-    _cal_hour_k = float(_cal_hourly_map.get(_cal_hour, _cal_global))
-    _cal_mode = (
-        f"hour {str(_cal_hour).zfill(2)} override"
-        if _cal_hour in _cal_hourly_map else
-        "global only"
-    )
-    if _arrival_calib.get("error"):
-        _arrival_calib_note = (
-            f"Arrival calibration file could not be read ({_arrival_calib.get('error')}). "
-            "Saved arrival forecasts are shown without dashboard-side calibration metadata."
-        )
-    elif _arrival_calib.get("loaded"):
-        _cols_label = ', '.join(_arrival_cols_used) if _arrival_cols_used else 'raw model columns'
-        _src_label  = "ensemble_yhat (baked in at save time)" if any("ensemble" in c for c in _arrival_cols_used) else f"{_cols_label} (applied in dashboard)"
-        if _cal_enabled:
-            _arrival_calib_note = (
-                f"Arrival calibration active: <code>k={_cal_hour_k:.4f}</code> ({_cal_mode}, "
-                f"k_global={_cal_global:.4f}) applied to <code>{_src_label}</code>."
-            )
-        else:
-            _arrival_calib_note = (
-                f"Arrival calibration is <b>OFF</b>. <code>calibration.json</code> is loaded "
-                f"(k_global={_cal_global:.4f}), but arrivals are shown uncorrected."
-            )
-    else:
-        _arrival_calib_note = (
-            "No <code>calibration.json</code> file is loaded, so saved arrival forecasts are being used without "
-            "any multiplicative arrival calibration."
-        )
-    _arrival_calib_debug_rows = [
-        {"Field": "Calibration file", "Value": str(_arrival_calib.get("path", ARRIVAL_CALIB_PATH))},
-        {"Field": "Loaded", "Value": "yes" if _arrival_calib.get("loaded") else "no"},
-        {"Field": "Selected models", "Value": ", ".join(_arrival_models_selected) if _arrival_models_selected else "—"},
-        {"Field": "Saved columns used", "Value": ", ".join(_arrival_cols_used) if _arrival_cols_used else "—"},
-        {"Field": "Calibration enabled", "Value": "yes" if _cal_enabled else "no"},
-        {"Field": "Calibration active here", "Value": "yes" if _arrival_calib_active else "no"},
-        {"Field": "k_global", "Value": f"{_cal_global:.4f}"},
-        {"Field": "Current forecast hour", "Value": f"{_cal_hour:02d}:00"},
-        {"Field": "Current k", "Value": f"{_cal_hour_k:.4f} ({_cal_mode})"},
-        {"Field": "Hourly overrides", "Value": str(len(_cal_hourly_map))},
-    ]
-    _in_service = min(queue_count, selected_lanes)
-    _waiting_backlog = max(0.0, float(queue_count - selected_lanes))
-
-    # Per-slot dwell from the selected dwell forecast models.
-    _dwell_per_slot = None
-    if not pred_future.empty:
-        _pf_t = pred_future["ds"]
-        _pf_feat = pd.DataFrame({
-            "hour":           _pf_t.apply(lambda t: pd.Timestamp(t).hour),
-            "minute_of_hour": _pf_t.apply(lambda t: pd.Timestamp(t).minute),
-            "day_of_week":    _pf_t.apply(lambda t: pd.Timestamp(t).dayofweek),
-            "is_weekend":     _pf_t.apply(lambda t: int(pd.Timestamp(t).dayofweek >= 5)),
-        })
-        if _dwell_models.get("xgboost") is not None:
-            _dwell_pred_by_model["xgboost"] = (
-                _dwell_models["xgboost"].predict(_pf_feat[_DWELL_FEAT]).clip(DWELL_MIN_FLOOR, DWELL_MAX_CAP).tolist()
-            )
-        if _dwell_models.get("lstm") is not None:
-            _dwell_pred_by_model["lstm"] = _predict_dashboard_dwell_lstm(_dwell_models["lstm"], list(_pf_t))
-        _active_dwell_pred = [vals for vals in _dwell_pred_by_model.values() if vals]
-        if _active_dwell_pred:
-            _dwell_per_slot = [
-                float(np.mean([vals[i] for vals in _active_dwell_pred if i < len(vals)]))
-                for i in range(max(len(vals) for vals in _active_dwell_pred))
-            ]
-
-    _dwell_per_slot_base = list(_dwell_per_slot) if _dwell_per_slot else None
-    _base_dwell = (_dwell_per_slot_base[0] if _dwell_per_slot_base else service_minutes)
-
-    def _apply_residual_correction(dwell_slots, lane_count):
-        """Inflate slot-0 dwell when all lanes are busy to reflect reduced first-bucket capacity."""
-        in_svc = min(queue_count, lane_count)
-        if in_svc < lane_count or BUCKET_MIN <= _base_dwell / 2:
-            return dwell_slots
-        residual = _base_dwell / 2
-        first_dwell = BUCKET_MIN * _base_dwell / (BUCKET_MIN - residual)
-        if dwell_slots:
-            return [first_dwell] + list(dwell_slots[1:])
-        return [first_dwell] + [service_minutes] * max(0, len(pred_future) - 1)
-
-    _dwell_per_slot = _apply_residual_correction(_dwell_per_slot_base, selected_lanes)
-
-    forecast_waits, wait_15m, wait_30m, wait_45m = _compute_waits_for_lanes(
-        pred_future.copy(),
-        recent_entry_hist,
-        _waiting_backlog,
-        service_minutes,
-        selected_lanes,
-        dwell_series=_dwell_per_slot,
-    )
-    def _wait_at(df, minutes):
-        idx = min(round(minutes / BUCKET_MIN), len(df) - 1) if not df.empty else -1
-        return float(df.iloc[idx]["wait_min"]) if idx >= 0 else None
-    wait_0m  = _wait_at(forecast_waits, 0)
-    wait_5m  = _wait_at(forecast_waits, 5)
-    wait_10m = _wait_at(forecast_waits, 10)
-    wait_15m = _wait_at(forecast_waits, 15)
-    for lane_count in range(1, MAX_LANES + 1):
-        _lane_dwell = _apply_residual_correction(_dwell_per_slot_base, lane_count)
-        _wait_df, lane_wait_15, _wait_30, _wait_45 = _compute_waits_for_lanes(
-            pred_future.copy(),
-            recent_entry_hist,
-            _waiting_backlog,
-            service_minutes,
-            lane_count,
-            dwell_series=_lane_dwell,
-        )
-        lane_waits[lane_count] = {
-            "wait_10m": _wait_at(_wait_df, 10),
-            "wait_15m": lane_wait_15,
-            "wait_30m": _wait_30,
-            "wait_45m": _wait_45,
-        }
-
-# ── Write computed state for the mobile app API to consume ───────────────────
-# The API reads this table directly so the app always shows the exact same
-# values as the dashboard without needing to replicate the simulation logic.
-try:
-    import json as _json
-    with _conn() as _sc:
-        _scc = _sc.cursor()
-        _scc.execute("""
-            CREATE TABLE IF NOT EXISTS dashboard_state (
-                id                  INTEGER PRIMARY KEY DEFAULT 1,
-                updated_at          TIMESTAMPTZ DEFAULT NOW(),
-                queue_now           INTEGER,
-                service_min         FLOAT,
-                wait_0m             FLOAT,
-                wait_5m             FLOAT,
-                wait_10m            FLOAT,
-                wait_15m            FLOAT,
-                lane1_wait_15m      FLOAT,
-                lane2_wait_15m      FLOAT,
-                lane3_wait_15m      FLOAT,
-                lane4_wait_15m      FLOAT,
-                open_lanes          INTEGER,
-                demographics_json   TEXT,
-                entries_hour_json   TEXT
-            )
-        """)
-        # Add columns if upgrading from old schema
-        for _col, _type in [("demographics_json", "TEXT"), ("entries_hour_json", "TEXT")]:
-            _scc.execute(f"""
-                DO $$ BEGIN
-                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                                   WHERE table_name='dashboard_state' AND column_name='{_col}')
-                    THEN ALTER TABLE dashboard_state ADD COLUMN {_col} {_type}; END IF;
-                END $$;
-            """)
-
-        def _rv(v): return round(float(v), 2) if v is not None and v == v else None
-
-        # Build demographics JSON exactly as dashboard computes it
-        _gender_total = int(demo_gender["count"].sum()) if not demo_gender.empty else 0
-        _gender_data = []
-        _gender_colors = {"male": "#2563eb", "female": "#db2777"}
-        for _, _gr in demo_gender.iterrows():
-            _gk = str(_gr["gender"]).lower()
-            _gc = int(_gr["count"])
-            _gender_data.append({
-                "key": _gk, "label": _gk.capitalize(),
-                "count": _gc,
-                "percent": round(_gc / _gender_total * 100) if _gender_total else 0,
-                "color": _gender_colors.get(_gk, "#94a3b8"),
-            })
-
-        _age_total = int(demo_age["count"].sum()) if not demo_age.empty else 0
-        _age_colors = {"18-30": "#f97316", "30-50": "#3fb950", "50+": "#58a6ff"}
-        _age_data = []
-        for _, _ar in demo_age.iterrows():
-            _ag = str(_ar["age_group"])
-            _ac = int(_ar["count"])
-            _age_data.append({
-                "group": _ag, "count": _ac,
-                "percent": round(_ac / _age_total * 100) if _age_total else 0,
-                "color": _age_colors.get(_ag, "#8b949e"),
-            })
-
-        _demo_json = _json.dumps({"gender": _gender_data, "age": _age_data})
-
-        # Build hourly entries JSON
-        _hourly = []
-        if not traffic_today.empty:
-            _peak_cnt = int(traffic_today["entries"].max())
-            for _, _hr in traffic_today.iterrows():
-                _hc = int(_hr["entries"])
-                _hourly.append({
-                    "hour": _to_local_timestamp(_hr["hour"]).strftime("%H:00"),
-                    "count": _hc,
-                    "is_peak": _hc == _peak_cnt and _peak_cnt > 0,
-                })
-        _hourly_json = _json.dumps(_hourly)
-
-        _scc.execute("""
-            INSERT INTO dashboard_state
-                (id, updated_at, queue_now, service_min,
-                 wait_0m, wait_5m, wait_10m, wait_15m,
-                 lane1_wait_15m, lane2_wait_15m, lane3_wait_15m, lane4_wait_15m,
-                 open_lanes, demographics_json, entries_hour_json)
-            VALUES (1, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                updated_at          = NOW(),
-                queue_now           = EXCLUDED.queue_now,
-                service_min         = EXCLUDED.service_min,
-                wait_0m             = EXCLUDED.wait_0m,
-                wait_5m             = EXCLUDED.wait_5m,
-                wait_10m            = EXCLUDED.wait_10m,
-                wait_15m            = EXCLUDED.wait_15m,
-                lane1_wait_15m      = EXCLUDED.lane1_wait_15m,
-                lane2_wait_15m      = EXCLUDED.lane2_wait_15m,
-                lane3_wait_15m      = EXCLUDED.lane3_wait_15m,
-                lane4_wait_15m      = EXCLUDED.lane4_wait_15m,
-                open_lanes          = EXCLUDED.open_lanes,
-                demographics_json   = EXCLUDED.demographics_json,
-                entries_hour_json   = EXCLUDED.entries_hour_json
-        """, (
-            int(queue_count),
-            _rv(service_minutes),
-            _rv(wait_0m), _rv(wait_5m), _rv(wait_10m), _rv(wait_15m),
-            _rv(lane_waits.get(1, {}).get("wait_15m")),
-            _rv(lane_waits.get(2, {}).get("wait_15m")),
-            _rv(lane_waits.get(3, {}).get("wait_15m")),
-            _rv(lane_waits.get(4, {}).get("wait_15m")),
-            int(selected_lanes),
-            _demo_json,
-            _hourly_json,
-        ))
-        _sc.commit()
-        _scc.close()
-        st.session_state["_dashboard_last_written_lanes"] = int(selected_lanes)
-except Exception:
-    pass  # never crash the dashboard because of a state write failure
+# Shared ancillary statistics are maintained by the background job.
 
 entries_last_hr = entries_delta[0] if entries_delta else 0
 entries_prev_hr = entries_delta[1] if entries_delta else 0
@@ -2328,7 +1898,8 @@ if not status_breakdown.empty:
 alert_minutes_today = alert_slots * BUCKET_MIN
 
 
-status_class, status_label = _status_meta(wait_15m)
+_status_wait = wait_0m if wait_0m is not None else wait_10m
+status_class, status_label = _status_meta(_status_wait)
 # Same priority as detected_lanes above: live snapshot first, then the
 # slower service_events inference, then the hardcoded default -- so the
 # label/note here always describes where the number actually came from,
@@ -2382,15 +1953,20 @@ else:
 # context shown alongside it.
 lane_parameter_note = f"Forecast uses {_lane_phrase(selected_lanes)} (manually set)."
 status_text = (
-    f"{status_label} - Predicted wait with {_lane_phrase(selected_lanes)}: {_format_wait_capped(wait_10m)}"
-    if wait_10m is not None
-    else f"{status_label} - Waiting for the next lane-aware forecast"
+    f"{status_label} - Predicted wait with {_lane_phrase(selected_lanes)}: {_format_wait_capped(wait_0m)}"
+    if wait_0m is not None
+    else (
+        f"{status_label} - Predicted wait with {_lane_phrase(selected_lanes)}: {_format_wait_capped(wait_10m)}"
+        if wait_10m is not None
+        else f"{status_label} - Waiting for the next lane-aware forecast"
+    )
 )
 
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 
 now_str = datetime.now().strftime("%H:%M  -  %A, %d %B %Y")
+_loading_notice.empty()
 st.markdown(
     f"""
 <div class="top-header">
@@ -2417,6 +1993,13 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+for _pkg, _info in _OPTIONAL_DEPS_STATUS.items():
+    if not _info.get("available", True):
+        st.warning(
+            f"Admin Notice: Optional dependency '{_pkg}' is not installed ({_info.get('error')}). "
+            f"Core dashboard metrics remain active. To enable full modeling: {_info.get('install_cmd')}"
+        )
 
 _th_oh, _th_om, _th_ch, _th_cm, _, _ = _today_hours()
 _hours_pill = f"Hours today: {_th_oh:02d}:{_th_om:02d}–{_th_ch:02d}:{_th_cm:02d}"
@@ -2453,9 +2036,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-_lane_rec = _lane_recommendation(lane_waits, selected_lanes, wait_10m)
+_lane_rec = _lane_recommendation(lane_waits, selected_lanes, wait_0m if wait_0m is not None else wait_10m)
 if _lane_rec:
-    _rec_color = "#ea580c" if wait_15m is not None and wait_15m >= WAIT_BUSY_MIN else "#16a34a"
+    _rec_wait = wait_0m if wait_0m is not None else wait_15m
+    _rec_color = "#ea580c" if _rec_wait is not None and _rec_wait >= WAIT_BUSY_MIN else "#16a34a"
     st.markdown(
         f'<div class="detail-note" style="border-left: 4px solid {_rec_color}; padding-left: 14px;">'
         f'<strong>Lane suggestion:</strong> {_lane_rec}</div>',
@@ -2474,6 +2058,12 @@ def _sync_days_to_qp():
     st.query_params["training_days"] = str(st.session_state.get("training_span_days", int(os.getenv("DATA_SPAN_DAYS", 30))))
 
 def _sync_lanes_to_qp():
+    try:
+        new_lanes = int(st.session_state["forecast_active_lanes"])
+        select_lanes(new_lanes)
+        st.session_state["_dashboard_last_written_lanes"] = new_lanes
+    except ValueError as exc:
+        st.warning(str(exc))
     st.query_params["lanes"] = str(st.session_state.get("forecast_active_lanes", DEFAULT_LANES))
 
 def _sync_history_range_to_qp():
@@ -2484,9 +2074,11 @@ def _guard_arrival_models():
     if not current:
         current = list(_ARRIVAL_MODEL_DEFAULT)
         st.session_state["arrival_models"] = current
+    update_settings({"arrival_models": current})
     st.query_params["arrival_models"] = ",".join(current)
 
 def _sync_dwell_mode_to_qp():
+    update_settings({"dwell_model_mode": st.session_state["dwell_model_mode"]})
     st.query_params["dwell_mode"] = str(st.session_state.get("dwell_model_mode", "safe"))
 
 def _guard_dwell_forecast_models():
@@ -2494,6 +2086,7 @@ def _guard_dwell_forecast_models():
     if not current:
         current = list(_DWELL_FORECAST_MODEL_DEFAULT)
         st.session_state["dwell_forecast_models"] = current
+    update_settings({"dwell_forecast_models": current})
     st.query_params["dwell_forecast_models"] = ",".join(current)
 
 action_refresh, action_predict, action_backtest, action_param, action_days, action_model, action_smooth, action_dwell, action_dwell_models = st.columns([1, 1.2, 1.2, 1.7, 1.7, 1.8, 1.4, 1.2, 2.0])
@@ -2517,9 +2110,10 @@ with action_param:
 with action_days:
     st.select_slider(
         "Training data span",
-        options=[3, 7, 14, 21, 30, 60, 90],
+        options=sorted({3, 7, 14, 21, 30, 60, 90, int(st.session_state["training_span_days"])}),
         format_func=lambda v: f"{v} days",
         key="training_span_days",
+        disabled=_scheduler_pid() is not None,
         on_change=_sync_days_to_qp,
     )
 with action_model:
@@ -2533,8 +2127,8 @@ with action_model:
     st.toggle(
         "Apply arrival calibration",
         key="calibration_enabled",
-        value=True,
-        help="Multiply arrivals by the k learned from accuracy_eval.py (calibration.json).",
+        on_change=lambda: update_settings({"calibration_enabled": st.session_state["calibration_enabled"]}),
+        help="Apply a compatible, independently validated arrival correction on the next background publication. Raw model forecasts remain unchanged. Legacy or invalid coefficients are ignored.",
     )
 with action_smooth:
     st.select_slider(
@@ -2542,6 +2136,7 @@ with action_smooth:
         options=[3, 5, 15, 30],
         format_func=lambda v: f"{v} min",
         key="pred_smooth_min",
+        on_change=lambda: update_settings({"pred_smooth_min": st.session_state["pred_smooth_min"]}),
     )
 with action_dwell:
     st.selectbox(
@@ -2564,27 +2159,35 @@ with action_dwell_models:
 # (sched_interval is initialized earlier, near st.set_page_config, since the
 # page auto-refresh timer needs it before this point in the script.)
 
-_sched_pid = _scheduler_pid()
-_sched_running = _sched_pid is not None
+_sched_state = scheduler_state()
+_sched_pid = _sched_state.get("pid")
+_sched_running = _sched_state.get("alive", False)
 
 _col_status, _col_interval, _col_start, _col_stop, _col_hint = st.columns([2, 1.5, 1, 1, 3])
 
 with _col_status:
-    if _sched_running:
-        st.markdown(
-            f'<div class="detail-note" style="border-left:4px solid #16a34a; padding-left:12px;">'
-            f'<strong style="color:#16a34a">● Auto-predict running</strong>'
-            f'<span style="color:#64748b; font-size:0.8rem;"> — every {st.session_state["sched_interval"]} min · PID {_sched_pid}</span>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+    _status = _sched_state.get("status", "stopped")
+    _labels = {"starting": "Starting", "running": "Running forecast", "waiting": "Waiting",
+               "stopping": "Stopping — finishing active forecast", "failed": "Failed",
+               "busy": "Skipped — another forecast is active", "unresponsive": "Unresponsive",
+               "stopped": "Stopped"}
+    _label = _labels.get(_status, _status)
+    _config = (f"Target: every {_sched_state.get('interval_min')} min · "
+               f"{_sched_state.get('days')} days · {_sched_state.get('source')} · PID {_sched_pid}") if _sched_running else ""
+    if _status in ("failed", "unresponsive", "busy"):
+        st.warning(f"Auto-predict: {_label}. {_config}")
+    elif _status == "stopped":
+        st.info("Auto-predict stopped")
     else:
-        st.markdown(
-            '<div class="detail-note" style="border-left:4px solid #94a3b8; padding-left:12px;">'
-            '<strong style="color:#94a3b8">○ Auto-predict stopped</strong>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+        st.success(f"Auto-predict: {_label}. {_config}")
+    if _sched_state.get("active_pid"):
+        st.caption(f"Active forecast PID {_sched_state['active_pid']}")
+    if _sched_state.get("next_due"):
+        st.caption(f"Next scheduled start: {pd.Timestamp(_sched_state['next_due']).tz_convert(os.getenv('STORE_TZ', 'Europe/Paris')).strftime('%H:%M:%S')}")
+    if _sched_state.get("last_error"):
+        with st.expander("Last scheduler diagnostic"):
+            st.code(_sched_state["last_error"])
+
 
 def _sync_interval_to_qp():
     st.query_params["sched_interval"] = str(st.session_state.get("sched_interval", 15))
@@ -2592,7 +2195,7 @@ def _sync_interval_to_qp():
 with _col_interval:
     st.select_slider(
         "Interval (min)",
-        options=[3, 5, 10, 15, 30, 60],
+        options=sorted({3, 5, 10, 15, 30, 60, int(st.session_state["sched_interval"])}),
         key="sched_interval",
         disabled=_sched_running,
         on_change=_sync_interval_to_qp,
@@ -2618,16 +2221,33 @@ with _col_stop:
         width='stretch',
         disabled=not _sched_running,
     ):
-        _stop_scheduler()
-        st.info("Scheduler stopped.")
+        if _stop_scheduler():
+            st.info("Stop requested. Any active forecast will finish before the scheduler exits.")
+        else:
+            st.warning("Scheduler is already stopped.")
         st.rerun()
 
 with _col_hint:
-    st.markdown(
-        '<div class="detail-note">Auto-predict runs <strong>Run Prediction</strong> automatically '
-        'in the background. Interval and training span are locked while running.</div>',
-        unsafe_allow_html=True,
-    )
+    st.caption("Models are refreshed when expired or settings change. Missed schedule slots are skipped. Stop lets the active forecast finish.")
+    _publication = read_json(RUNTIME / "publication.json")
+    if _publication.get("published_at"):
+        _now_utc = pd.Timestamp.now(tz="UTC")
+        _published = pd.Timestamp(_publication["published_at"])
+        _age = max(0, (_now_utc - _published).total_seconds() / 60)
+        st.caption(f"Last publication: {_age:.1f} min ago · {_publication.get('rows', 0)} future points")
+        if _publication.get("data_cutoff"):
+            _data_age = max(0, (_now_utc - pd.Timestamp(_publication["data_cutoff"])).total_seconds() / 60)
+            st.caption(f"Latest entrance input: {_data_age:.1f} min ago")
+        if _age > max(2 * _sched_state.get("interval_min", 3), 10):
+            st.warning("Published forecast is overdue; check scheduler diagnostics.")
+    else:
+        st.caption("No verified publication recorded by this scheduler yet.")
+
+    st.caption(f"Shared waits calculated {_shared_freshness.get('age_seconds')} seconds ago.")
+    if _shared_forecast.get("settings_revision") != _shared_settings["revision"]:
+        st.info("Settings saved. The shared forecast will update on the next prediction run.")
+    if _shared_freshness["stale"]:
+        st.warning("Shared wait forecast or its source data is stale. Check Auto-predict.")
 
 
 # ── Live operations ────────────────────────────────────────────────────────────
@@ -2874,15 +2494,15 @@ _COLORS = {
 if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_fit.empty:
     fig_cmp = go.Figure()
 
-    # ── Historical raw arrivals (resampled to 15-min median) ─────────────────
+    # ── Historical raw arrivals (bucketed to BUCKET_MIN up to Now) ───────────
     if not raw_arrivals.empty:
         ra = raw_arrivals.copy()
         ra["ds"] = _to_local_series(ra["ds"])
         ra["arrivals"] = pd.to_numeric(ra["arrivals"], errors="coerce")
         ra = (
             ra.set_index("ds")
-            .resample("15min")
-            .median()
+            .resample(f"{BUCKET_MIN}min")
+            .sum()
             .fillna(0.0)
             .reset_index()
         )
@@ -2890,16 +2510,17 @@ if not raw_arrivals.empty or not full_model_preds.empty or not prophet_training_
             ra["ds"].apply(lambda t: is_open(pd.Timestamp(t))),
             None,
         )
+        ra = ra[ra["ds"] <= _now_local_ts()]
         ra = _insert_overnight_gaps(ra)
         fig_cmp.add_trace(go.Scatter(
             x=_plotly_local_iso_series(ra["ds"]),
             y=ra["arrivals"],
             mode="lines",
-            name="Raw data (15 min median)",
-            line=dict(color=_COLORS["raw"], width=1.5),
+            name=f"Raw arrivals ({BUCKET_MIN}-min)",
+            line=dict(color=_COLORS["raw"], width=1.8),
             fill="tozeroy",
             fillcolor="rgba(148, 163, 184, 0.18)",
-            hovertemplate="%{x|%d/%m %H:%M}<br>Raw arrivals (15 min): %{y:.1f}<extra></extra>",
+            hovertemplate="%{x|%d/%m %H:%M}<br>Raw arrivals (" + str(BUCKET_MIN) + " min): %{y:.1f}<extra></extra>",
         ))
 
     # ── Per-model saved forecasts (LSTM/XGBoost + fallback Prophet) ──────────
@@ -3258,7 +2879,7 @@ _show_live_wait_ref = st.checkbox(
     ),
 )
 _live_wait_ref_min = max(0.0, (queue_count / max(selected_lanes, 1) - 1.0) * service_minutes)
-_section_title(f"Predicted Wait - Next {FORECAST_DISPLAY_MIN} Min", f"{_active_model_label} arrivals · {_lane_phrase(selected_lanes)} open")
+_section_title("Predicted Wait - Wait Now", f"wait now: {_format_wait_capped(wait_0m)} · {_active_model_label} arrivals · {_lane_phrase(selected_lanes)} open")
 # Use base dwell (no residual correction) for all display values — correction only affects simulation
 _eff_dwell = float(_dwell_per_slot_base[0]) if _dwell_per_slot_base else service_minutes
 _dwell_source_label = (
@@ -3300,7 +2921,7 @@ _arrivals_note = (
     + (" Arrivals capped to observed rate." if _arrivals_capped else "")
 ) if not pred_df.empty else ""
 st.markdown(
-    f'<div class="detail-note">{lane_parameter_note} {lane_source_note} The trend below is recalculated in the dashboard '
+    f'<div class="detail-note">{lane_parameter_note} {lane_source_note} The trend below is calculated by the background worker '
     f'from the saved arrival forecast and current queue state.'
     + (f" {_arrivals_note}" if _arrivals_note else "")
     + (f" {_arrival_calib_note}" if _arrival_calib_note else "")
@@ -3308,24 +2929,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with st.expander("Arrival calibration debug", expanded=False):
-    if _arrival_calib_debug_rows:
-        st.dataframe(pd.DataFrame(_arrival_calib_debug_rows), width="stretch", hide_index=True)
-        if _arrival_calib_active:
-            st.markdown(
-                '<div class="detail-note">Current arrivals are using the calibrated saved ensemble forecast from '
-                '<code>queue_predictions.ensemble_yhat</code>.</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<div class="detail-note">Current arrivals are blended directly from the selected saved model columns, '
-                'so any coefficient in <code>calibration.json</code> only affects this view if '
-                '<code>ensemble_yhat</code> is the column being used.</div>',
-                unsafe_allow_html=True,
-            )
-    else:
-        st.info("No arrival forecast has been loaded yet.")
+with st.expander("Arrival calibration details", expanded=False):
+    _calibration_status = _shared_forecast.get("calibration", {})
+    st.write(_calibration_status.get("reason", "Waiting for a publication with calibration status."))
+    if _calibration_status.get("artifact_id"):
+        st.caption("Applied calibration: " + _calibration_status["artifact_id"])
+    st.caption("The background worker blends raw model forecasts, applies any validated correction once, then simulates waits. Settings changes apply on the next successful run.")
 
 if not pred_df.empty:
     pf_raw = pred_future.copy()
@@ -3418,10 +3027,14 @@ if not pred_df.empty:
             ))
     # Future forecast trace — only when current predictions exist
     if not pf.empty:
+        _pf_plot = pf.copy()
+        if wait_0m is not None:
+            _now_row = pd.DataFrame({"ds": [_now_local_ts()], "wait_min": [float(wait_0m)]})
+            _pf_plot = pd.concat([_now_row, _pf_plot]).sort_values("ds").reset_index(drop=True)
         fig_wait.add_trace(
             go.Scatter(
-                x=pf["ds"],
-                y=pf["wait_min"],
+                x=_pf_plot["ds"],
+                y=_pf_plot["wait_min"],
                 mode="lines",
                 name="Forecast",
                 line=dict(color="#2563eb", width=3),
@@ -3437,21 +3050,62 @@ if not pred_df.empty:
         annotation_position="top right",
         annotation_font=dict(size=10, color="#0f172a"),
     )
-    fig_wait.add_hline(
-        y=WAIT_BUSY_MIN,
-        line=dict(color="#ea580c", width=1.5, dash="dot"),
-        annotation_text=f"Queue building (>{WAIT_BUSY_MIN} min wait)",
-        annotation_position="top right",
-        annotation_font=dict(color="#c2410c", size=11),
-    )
-    fig_wait.add_hline(
-        y=WAIT_ALERT_MIN,
-        line=dict(color="#dc2626", width=1.5, dash="dot"),
-        annotation_text=f"Open a lane (>{WAIT_ALERT_MIN} min wait)",
-        annotation_position="top right",
-        annotation_font=dict(color="#b91c1c", size=11),
-    )
+    # Dynamic auto-scaling for Y axis based on actual visible data points
+    _wait_data_points = []
+    if not queue_hist.empty:
+        if "actual_wait" in _qh and "timestamp" in _qh:
+            _in_win = _qh[(_qh["timestamp"] >= _chart_x_start) & (_qh["timestamp"] <= _chart_x_end)]
+            _wait_data_points.extend(_in_win["actual_wait"].dropna().tolist())
+        elif "actual_wait" in _qh:
+            _wait_data_points.extend(_qh["actual_wait"].dropna().tolist())
+        if "actual_wait" in _qh_raw and "timestamp" in _qh_raw:
+            _in_win = _qh_raw[(_qh_raw["timestamp"] >= _chart_x_start) & (_qh_raw["timestamp"] <= _chart_x_end)]
+            _wait_data_points.extend(_in_win["actual_wait"].dropna().tolist())
+        elif "actual_wait" in _qh_raw:
+            _wait_data_points.extend(_qh_raw["actual_wait"].dropna().tolist())
+    if not full_model_preds.empty and "_hwp" in locals() and "wait_min" in _hwp:
+        if "ds" in _hwp:
+            _in_win = _hwp[(_hwp["ds"] >= _chart_x_start) & (_hwp["ds"] <= _chart_x_end)]
+            _wait_data_points.extend(_in_win["wait_min"].dropna().tolist())
+        else:
+            _wait_data_points.extend(_hwp["wait_min"].dropna().tolist())
+    if not pf.empty and "wait_min" in pf:
+        _wait_data_points.extend(pf["wait_min"].dropna().tolist())
     if _show_live_wait_ref and _live_wait_ref_min > 0:
+        _wait_data_points.append(_live_wait_ref_min)
+
+    _clean_wait_pts = [float(v) for v in _wait_data_points if pd.notnull(v) and np.isfinite(v)]
+    _peak_wait = max(_clean_wait_pts) if _clean_wait_pts else 0.0
+
+    # Auto-scale dynamically with comfortable headroom:
+    # If wait is low (e.g. morning/quiet), scale to 1.0 - 2.0 min so fluctuations are clearly visible.
+    # As queue/wait grows, smoothly expand to accommodate peaks and threshold lines.
+    if _peak_wait <= 0.8:
+        _y_max_wait = max(round(_peak_wait * 1.5, 1), 1.0)
+    elif _peak_wait < WAIT_BUSY_MIN:
+        _y_max_wait = max(round(_peak_wait * 1.3, 1), 2.0)
+    elif _peak_wait < WAIT_ALERT_MIN:
+        _y_max_wait = float(WAIT_ALERT_MIN) + 0.8
+    else:
+        _y_max_wait = round(_peak_wait * 1.25, 1)
+
+    if WAIT_BUSY_MIN <= _y_max_wait:
+        fig_wait.add_hline(
+            y=WAIT_BUSY_MIN,
+            line=dict(color="#ea580c", width=1.5, dash="dot"),
+            annotation_text=f"Queue building (>{WAIT_BUSY_MIN} min wait)",
+            annotation_position="top right",
+            annotation_font=dict(color="#c2410c", size=11),
+        )
+    if WAIT_ALERT_MIN <= _y_max_wait:
+        fig_wait.add_hline(
+            y=WAIT_ALERT_MIN,
+            line=dict(color="#dc2626", width=1.5, dash="dot"),
+            annotation_text=f"Open a lane (>{WAIT_ALERT_MIN} min wait)",
+            annotation_position="top right",
+            annotation_font=dict(color="#b91c1c", size=11),
+        )
+    if _show_live_wait_ref and 0 < _live_wait_ref_min <= _y_max_wait:
         fig_wait.add_hline(
             y=_live_wait_ref_min,
             line=dict(color="#0891b2", width=2, dash="dashdot"),
@@ -3467,6 +3121,14 @@ if not pred_df.empty:
                 _chart_x_start.strftime("%Y-%m-%d %H:%M:%S"),
                 _chart_x_end.strftime("%Y-%m-%d %H:%M:%S"),
             ],
+        ),
+        yaxis=dict(
+            range=[0, _y_max_wait],
+            rangemode="tozero",
+            autorange=False,
+            ticksuffix=" min",
+            gridcolor="#e2e8f0",
+            tickfont=dict(size=11, color="#475569"),
         ),
         showlegend=True,
         legend=dict(orientation="h", y=1.08, x=0, font=dict(size=11)),
@@ -3749,7 +3411,7 @@ else:
 
 # ── Lane scenarios ────────────────────────────────────────────────────────────
 
-_section_title("Lane Scenarios", f"wait at +10 min across 1–{MAX_LANES} lane options")
+_section_title("Lane Scenarios", f"wait now across 1–{MAX_LANES} lane options")
 lane_summary = (
     f"Forecast uses {_lane_phrase(selected_lanes)} (manually set). "
     f"Currently occupied: {detected_lanes} of {MAX_LANES} lanes."
@@ -3761,7 +3423,12 @@ if lane_waits:
     lane_cols = st.columns(len(scenario_lane_counts))
     for col, lane_count in zip(lane_cols, scenario_lane_counts):
         with col:
-            wait_value = lane_waits.get(lane_count, {}).get("wait_10m")
+            wait_value = lane_waits.get(lane_count, {}).get("wait_0m")
+            if wait_value is None:
+                wait_value = lane_waits.get(lane_count, {}).get("wait_now")
+            if wait_value is None and _forecast_queue_count is not None:
+                _backlog = waiting_backlog(_forecast_queue_count, lane_count)
+                wait_value = round(_backlog * service_minutes / max(lane_count, 1), 1)
             is_active = lane_count == selected_lanes
             st.markdown(
                 _lane_card_html(lane_count, wait_value, is_active=is_active),

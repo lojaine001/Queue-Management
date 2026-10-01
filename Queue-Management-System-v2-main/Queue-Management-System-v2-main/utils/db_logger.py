@@ -9,7 +9,7 @@ load_dotenv(find_dotenv(usecwd=True))
 # entry_time is passed in as a naive local datetime.now()-based value (see
 # queue_management_v2.py). Without pinning the session timezone, Postgres
 # interprets that naive value using its own default session timezone instead
-# of real local time, silently shifting every stored timestamp — the same
+# of real local time, silently shifting every stored timestamp -- the same
 # bug class already fixed in ensemble_predict.py's _connect().
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
 
@@ -30,9 +30,9 @@ class DBLogger:
             self.cursor.execute("SET timezone = %s", (STORE_TZ,))
             self._create_table()
             self.enabled = True
-            print(f"[DB] Connected to PostgreSQL ✓ (timezone={STORE_TZ})")
+            print(f"[DB] Connected to PostgreSQL [OK] (timezone={STORE_TZ})")
         except Exception as e:
-            print(f"[DB] WARNING: Could not connect to PostgreSQL — running without DB. Error: {e}")
+            print(f"[DB] WARNING: Could not connect to PostgreSQL -- running without DB. Error: {e}")
 
     def _create_table(self):
         self.cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
