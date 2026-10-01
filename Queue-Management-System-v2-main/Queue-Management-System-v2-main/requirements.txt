@@ -27,4 +27,10 @@ uniface
 pygame
 streamlit
 plotly
+<<<<<<< HEAD
 psutil>=5.9
+=======
+# Web Push (push_alert_checker.py) -- also installs py-vapid, which
+# provides the `vapid` CLI used to generate the VAPID keypair.
+pywebpush
+>>>>>>> dec15c7870f50b447d9b53408c9f14fa88d87078
