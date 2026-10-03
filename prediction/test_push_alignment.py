@@ -11,16 +11,35 @@ PUSH_PATH=Path(__file__).resolve().parents[1]/'Queue-Management-System-v2-main/Q
 API_PATH=PUSH_PATH.with_name('api.py')
 
 
+_CHECKER = None
+_API = None
+
+
 def load_checker():
-    stubs={}
+    global _CHECKER
+    if _CHECKER is not None:
+        return _CHECKER
+    stubs = {}
     if importlib.util.find_spec('pywebpush') is None:
-        stub=types.ModuleType('pywebpush');stub.webpush=lambda **k:None
-        stub.WebPushException=type('WebPushException',(Exception,),{})
-        stubs['pywebpush']=stub
-    with patch.dict(sys.modules,stubs):
-        spec=importlib.util.spec_from_file_location('push_alert_checker_test',PUSH_PATH)
-        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-    return module
+        stub = types.ModuleType('pywebpush')
+        stub.webpush = lambda **k: None
+        stub.WebPushException = type('WebPushException', (Exception,), {})
+        stubs['pywebpush'] = stub
+    with patch.dict(sys.modules, stubs):
+        spec = importlib.util.spec_from_file_location('push_alert_checker_test', PUSH_PATH)
+        _CHECKER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_CHECKER)
+    return _CHECKER
+
+
+def load_api():
+    global _API
+    if _API is not None:
+        return _API
+    spec = importlib.util.spec_from_file_location('forecast_api_push_test', API_PATH)
+    _API = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_API)
+    return _API
 
 
 class PushAlignmentTests(unittest.TestCase):
@@ -37,11 +56,10 @@ class PushAlignmentTests(unittest.TestCase):
             self.assertEqual(self.checker._wait_for_horizon(self.state,minutes),expected)
 
     def test_push_wait_equals_phone_endpoint(self):
-        spec=importlib.util.spec_from_file_location('forecast_api_push_test',API_PATH)
-        api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)
-        with patch.object(api,'_forecast_state',return_value=self.state):
-            for minutes in (0,5,10,15):
-                self.assertEqual(self.checker._wait_for_horizon(self.state,minutes),api.forecast_wait(minutes)['wait_min'])
+        api = load_api()
+        with patch.object(api, '_forecast_state', return_value=self.state):
+            for minutes in (0, 5, 10, 15):
+                self.assertEqual(self.checker._wait_for_horizon(self.state, minutes), api.forecast_wait(minutes)['wait_min'])
 
     def test_alert_decision_uses_same_value_as_status(self):
         # an alert at threshold 5 fires exactly when the published wait is ALERT-level
