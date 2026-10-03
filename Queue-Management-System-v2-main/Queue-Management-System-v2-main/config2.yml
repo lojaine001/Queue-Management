@@ -1,7 +1,9 @@
 # (conf, area, ratio)
 debug_mode: True
 
-expect_fps: 12
+# Loop cap used only when the stream does not report its FPS.
+# Track ages are measured per frame (utils/track_clock.py), not derived from this.
+processing_fps: 12
 
 max_age: 6
 

@@ -206,7 +206,7 @@ read frame
 |---|---|---|
 | `max_distance_between_points` | 6 | IoU distance threshold |
 | `max_age` | 6 | Frames to keep a track without detection |
-| `expect_fps` | 5 | Used to convert `obj.age` to seconds |
+| `processing_fps` | 12 | Loop cap if the stream reports no FPS; track ages in seconds are measured per frame (`utils/track_clock.py`) |
 | `tip_offset` | 0.5 | Fraction along box width for ROI tip point |
 | `min_elapsed_time` | 1 | Minimum dwell (seconds) for a DB insert |
 | `debug_mode` | true | Track IDs on overlay + debug snapshots |
@@ -592,7 +592,7 @@ The `_day_hours(weekday)` helper in `prediction/core.py` resolves these override
 | Key | Default | Description |
 |---|---|---|
 | `debug_mode` | `true` | Overlay track IDs; save debug snapshots |
-| `expect_fps` | `5` | Expected processing FPS |
+| `processing_fps` | `0` | Main-loop cap (0 = unlimited); track ages are measured per frame |
 | `max_age` | `6` | Frames before a lost track is dropped |
 | `max_distance_between_points` | `6` | IoU distance threshold |
 | `tip_offset` | `0.5` | ROI tip-point horizontal offset (0–1) |

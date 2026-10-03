@@ -6,7 +6,7 @@ YOLOv9 head-pose detector with Norfair tracking and TimescaleDB logging.
 
 - Detects heads inside one of the configured ROI polygons using a YOLOv9 ONNX model
 - Tracks head detections across frames with Norfair (IoU-based)
-- Hides short-lived tracks until they survive the confirmation window `max_age / expect_fps`
+- Hides short-lived tracks until they survive the confirmation window (`max_age` frames at the measured frame time)
 - Measures dwell from the first tracked frame until the track dies
 - Inserts at most one DB row per dead track after applying rejection rules
 - Writes periodic `queue_state_snapshots` (queue count, avg/max dwell, lanes)
@@ -22,8 +22,9 @@ For a dead track to be inserted into the DB, all of the following must be true:
 - the track had a valid ROI assignment
 - there is no still-active track in the same ROI with a higher dwell time
 - the track was observed for long enough:
-  - `active_tracked_sec = track_hits / expect_fps`
-  - the insert only happens when `active_tracked_sec > max_age / expect_fps`
+  - `active_tracked_sec` = sum of the measured durations of the frames where the track got a matched detection
+  - the insert only happens when `active_tracked_sec > max_age × measured seconds per frame`
+  - frame durations are measured between successive `tracker.update()` calls (`utils/track_clock.py`), so they include detection, tracking, drawing and any `processing_fps` throttle
 
 If any of those checks fail, the dead track is rejected and no DB row is written.
 
@@ -130,7 +131,7 @@ python main.py --no-view-img
 | File | Key settings |
 |---|---|
 | `config.yml` | `camID`, `ip_address`, RTSP credentials, ONNX model path, ROI polygon |
-| `config2.yml` | `max_age`, `max_distance_between_points`, `expect_fps`, `snapshot_interval`, `debug_mode`, `show_rejected_track_overlay` |
+| `config2.yml` | `max_age`, `max_distance_between_points`, `processing_fps`, `snapshot_interval`, `debug_mode`, `show_rejected_track_overlay` |
 
 ## Camera ID note
 
@@ -145,6 +146,6 @@ Use `camID: SIM_live_test_video` when running against a local test video file so
 
 ## Useful Config
 
-- `max_age / expect_fps` defines the display and confirmation window for head tracks
+- `max_age` (frames) × the measured seconds per frame defines the display and confirmation window for head tracks; track ages are measured, there is no `expect_fps` to tune
 - `show_rejected_track_overlay: False` keeps rejected dead tracks from flashing red
 - set `show_rejected_track_overlay: True` if you want the red rejection bbox back for debugging

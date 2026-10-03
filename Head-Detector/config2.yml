@@ -24,11 +24,6 @@ openvino_precision: FP16   # FP32 | FP16 (use FP16 on NPU/GPU)
 # Main-loop throttle. Set to 0 for no artificial cap.
 processing_fps: 0
 
-# Used to convert tracker age (frames) into seconds for confirmation/dwell logic.
-# Keep this aligned with the actual processed FPS unless you intentionally want
-# different timing semantics.
-expect_fps: 8
-
 max_age: 4
 
 max_distance_between_points: 6

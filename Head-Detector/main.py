@@ -69,6 +69,7 @@ from shapely.geometry import Polygon, Point
 
 from utils.queue_utils import get_config, create_logger, plot_one_box, iou, write_text
 from utils.queue_utils import get_datetime_str, PersonDetectionLogger
+from utils.track_clock import FrameClock, TrackClock
 from utils.db_logger import DBLogger
 from utils.equipment_classifier import EquipmentClassifier, EQUIPMENT_COLOURS, EQUIPMENT_NONE
 from utils.owlv2_detector import OWLv2Detector
@@ -339,8 +340,7 @@ def main():
     show_ids   = config2.get('show_ids', False)
     max_distance_between_points = config2.get('max_distance_between_points', 2)
     max_age = config2.get('max_age', 10)
-    expect_fps = float(config2.get('expect_fps', 3))
-    processing_fps = float(config2.get('processing_fps', expect_fps))
+    processing_fps = float(config2.get('processing_fps', 0))
     snapshot_class_only = config2.get('snapshot_classes', [])
     openvino_device     = config2.get('openvino_device', 'CPU').upper()     # CPU / GPU / MYRIAD
     openvino_precision  = config2.get('openvino_precision', 'FP32').upper() # FP32 / FP16
@@ -543,11 +543,6 @@ def main():
         print(Color.CYAN(f'[PERF] Target processing FPS : {thread_fps:.2f}'))
     else:
         print(Color.CYAN('[PERF] Target processing FPS : unlimited'))
-    if expect_fps != thread_fps and thread_fps > 0:
-        print(Color.YELLOW(
-            f'[PERF] WARNING: expect_fps={expect_fps:.2f} but processing_fps={thread_fps:.2f}. '
-            'Track age and dwell calculations use expect_fps, so keep them aligned unless you intentionally want different timing.'
-        ))
 
     no_dets = len(os.listdir(save_path)) + 1
     no_snapshots = len(os.listdir(snapshot_path)) + 1
@@ -561,7 +556,8 @@ def main():
     last_dwell_times = {}    # last time update_dwell was called per track ID
     track_conf = {}          # initial confidence per track ID (stored at first detection for DB insert at death)
     track_roi  = {}          # roi_idx per track ID (assigned at first confirmation)
-    track_hits = {}          # count of successful detection associations
+    frame_clock = FrameClock()  # measured seconds per processed frame
+    track_clock = TrackClock()  # per-track age / matched-detection seconds from frame_clock
     track_last_det_id = {}   # handle for tracking new associations
     track_last_bbox = {}     # last estimated bbox per track ID
     prev_active_ids: set = set()
@@ -680,6 +676,10 @@ def main():
                     frame_detections.append(TrackerDetection(bbox=box, score=float(conf_val), data=data_payload))
 
             tracked_objects = tracker.update(detections=frame_detections)
+            frame_clock.tick()
+            # Tracks are confirmed after max_age frames of matched detections;
+            # express that window in seconds at the measured frame rate.
+            min_confirmed_track_sec = frame_clock.frames_to_sec(max_age)
 
             current_time = time.time()
             confirmed_visual_tracks = []
@@ -710,12 +710,12 @@ def main():
                 track_id = obj.global_id
 
                 curr_det_id = id(obj.last_detection) if obj.last_detection else None
-                if track_id not in track_last_det_id:
+                first_seen = track_id not in track_last_det_id
+                # A hit = this frame associated a new detection with the track
+                hit = curr_det_id is not None and (first_seen or curr_det_id != track_last_det_id[track_id])
+                if first_seen or hit:
                     track_last_det_id[track_id] = curr_det_id
-                    track_hits[track_id] = 1 if curr_det_id else 0
-                elif curr_det_id != track_last_det_id[track_id] and curr_det_id is not None:
-                    track_last_det_id[track_id] = curr_det_id
-                    track_hits[track_id] += 1
+                time_elapsed = track_clock.update(track_id, obj.age, frame_clock, hit)
 
 
                 # Always record start time so entry timestamp is correct
@@ -727,8 +727,6 @@ def main():
                 # Skip logging and display until track has been alive for min_delay seconds
                 if track_dur < min_delay:
                     continue
-
-                time_elapsed = float(obj.age / expect_fps)
 
                 person_conf = 0.0
                 head_direction = None
@@ -743,8 +741,7 @@ def main():
                 by2: int = int(_raw[1][1])  # type: ignore[arg-type]
                 track_last_bbox[track_id] = (bx1, by1, bx2, by2)
 
-                active_tracked_sec = track_hits.get(track_id, 0) / expect_fps
-                min_confirmed_track_sec = max_age / expect_fps
+                active_tracked_sec = track_clock.hits(track_id)
                 if active_tracked_sec <= min_confirmed_track_sec:
                     if track_dur >= QUEUE_SNAPSHOT_MIN_DWELL_SEC:
                         snap_roi_idx = (obj.last_detection.data.get("roi_idx")
@@ -975,7 +972,7 @@ def main():
                         1
                         for aid in siblings
                         if aid in track_start_times
-                        and (track_hits.get(aid, 0) / expect_fps) > (max_age / expect_fps)
+                        and track_clock.hits(aid) > min_confirmed_track_sec
                     )
                     if siblings:
                         sibling_dwells = [current_time - track_start_times[aid] for aid in siblings if aid in track_start_times]
@@ -1000,13 +997,12 @@ def main():
                 entry_time = datetime.fromtimestamp(track_start_times[tid])
                 final_dwell = current_time - track_start_times[tid]
                 
-                active_tracked_sec = track_hits.get(tid, 0) / expect_fps
-                min_req_sec = max_age / expect_fps
-                
-                if active_tracked_sec <= min_req_sec:
+                active_tracked_sec = track_clock.hits(tid)
+
+                if active_tracked_sec <= min_confirmed_track_sec:
                     systems_logger.debug(
                         f"[DB] Skipped id={tid} | lane={lane_name} | "
-                        f"active_sec={active_tracked_sec:.1f}s <= threshold={min_req_sec:.1f}s"
+                        f"active_sec={active_tracked_sec:.2f}s <= threshold={min_confirmed_track_sec:.2f}s"
                     )
                     if show_rejected_track_overlay and dead_bbox is not None:
                         recent_track_outcomes[tid] = {
@@ -1053,7 +1049,7 @@ def main():
                 last_dwell_times.pop(tid, None)
                 track_conf.pop(tid, None)
                 track_roi.pop(tid, None)
-                track_hits.pop(tid, None)
+                track_clock.forget(tid)
                 track_last_det_id.pop(tid, None)
                 track_last_bbox.pop(tid, None)
                 recent_track_outcomes.pop(tid, None)

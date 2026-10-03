@@ -206,7 +206,7 @@ class TrackedObject:
         .global_id       — unique monotonic integer ID  (same as norfair)
         .estimate        — np.ndarray shape (2, 2): [[x1,y1],[x2,y2]]
         .last_detection  — object with .data dict (or None)
-        .age             — frames alive  (used as age / expect_fps)
+        .age             — frames alive  (seeds TrackClock age in seconds)
     """
     __slots__ = ("global_id", "estimate", "last_detection", "age")
 

@@ -29,6 +29,7 @@ from utils.queue_utils import (
     get_datetime_str, write_text, PersonDetectionLogger
 )
 from utils.yolov9 import YOLOv9
+from utils.track_clock import FrameClock, TrackClock
 
 from uniface import set_cache_dir
 set_cache_dir(os.path.join(os.getcwd(), 'models'))
@@ -340,7 +341,9 @@ def main():
     save_snapshots = config2.get('save_snapshots', True)
     max_distance_between_points = config2.get('max_distance_between_points', 80)
     max_age = config2.get('max_age', 10)
-    expect_fps = config2.get('expect_fps', 3)
+    # Loop throttle fallback when the stream does not report its FPS.
+    # Track ages are measured (utils/track_clock.py), not derived from this.
+    processing_fps = config2.get('processing_fps', config2.get('expect_fps', 3))
     min_elapsed_time = config2.get('min_elapsed_time', 1)
     SNAPSHOT_INTERVAL = config2.get('snapshot_interval', 10)
     counting_mode        = config2.get('counting_mode', 'roi').lower()
@@ -436,15 +439,15 @@ def main():
     thread = get_capture_thread(cap_url=link, cap_loop=True)
     thread.start()
 
-    # Determine processing/expected FPS from the video stream itself
+    # Cap the processing loop at the video stream's own FPS
     stream_fps = thread.get_fps()
     if stream_fps > 0:
-        expect_fps = stream_fps
-        print(f"[PERF] Detected video stream FPS: {expect_fps}")
+        processing_fps = stream_fps
+        print(f"[PERF] Detected video stream FPS: {processing_fps}")
     else:
-        print(f"[PERF] Could not detect stream FPS. Using expect_fps: {expect_fps}")
+        print(f"[PERF] Could not detect stream FPS. Using processing_fps: {processing_fps}")
 
-    thread_fps = cast(int, expect_fps)
+    thread_fps = cast(int, processing_fps)
     print(f"[PERF] Processing loop FPS cap: {thread_fps}")
 
     no_dets = len(os.listdir(save_path)) + 1
@@ -463,6 +466,8 @@ def main():
     _t_frames_counted = 0
     _t_last_report = time.time()
     _T_REPORT_EVERY = 30.0     # seconds between timing reports
+    frame_clock = FrameClock()  # measured seconds per processed frame
+    track_clock = TrackClock()  # per-track age in seconds from frame_clock
     track_data = {}        # track_id -> {gender, age, confidence, best_conf} accumulated while alive
     prev_track_ids = set() # track_ids active in the previous frame
     counted_entry_times = deque(db.get_today_entry_timestamps(camera_id=str(camID)))
@@ -627,6 +632,7 @@ def main():
             _t0 = time.time()
             tracked_objects = tracker.update(detections=norfair_detections)
             _t_track += time.time() - _t0
+            frame_clock.tick()
 
             current_time = time.time()
             current_track_ids = set()
@@ -740,7 +746,7 @@ def main():
                         face_analyzed_tracks.add(track_id)
 
                 track_dur = current_time - track_start_times[track_id]
-                time_elapsed = float(obj.age / expect_fps)
+                time_elapsed = track_clock.update(track_id, obj.age, frame_clock)
 
                 if track_id not in person_loggers:
                     p_logger = PersonDetectionLogger(detection_logger, camID, person_conf)
@@ -767,6 +773,7 @@ def main():
                     track_data.pop(track_id, None)
                     person_loggers.pop(track_id, None)
                     band_candidate.pop(track_id, None)
+                    track_clock.forget(track_id)
                     continue
                 # In line_crossing mode, the person was already verified crossing the line with 3-frame confirmation.
                 # Threshold should not reject normal walking customers who traverse the entrance quickly (e.g. 0.5s - 2s).
@@ -809,6 +816,7 @@ def main():
                 track_crossed.discard(track_id)
                 face_analyzed_tracks.discard(track_id)
                 band_candidate.pop(track_id, None)
+                track_clock.forget(track_id)
 
             prev_track_ids = current_track_ids
 
@@ -867,6 +875,7 @@ def main():
                 report = (
                     f"[TIMING] {n} frames over {_T_REPORT_EVERY:.0f}s | "
                     f"effective FPS={effective_fps:.2f} | "
+                    f"frame={frame_clock.avg_dt * 1000:.0f}ms (measured, used for track age) | "
                     f"loop={avg_total:.0f}ms | "
                     f"YOLO={avg_detect:.0f}ms | "
                     f"tracker={avg_track:.0f}ms | "

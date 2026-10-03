@@ -196,7 +196,7 @@ read frame
 |---|---|---|
 | `max_distance_between_points` | 6 | IoU distance threshold for association |
 | `max_age` | 6 | Frames to keep a track alive without detection |
-| `expect_fps` | 5 | Used to convert `obj.age` to seconds |
+| `processing_fps` | 12 | Loop cap if the stream reports no FPS; track ages in seconds are measured per frame (`utils/track_clock.py`) |
 | `tip_offset` | 0.5 | Fraction along box width for ROI tip point (0 = left edge, 1 = right edge) |
 | `debug_mode` | true | Shows track IDs on overlay and saves snapshots |
 | `snapshot_interval` | 10 | Seconds between `queue_state_snapshots` writes |
@@ -768,7 +768,7 @@ ORDER BY predicted_at;
 | Key | Default | Description |
 |---|---|---|
 | `debug_mode` | `true` | Overlay track IDs; save debug snapshots |
-| `expect_fps` | `5` | Expected processing FPS (used for age-in-seconds calc) |
+| `processing_fps` | `0` | Main-loop cap (0 = unlimited); track ages in seconds are measured per frame, not derived from an FPS setting |
 | `max_age` | `6` | Frames before a lost track is dropped |
 | `max_distance_between_points` | `6` | IoU distance threshold for tracker |
 | `tip_offset` | `0.5` | ROI test point horizontal offset (0–1) |
