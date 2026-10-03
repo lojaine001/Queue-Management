@@ -282,9 +282,11 @@ $fails = @($results | Where-Object Status -eq "FAIL").Count
 $warns = @($results | Where-Object Status -eq "WARN").Count
 $report = Join-Path $logDir ("regression_{0:yyyyMMdd_HHmmss}.txt" -f (Get-Date))
 $results | Format-Table -AutoSize | Out-String -Width 300 | Set-Content -Path $report -Encoding UTF8
-# One-line summary of the latest run, shown by status_all.ps1
-"{0:yyyy-MM-dd HH:mm}|{1}|{2}|{3}|{4}" -f (Get-Date), @($results | Where-Object Status -eq "PASS").Count, $warns, $fails, $report |
-    Set-Content -Path (Join-Path $logDir "regression_latest.txt") -Encoding UTF8
+# One-line summary of the latest full run, shown by status_all.ps1
+if (-not $StaticOnly) {
+    "{0:yyyy-MM-dd HH:mm}|{1}|{2}|{3}|{4}" -f (Get-Date), @($results | Where-Object Status -eq "PASS").Count, $warns, $fails, $report |
+        Set-Content -Path (Join-Path $logDir "regression_latest.txt") -Encoding UTF8
+}
 Write-Host "`n==========================================================" -ForegroundColor Cyan
 $summaryColor = if ($fails) { "Red" } elseif ($warns) { "Yellow" } else { "Green" }
 Write-Host ("  {0} PASS, {1} WARN, {2} FAIL   (report: {3})" -f @($results | Where-Object Status -eq "PASS").Count, $warns, $fails, $report) -ForegroundColor $summaryColor

@@ -1,0 +1,2 @@
+# Git runs hooks with sh: keep them LF on Windows checkouts
+tools/git-hooks/* text eol=lf
