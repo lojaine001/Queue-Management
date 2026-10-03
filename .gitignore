@@ -48,3 +48,4 @@ Thumbs.db
 # OpenVINO compiled-model cache (NPU/GPU)
 ov_cache/
 *.blob
+Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots/latest_checkout.jpg
