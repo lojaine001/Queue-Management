@@ -63,3 +63,6 @@ iqms_iphone.png
 
 # Unused code kept locally for reference (see _backup/README.md)
 _backup/
+
+# Safety copy written by tools/restore_forecaster.ps1
+*.before_restore
