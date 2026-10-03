@@ -1,0 +1,3 @@
+test_cache_reuses_new_data_but_respects_config_and_age (prediction.test_model_bundle.BundleTests)
+test_expired_forecast_is_rejected (prediction.test_publication.PublicationTests)
+test_only_future_rows_published_and_vintage_committed_together (prediction.test_publication.PublicationTests)
