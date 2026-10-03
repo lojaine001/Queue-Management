@@ -1988,7 +1988,7 @@ if (_th_ch, _th_cm) != _default_close or (_th_oh, _th_om) != _default_open:
 context_bits = [
     f"{lane_source_label}: {_lane_phrase(detected_lanes)}",
     f"Forecast parameter: {_lane_phrase(selected_lanes)}",
-    f"Wait +30 min: {_format_wait(wait_30m)}",
+    f"Wait +10 min: {_format_wait(wait_10m)}",
     _hours_pill,
 ]
 if snapshot_ts_local is not None:
