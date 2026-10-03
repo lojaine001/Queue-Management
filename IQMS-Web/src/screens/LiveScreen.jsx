@@ -1,0 +1,551 @@
+import { useEffect, useRef, useState } from 'react';
+import { useApi } from '../hooks/useApi';
+import { API_URL } from '../config';
+import { useLang } from '../context/LanguageContext';
+import { useToast } from '../context/ToastContext';
+import CameraPlaceholder from '../components/CameraPlaceholder';
+import UpdatedAgo from '../components/UpdatedAgo';
+import Skeleton from '../components/Skeleton';
+import {
+  requestNotificationPermission, notificationPermissionState, showAppNotification,
+  subscribeToPush, unsubscribeFromPush,
+} from '../notify';
+
+const SNAP_INTERVAL = 30000;
+const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
+// 0/5/10/15 all come from /forecast (dashboard_state — the exact numbers
+// the dashboard itself shows, guaranteed to match). +20 is the one horizon
+// the dashboard doesn't keep on hand, so it's the only one computed from
+// the saved forecast (/forecast/wait) instead.
+const HORIZON_PRESETS = [0, 5, 10, 15, 20];
+
+// Count-driven lane color: 0 = idle/closed, 1 = green, 2-3 = orange, 4+ = red
+function countColor(count) {
+  if (!count) return { color: '#484f58', bg: '#21262d', borderWidth: 4 };
+  if (count === 1) return { color: '#3fb950', bg: '#1a2e22', borderWidth: 4 };
+  if (count <= 3) return { color: '#db6d28', bg: '#2d2218', borderWidth: 4 };
+  return { color: '#ff3b30', bg: '#3a1210', borderWidth: 6 };
+}
+
+// Renders how many people are actually in the lane, not just whether it's
+// busy -- inline SVG (no icon library needed) so it stays self-contained
+// and, unlike an emoji, is actually colorable. Grey outline when empty,
+// yellow otherwise; 3+ uses a group glyph with the middle person drawn
+// last so it sits in front of the two behind it.
+function peopleIcon(count, size = 18) {
+  const YELLOW = '#F5B82E';
+  const GREY = '#5A5F6A';
+
+  if (count <= 0) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={GREY} strokeWidth="1.8" aria-hidden="true">
+        <circle cx="12" cy="7" r="4" />
+        <path d="M12 13c-4.42 0-8 2.69-8 6v2h16v-2c0-3.31-3.58-6-8-6z" />
+      </svg>
+    );
+  }
+  if (count === 1) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill={YELLOW} aria-hidden="true">
+        <circle cx="12" cy="7" r="4" />
+        <path d="M12 13c-4.42 0-8 2.69-8 6v2h16v-2c0-3.31-3.58-6-8-6z" />
+      </svg>
+    );
+  }
+  if (count === 2) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 30 22" fill={YELLOW} aria-hidden="true">
+        <circle cx="10" cy="7" r="3.6" />
+        <path d="M10 12c-3.9 0-7 2.4-7 5.4v1.6h14v-1.6c0-3-3.1-5.4-7-5.4z" />
+        <circle cx="20" cy="7" r="3.6" />
+        <path d="M20 12c-3.9 0-7 2.4-7 5.4v1.6h14v-1.6c0-3-3.1-5.4-7-5.4z" />
+      </svg>
+    );
+  }
+  // 3+ : group icon, middle person larger and drawn on top.
+  return (
+    <svg width={size} height={size} viewBox="0 0 34 24" fill={YELLOW} aria-hidden="true">
+      <circle cx="8" cy="8" r="3.2" />
+      <path d="M8 13c-3.5 0-6.2 2.2-6.2 5v1.8h12.4v-1.8c0-2.8-2.7-5-6.2-5z" />
+      <circle cx="26" cy="8" r="3.2" />
+      <path d="M26 13c-3.5 0-6.2 2.2-6.2 5v1.8h12.4v-1.8c0-2.8-2.7-5-6.2-5z" />
+      <circle cx="17" cy="6.5" r="4.2" />
+      <path d="M17 11.5c-4.6 0-8.3 2.8-8.3 6.3v2.2h16.6v-2.2c0-3.5-3.7-6.3-8.3-6.3z" />
+    </svg>
+  );
+}
+
+function LaneCard({ lane, t }) {
+  const count = lane.waiting ?? 0;
+  const isClosed = lane.status === 'closed';
+  const st = countColor(isClosed ? 0 : count);
+  // Ring color stays status-driven (green/orange/grey/red) -- only the
+  // icon inside it now reflects occupancy count, per spec.
+  const iconColor = isClosed ? '#8b949e' : st.color;
+  const fillMax = lane.fill_max || 10;
+  const fillRatio = isClosed ? 0 : Math.min(1, count / fillMax);
+
+  return (
+    <div style={{ ...s.laneCard, borderLeftColor: st.color, borderLeftWidth: st.borderWidth, background: st.bg }}>
+      <div style={s.laneLeft}>
+        <div style={{ ...s.laneIcon, background: iconColor + '33', border: `2px solid ${iconColor}` }}>
+          {peopleIcon(isClosed ? 0 : count, 18)}
+        </div>
+        <div>
+          <div style={s.laneName}>LANE {Number(lane.lane_id) + 1}</div>
+          <div style={s.laneSub}>{lane.lane_type || 'Caisse standard'}</div>
+        </div>
+      </div>
+      <div style={s.laneFillTrack}>
+        <div style={{ ...s.laneFillBar, width: `${fillRatio * 100}%`, background: st.color }} />
+      </div>
+      <div style={s.laneRight}>
+        <span style={{ ...s.laneCount, color: isClosed ? '#484f58' : '#e6edf3' }}>
+          {isClosed ? 0 : count}
+        </span>
+        <span style={s.laneCountSub}>{t.clients}</span>
+      </div>
+    </div>
+  );
+}
+
+function Toggle({ on, onChange }) {
+  return (
+    <button
+      onClick={() => onChange(!on)}
+      style={{ ...s.toggle, background: on ? '#3fb950' : '#30363d' }}
+    >
+      <span style={{ ...s.toggleKnob, transform: on ? 'translateX(18px)' : 'translateX(0)' }} />
+    </button>
+  );
+}
+
+function AlertsBar({ enabled, onToggle, threshold, onThreshold, notifyPermission, onEnableNotifications, t }) {
+  // Permission must be requested from a direct click, not automatically --
+  // so this button is the only place that ever asks. Hidden once granted
+  // (nothing to do) or once denied (asking again wouldn't show a prompt,
+  // it'd just silently fail -- the browser remembers "denied" until the
+  // user changes it themselves in site settings).
+  const showEnableButton = notifyPermission === 'default';
+
+  return (
+    <div style={s.alertsBar}>
+      <span style={s.bellIcon}>🔔</span>
+      <span style={s.alertsLabel}>{t.alertsLabel}</span>
+      <Toggle on={enabled} onChange={onToggle} />
+      <span style={s.divider} />
+      <span style={s.seuilLabel}>{t.seuilLabel}</span>
+      <input
+        type="range"
+        min={1} max={15} step={1}
+        value={threshold}
+        onChange={e => onThreshold(Number(e.target.value))}
+        style={s.slider}
+      />
+      <span className="mono" style={s.seuilValue}>{threshold} min</span>
+      {showEnableButton && (
+        <>
+          <span style={s.divider} />
+          <button onClick={onEnableNotifications} style={s.enableNotifBtn}>
+            {t.enableNotifications}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function HorizonPicker({ value, onChange, t }) {
+  return (
+    <div style={s.horizonRow}>
+      <span style={s.horizonRowLabel}>{t.horizonLabel}</span>
+      {HORIZON_PRESETS.map(m => (
+        <button
+          key={m}
+          onClick={() => onChange(m)}
+          style={{ ...s.horizonChip, ...(value === m ? s.horizonChipActive : {}) }}
+        >
+          {m === 0 ? t.horizonLive : `+${m}m`}
+        </button>
+      ))}
+      {/* 0/5/10/15 read the same source the dashboard itself writes to, so
+          those four always agree exactly. +20 is the one value the dashboard
+          doesn't keep on hand, so it's computed from the saved forecast
+          instead — the only case where a difference is possible. */}
+      {value === 20 && <div style={s.horizonSourceNote}>{t.horizonSourceNote}</div>}
+    </div>
+  );
+}
+
+function Gauge({ current, label, t }) {
+  const clamp = v => Math.max(0, Math.min(GAUGE_MAX_MIN, v ?? 0));
+  const currentPct = (clamp(current) / GAUGE_MAX_MIN) * 100;
+  // Zone the marker currently sits in, purely for the value label color
+  const zoneColor = (() => {
+    const v = clamp(current);
+    if (v >= 6) return '#f85149';
+    if (v >= 4) return '#db6d28';
+    if (v >= 2) return '#d29922';
+    return '#3fb950';
+  })();
+
+  return (
+    <div style={s.gaugeWrap}>
+      <div style={s.gaugeLabel}>{label ?? t.avgWait}</div>
+      <div style={s.gaugeBody}>
+        <div style={s.gaugeBar}>
+          <div style={{ ...s.gaugeZone, background: '#f85149' }} />
+          <div style={{ ...s.gaugeZone, background: '#db6d28' }} />
+          <div style={{ ...s.gaugeZone, background: '#d29922' }} />
+          <div style={{ ...s.gaugeZone, background: '#3fb950' }} />
+        </div>
+
+        {/* Live wait — red marker, value sits right next to it at its actual position */}
+        <div style={{ ...s.markerGroup, left: -70, bottom: `calc(${currentPct}% - 8px)` }}>
+          <span className="mono" style={{ fontSize: 14, fontWeight: 700, color: zoneColor }}>
+            {current != null ? `${Math.round(current)}m` : '—'}
+          </span>
+          <span style={{ ...s.marker, ...s.markerRed }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function LiveScreen() {
+  const { t } = useLang();
+  const showToast = useToast();
+
+  const [alertsEnabled, setAlertsEnabled] = useState(
+    () => localStorage.getItem('iqms_alerts_enabled') === 'true'
+  );
+  const [threshold, setThreshold] = useState(
+    () => Number(localStorage.getItem('iqms_alert_threshold')) || 8
+  );
+  const [notifyPermission, setNotifyPermission] = useState(() => notificationPermissionState());
+  const handleEnableNotifications = () => {
+    // The only place permission is ever requested -- a direct result of
+    // this click, which is what mobile browsers require to show the
+    // prompt at all rather than silently ignoring it.
+    requestNotificationPermission().then(setNotifyPermission);
+  };
+  const [openCams, setOpenCams] = useState([]);
+  const toggleCam = id => setOpenCams(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  // Tracks the rising edge for the single alert below, plus the horizon it
+  // was last computed against (see that effect for why the horizon matters).
+  const wasAlertOverRef = useRef(false);
+  const prevHorizonRef = useRef(0);
+
+  // Which "Predicted Wait" tile is shown in the gauge below — one of the
+  // HORIZON_PRESETS values (0/5/10/15/20 minutes from now).
+  const [horizonMin, setHorizonMin] = useState(0);
+
+  useEffect(() => {
+    localStorage.setItem('iqms_alerts_enabled', String(alertsEnabled));
+  }, [alertsEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('iqms_alert_threshold', String(threshold));
+  }, [threshold]);
+
+  // Keeps the server-side push subscription in sync with this device's own
+  // settings -- fires on first grant, and again any time threshold/horizon
+  // changes (push-subscribe is an upsert, and pushManager.subscribe()
+  // returns the existing subscription rather than re-prompting if one
+  // already exists, so this is cheap to call repeatedly). Unsubscribes if
+  // alerts get turned off, so a disabled alert can't still push.
+  useEffect(() => {
+    if (notifyPermission !== 'granted') return;
+    if (!alertsEnabled) {
+      unsubscribeFromPush(API_URL);
+      return;
+    }
+    subscribeToPush(API_URL, threshold, horizonMin);
+  }, [notifyPermission, alertsEnabled, threshold, horizonMin]);
+
+  const { data, loading, error, lastUpdated } = useApi([
+    `${API_URL}/live-lanes`,
+    `${API_URL}/alerts`,
+  ]);
+  const [lanesData] = data;
+
+  const { data: snapData } = useApi([
+    `${API_URL}/snapshot/entrance`,
+    `${API_URL}/snapshot/checkout`,
+  ], SNAP_INTERVAL);
+  const [entranceSnap, checkoutSnap] = snapData;
+
+  const lanes = lanesData?.lanes ?? [];
+  const snapshot = lanesData?.snapshot ?? {};
+
+  // The dashboard's own numbers, for 0/5/10/15 — this is the same
+  // dashboard_state row the Streamlit dashboard itself reads, so these four
+  // values are guaranteed to agree with it exactly, not just approximately.
+  const { data: forecastData } = useApi([`${API_URL}/forecast`]);
+  const [forecastState] = forecastData;
+
+  // +20 is the one horizon the dashboard doesn't keep a saved value for, so
+  // it's the only one computed from the saved forecast instead — only
+  // fetched when actually selected, so this adds no load otherwise.
+  const { data: forecast20Data } = useApi(
+    horizonMin === 20 ? [`${API_URL}/forecast/wait?minutes=20`] : []
+  );
+  const [forecastWait20] = forecast20Data;
+
+  const gaugeValue = {
+    0:  forecastState?.wait_now_min,
+    5:  forecastState?.wait_5_min,
+    10: forecastState?.wait_10_min,
+    15: forecastState?.wait_15_min,
+    20: forecastWait20?.wait_min,
+  }[horizonMin];
+  const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
+
+  // Single alert, tied to whichever horizon is currently selected — watches
+  // gaugeValue, the exact same number the gauge itself displays, so the
+  // alert can never disagree with what's on screen. (Previously: two
+  // independent hardcoded alerts — one silently watching the 5-min forecast
+  // mislabeled as "current", one always fixed to +15min regardless of the
+  // horizon picker — which could both fire in the same poll and stack as
+  // two near-identical bars.)
+  //
+  // Fires only on the rising edge (crossing into alert), not every refresh.
+  // While disabled, keep resetting the tracker so turning alerts back on
+  // always gets a fresh chance to fire if already over threshold — otherwise
+  // a crossing that happened while OFF silently "used up" the rising edge.
+  // A horizon switch changes what gaugeValue *means* (a different metric),
+  // so it resets the tracker too -- but *before* evaluating, not instead of
+  // it: picking a horizon that's already over threshold should alert right
+  // away, not go silent until the value happens to dip and rise again.
+  useEffect(() => {
+    const horizonChanged = prevHorizonRef.current !== horizonMin;
+    prevHorizonRef.current = horizonMin;
+    if (horizonChanged) {
+      wasAlertOverRef.current = false;
+    }
+    if (!alertsEnabled) {
+      wasAlertOverRef.current = false;
+      return;
+    }
+    if (gaugeValue == null) return;
+    const isOver = gaugeValue >= threshold;
+    if (isOver && !wasAlertOverRef.current) {
+      const message = t.alertPopupMessage(Math.round(gaugeValue), threshold, horizonMin);
+      showToast(message, 'error', 6000);
+      // tag keeps a repeated alert replacing the previous one in the OS
+      // tray instead of stacking a new notification alongside it.
+      showAppNotification('IQMS', message, 'iqms-wait-alert');
+    }
+    wasAlertOverRef.current = isOver;
+  }, [gaugeValue, threshold, alertsEnabled, horizonMin]);
+
+  return (
+    <div className="screen-page">
+      <AlertsBar
+        enabled={alertsEnabled} onToggle={setAlertsEnabled}
+        threshold={threshold} onThreshold={setThreshold}
+        notifyPermission={notifyPermission} onEnableNotifications={handleEnableNotifications}
+        t={t}
+      />
+
+      <div className="live-grid">
+        <div>
+          <div className="section-header">
+            <span style={s.bigTitle}>{t.liveQueueStatus}</span>
+            <div style={s.liveBadgeRow}>
+              <div style={s.liveBadge}>
+                <span style={s.liveDot} />
+                <span style={s.liveWord}>{t.live}</span>
+              </div>
+              <UpdatedAgo lastUpdated={lastUpdated} fontSize={14} dotSize={7} />
+            </div>
+          </div>
+          {error && <div style={s.errorHint}>{error}</div>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {loading
+              ? [0, 1, 2, 3].map(i => <Skeleton key={i} height={64} radius={16} />)
+              : <>
+                  {lanes.map(lane => <LaneCard key={lane.lane_id} lane={lane} t={t} />)}
+                  {lanes.length === 0 && <div style={s.hint}>—</div>}
+                </>
+            }
+          </div>
+        </div>
+
+        <div>
+          <div className="section-header" style={{ marginTop: 0 }}>
+            <span className="section-title">SNAPSHOT</span>
+          </div>
+          <HorizonPicker value={horizonMin} onChange={setHorizonMin} t={t} />
+          <Gauge current={gaugeValue} label={gaugeLabel} t={t} />
+        </div>
+      </div>
+
+      <div className="section-header">
+        <span className="section-title">{t.liveCameras}</span>
+        <div style={s.camPills}>
+          <button
+            onClick={() => toggleCam('entrance')}
+            style={{ ...s.camPill, ...(openCams.includes('entrance') ? s.camPillActive : {}) }}
+          >
+            <span style={s.camPillIcon}>▣</span> Cam 1 – Entrée
+          </button>
+          <button
+            onClick={() => toggleCam('checkout')}
+            style={{ ...s.camPill, ...(openCams.includes('checkout') ? s.camPillActive : {}) }}
+          >
+            <span style={s.camPillIcon}>▣</span> Cam 2 – Caisses
+          </button>
+        </div>
+      </div>
+
+      {openCams.length === 0 ? (
+        <div style={s.camEmpty}>
+          <span style={s.camEmptyIcon}>▣</span>
+          <span style={s.camEmptyText}>{t.selectCameraHint}</span>
+        </div>
+      ) : (
+        <div className="camera-grid">
+          {openCams.includes('entrance') && (
+            <div style={s.camWrap}>
+              <button style={s.camClose} onClick={() => toggleCam('entrance')}>×</button>
+              <CameraPlaceholder label="CAM 1 – ENTRÉE" dataUrl={entranceSnap?.image} />
+            </div>
+          )}
+          {openCams.includes('checkout') && (
+            <div style={s.camWrap}>
+              <button style={s.camClose} onClick={() => toggleCam('checkout')}>×</button>
+              <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const s = {
+  alertsBar: {
+    display: 'flex', alignItems: 'center', gap: 12,
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+    borderRadius: 16, padding: '14px 20px', marginBottom: 8,
+  },
+  bellIcon: { fontSize: 16 },
+  alertsLabel: { fontSize: 15, fontWeight: 600, color: '#e6edf3', marginRight: 4 },
+  toggle: {
+    width: 38, height: 20, borderRadius: 10, position: 'relative',
+    padding: 2, transition: 'background 0.15s',
+  },
+  toggleKnob: {
+    display: 'block', width: 16, height: 16, borderRadius: '50%',
+    background: '#fff', transition: 'transform 0.15s',
+  },
+  divider: { width: 1, height: 24, background: 'var(--card-border)', margin: '0 4px' },
+  seuilLabel: { fontSize: 14, color: '#8b949e' },
+  slider: { flex: 1, maxWidth: 240, accentColor: '#58a6ff' },
+  seuilValue: { fontSize: 15, fontWeight: 700, color: '#e6edf3', minWidth: 48 },
+  enableNotifBtn: {
+    background: 'rgba(88, 166, 255, 0.12)', border: '1px solid #58a6ff',
+    borderRadius: 999, padding: '6px 14px', color: '#58a6ff',
+    fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap',
+  },
+
+  horizonRow: {
+    display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+    marginBottom: 14, padding: '0 2px',
+  },
+  horizonRowLabel: { fontSize: 13, color: '#8b949e', marginRight: 2 },
+  horizonChip: {
+    background: 'transparent', border: '1px solid #30363d', borderRadius: 999,
+    padding: '5px 12px', color: '#8b949e', fontSize: 13, fontWeight: 500,
+    transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+  },
+  horizonChipActive: {
+    background: 'rgba(88, 166, 255, 0.12)', border: '1px solid #58a6ff', color: '#58a6ff',
+  },
+  horizonSourceNote: {
+    width: '100%', fontSize: 11.5, color: '#6e7681', lineHeight: 1.4,
+    marginTop: 4,
+  },
+
+  bigTitle: { fontSize: 20, fontWeight: 500, color: '#e6edf3' },
+  liveBadgeRow: { display: 'flex', alignItems: 'center', gap: 12 },
+  liveBadge: { display: 'flex', alignItems: 'center', gap: 5 },
+  liveDot: {
+    width: 8, height: 8, borderRadius: '50%',
+    background: '#3fb950', boxShadow: '0 0 6px #3fb950',
+  },
+  liveWord: { fontSize: 14, fontWeight: 700, color: '#3fb950', letterSpacing: 0.8 },
+
+  laneCard: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    padding: '16px 20px', borderLeft: '4px solid', borderRadius: 12,
+  },
+  laneLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+  laneIcon: {
+    width: 36, height: 36, borderRadius: '50%',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  },
+  laneName: { fontSize: 14, fontWeight: 700, color: '#e6edf3' },
+  laneSub: { fontSize: 11, color: '#8b949e', marginTop: 2 },
+  laneFillTrack: {
+    flex: 1, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.06)',
+    margin: '0 20px', overflow: 'hidden',
+  },
+  laneFillBar: { height: '100%', borderRadius: 3, transition: 'width 0.3s ease' },
+  laneRight: { display: 'flex', alignItems: 'baseline', gap: 6 },
+  laneCount: { fontSize: 26, fontWeight: 700, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' },
+  laneCountSub: { fontSize: 12, fontWeight: 400, color: '#8b949e' },
+
+  gaugeWrap: {
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+    borderRadius: 16, padding: '20px 20px 20px 80px', display: 'flex', flexDirection: 'column', alignItems: 'center',
+  },
+  gaugeLabel: { fontSize: 13, color: '#8b949e', marginBottom: 14 },
+  gaugeBody: { position: 'relative', width: 40, height: 220 },
+  gaugeBar: {
+    width: '100%', height: '100%', borderRadius: 20, overflow: 'hidden',
+    display: 'flex', flexDirection: 'column',
+  },
+  gaugeZone: { flex: 1 },
+  markerGroup: {
+    position: 'absolute', display: 'flex', alignItems: 'center', gap: 6,
+  },
+  marker: { width: 0, height: 0, flexShrink: 0 },
+  markerRed: {
+    borderTop: '7px solid transparent', borderBottom: '7px solid transparent',
+    borderLeft: '11px solid #f85149',
+  },
+
+  camPills: { display: 'flex', gap: 10 },
+  camPill: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    background: 'transparent', border: '1px solid #30363d', borderRadius: 999,
+    padding: '8px 16px', color: '#8b949e', fontSize: 13, fontWeight: 500,
+    transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+  },
+  camPillActive: {
+    background: 'rgba(88, 166, 255, 0.12)', border: '1px solid #58a6ff', color: '#58a6ff',
+  },
+  camPillIcon: { fontSize: 12 },
+
+  camEmpty: {
+    border: '1px dashed #30363d', borderRadius: 16,
+    padding: '48px 20px', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', gap: 10,
+  },
+  camEmptyIcon: { fontSize: 22, color: '#484f58' },
+  camEmptyText: { fontSize: 14, color: '#8b949e' },
+
+  camWrap: { position: 'relative', flex: 1, minWidth: 0 },
+  camClose: {
+    position: 'absolute', top: 8, right: 8, zIndex: 5,
+    width: 24, height: 24, borderRadius: '50%',
+    background: 'rgba(0,0,0,0.5)', border: '1px solid var(--card-border)',
+    color: '#e6edf3', fontSize: 14, lineHeight: '22px',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+  },
+
+  hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
+  errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
+};

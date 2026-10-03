@@ -1,0 +1,211 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+:root {
+  --bg:         #0d1117;
+  --surface:    #161b22;
+  --surface2:   #1c2128;
+  --border:     #30363d;
+  --text:       #e6edf3;
+  --text-sub:   #8b949e;
+  --text-dim:   #484f58;
+  --green:      #3fb950;
+  --accent:     #34d399;
+  --yellow:     #d29922;
+  --orange:     #db6d28;
+  --red:        #f85149;
+  --blue:       #58a6ff;
+
+  /* Standardized card treatment */
+  --card-bg:     #12171f;
+  --card-border: rgba(255, 255, 255, 0.06);
+  --card-radius: 16px;
+  --card-pad:    20px;
+
+  /* Type hierarchy */
+  --label-color: #8b95a8;
+  --font-ui:   'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button { cursor: pointer; font-family: inherit; }
+
+/* ── Shared design system primitives ─────────────────────── */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  padding: var(--card-pad);
+}
+
+.metric {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--label-color);
+}
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ── Shell ────────────────────────────────────────────────── */
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.app-main {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ── Screen page ──────────────────────────────────────────── */
+.screen-page {
+  padding: 20px 16px 80px;
+}
+
+/* ── Section header ───────────────────────────────────────── */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  margin-top: 24px;
+}
+
+.section-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--label-color);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* Statistique: gender donut + age bar side by side on desktop, stacked on mobile */
+.demo-grid {
+  display: block;
+}
+.demo-grid > * + * { margin-top: 14px; }
+
+/* ── Desktop sidebar (hidden on mobile) ───────────────────── */
+.app-sidebar { display: none; }
+
+/* ── Mobile header / tabbar (hidden on desktop) ───────────── */
+/* Single sticky unit — header + tab bar stack as one block, so
+   neither needs to guess the other's height to avoid overlap. */
+.mobile-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg);
+}
+
+.mobile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Desktop breakpoint ───────────────────────────────────── */
+@media (min-width: 900px) {
+  .app-shell { flex-direction: row; }
+
+  .mobile-nav { display: none; }
+
+  .app-sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 220px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    padding: 20px 0;
+  }
+
+  .app-main { overflow-y: auto; }
+
+  .screen-page {
+    padding: 32px 40px 48px;
+    max-width: 1100px;
+  }
+
+  /* Today: chart + summary side by side */
+  .today-bottom {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  /* Live: lanes left, stats+cams right */
+  .live-grid {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  .demo-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+}
+
+@media (max-width: 899px) {
+  .today-bottom { display: block; }
+  .today-bottom > * + * { margin-top: 14px; }
+  .live-grid { display: block; }
+  .live-grid > * + * { margin-top: 14px; }
+}
+
+/* ── Camera grid ──────────────────────────────────────────── */
+/* Mobile: stacked full-width */
+.camera-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Desktop: side by side */
+@media (min-width: 900px) {
+  .camera-grid {
+    flex-direction: row;
+    gap: 14px;
+  }
+}
