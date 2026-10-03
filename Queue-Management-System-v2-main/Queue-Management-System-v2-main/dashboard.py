@@ -4,7 +4,7 @@ import time as _time
 import subprocess
 import sys
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -79,7 +79,8 @@ from prediction.dwell_modifier import compute_dwell_modifier_from_recent  # noqa
 from prediction.scheduler_control import scheduler_state, start_scheduler, request_stop, run_hidden
 from prediction.runtime import RUNTIME, read_json
 from prediction.model_bundle import current_bundle
-from prediction.forecast_state import waiting_backlog, horizon_value, payload_from, freshness
+from prediction.forecast_state import (waiting_backlog, horizon_value, payload_from, freshness, status_for,
+                                       published_series, WAIT_BUSY_MIN, WAIT_ALERT_MIN)
 from prediction.shared_forecast_store import read_settings, update_settings, read_state, select_lanes
 from prediction.dwell_models import _build_dashboard_dwell_model, _build_dashboard_dwell_lstm_model
 
@@ -154,8 +155,7 @@ REFRESH_SEC = int(st.session_state["sched_interval"]) * 60
 # button or the separate Auto-predict background scheduler, neither of
 # which this timer touches.
 LIVE_REFRESH_SEC = int(os.getenv("LIVE_REFRESH_SEC", 300))
-WAIT_BUSY_MIN = float(os.getenv("WAIT_BUSY_MIN", 2.0))
-WAIT_ALERT_MIN = float(os.getenv("WAIT_ALERT_MIN", 5.0))
+# WAIT_BUSY_MIN / WAIT_ALERT_MIN and status_for come from prediction.forecast_state (one definition).
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
 PRED_SMOOTH_MIN = int(os.getenv("PRED_SMOOTH_MIN", 5))
 FORECAST_DISPLAY_MIN = int(os.getenv("FORECAST_DISPLAY_MIN", 10))
@@ -357,9 +357,10 @@ def _hour_phrase(hours):
 def _status_meta(wait_value):
     if wait_value is None:
         return "status-ok", "Forecast pending"
-    if wait_value >= WAIT_ALERT_MIN:
+    status = status_for(wait_value)
+    if status == "ALERT":
         return "status-alert", "ALERT"
-    if wait_value >= WAIT_BUSY_MIN:
+    if status == "BUSY":
         return "status-busy", "BUSY"
     return "status-ok", "ALL CLEAR"
 
@@ -367,9 +368,10 @@ def _status_meta(wait_value):
 def _badge_html(wait_value):
     if wait_value is None:
         return '<span class="badge badge-muted">PENDING</span>'
-    if wait_value >= WAIT_ALERT_MIN:
+    status = status_for(wait_value)
+    if status == "ALERT":
         return '<span class="badge badge-alert">ALERT</span>'
-    if wait_value >= WAIT_BUSY_MIN:
+    if status == "BUSY":
         return '<span class="badge badge-busy">BUSY</span>'
     return '<span class="badge badge-ok">OK</span>'
 
@@ -422,9 +424,10 @@ def _delta_html(diff, suffix="", invert=False):
 def _wait_tone(wait_value):
     if wait_value is None:
         return "blue"
-    if wait_value >= WAIT_ALERT_MIN:
+    status = status_for(wait_value)
+    if status == "ALERT":
         return "red"
-    if wait_value >= WAIT_BUSY_MIN:
+    if status == "BUSY":
         return "orange"
     return "green"
 
@@ -587,9 +590,10 @@ def _stop_scheduler() -> bool:
 def _status_label(wait_value):
     if wait_value is None:
         return "Pending"
-    if wait_value >= WAIT_ALERT_MIN:
+    status = status_for(wait_value)
+    if status == "ALERT":
         return "Alert"
-    if wait_value >= WAIT_BUSY_MIN:
+    if status == "BUSY":
         return "Busy"
     return "OK"
 
@@ -600,11 +604,11 @@ def _forecast_row_style(row):
         status_bg = "#e2e8f0"
         status_color = "#475569"
         wait_color = "#475569"
-    elif wait_value >= WAIT_ALERT_MIN:
+    elif status_for(wait_value) == "ALERT":
         status_bg = "#fee2e2"
         status_color = "#b91c1c"
         wait_color = "#b91c1c"
-    elif wait_value >= WAIT_BUSY_MIN:
+    elif status_for(wait_value) == "BUSY":
         status_bg = "#ffedd5"
         status_color = "#c2410c"
         wait_color = "#c2410c"
@@ -819,46 +823,37 @@ def load_queue_delta():
     return int(row.iloc[0]["queue_count"]) if not row.empty else None
 
 
-@st.cache_data(ttl=REFRESH_SEC)
-def load_predictions():
+def _published_frame(start, end) -> pd.DataFrame:
+    """Rows of the one published forecast (prediction.forecast_state.published_series):
+    prediction_for (UTC), arrivals, wait_min, status."""
     with _conn() as conn:
-        try:
-            df = pd.read_sql(
-                """
-                SELECT DISTINCT ON (prediction_for)
-                       prediction_for AS ds,
-                       prophet_yhat, lstm_yhat, xgb_yhat, ensemble_yhat,
-                       est_wait_minutes AS wait_min,
-                       wait_15m, wait_30m, wait_45m, status,
-                       wait_1lane_15m, wait_2lane_15m, wait_3lane_15m
-                FROM queue_predictions
-                WHERE prediction_for >= NOW()
-                  AND prediction_for <= NOW() + INTERVAL '24 hours'
-                ORDER BY prediction_for, predicted_at DESC
-                LIMIT 60
-                """,
-                conn,
-            )
-        except Exception:
-            conn.rollback()
-            df = pd.read_sql(
-                """
-                SELECT DISTINCT ON (prediction_for)
-                       prediction_for AS ds,
-                       prophet_yhat, lstm_yhat, xgb_yhat, ensemble_yhat,
-                       est_wait_minutes AS wait_min,
-                       wait_15m, wait_30m, status
-                FROM queue_predictions
-                WHERE prediction_for >= NOW()
-                  AND prediction_for <= NOW() + INTERVAL '24 hours'
-                ORDER BY prediction_for, predicted_at DESC
-                LIMIT 60
-                """,
-                conn,
-            )
-            for col in ["wait_45m", "wait_1lane_15m", "wait_2lane_15m", "wait_3lane_15m"]:
-                df[col] = None
+        rows = published_series(conn, start, end)
+    df = pd.DataFrame(rows, columns=["prediction_for", "arrivals", "wait_min", "status"])
+    if not df.empty:
+        df["prediction_for"] = pd.to_datetime(df["prediction_for"], utc=True)
+        df = df.sort_values("prediction_for").reset_index(drop=True)
     return df
+
+
+def _attach_published(df: pd.DataFrame, start, end) -> pd.DataFrame:
+    """Add the published forecast arrivals as `published_arrivals`, matched on slot time."""
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df
+    pub = _published_frame(start, end).rename(columns={"prediction_for": "ds", "arrivals": "published_arrivals"})
+    df = df.copy()
+    df["ds"] = pd.to_datetime(df["ds"], utc=True)
+    if pub.empty:
+        df["published_arrivals"] = np.nan
+        return df
+    pub["ds"] = pub["ds"].astype(df["ds"].dtype)
+    return df.merge(pub[["ds", "published_arrivals"]], on="ds", how="left")
+
+
+@st.cache_data(ttl=REFRESH_SEC)
+def load_published_history(hours: int) -> pd.DataFrame:
+    """Published forecast (arrivals, wait_min, status) for the last N hours, as `ds` (UTC)."""
+    now = datetime.now(timezone.utc)
+    return _published_frame(now - timedelta(hours=int(hours)), now).rename(columns={"prediction_for": "ds"})
 
 
 @st.cache_data(ttl=REFRESH_SEC)
@@ -1042,34 +1037,32 @@ def load_full_day_queue():
 
 @st.cache_data(ttl=REFRESH_SEC)
 def load_status_breakdown():
+    """Today's elapsed open slots by status, from the published forecast (status_for thresholds)."""
     _oh, _om, _ch, _cm, _open_tot, _close_tot = _today_hours()
-    with _conn() as conn:
-        df = pd.read_sql(
-            f"""
-            SELECT UPPER(status) AS status, COUNT(*) AS slots
-            FROM queue_predictions
-            WHERE prediction_for >= CURRENT_DATE
-              AND prediction_for < NOW()
-              AND EXTRACT(HOUR FROM prediction_for AT TIME ZONE current_setting('TIMEZONE')) * 60
-                  + EXTRACT(MINUTE FROM prediction_for AT TIME ZONE current_setting('TIMEZONE')) >= {_open_tot}
-              AND EXTRACT(HOUR FROM prediction_for AT TIME ZONE current_setting('TIMEZONE')) * 60
-                  + EXTRACT(MINUTE FROM prediction_for AT TIME ZONE current_setting('TIMEZONE')) < {_close_tot}
-            GROUP BY status
-            """,
-            conn,
-        )
-    return df
+    tz = os.getenv("STORE_TZ", "Europe/Paris")
+    now = datetime.now(timezone.utc)
+    midnight = pd.Timestamp.now(tz=tz).normalize().to_pydatetime()
+    df = _published_frame(midnight, now)
+    if df.empty:
+        return pd.DataFrame(columns=["status", "slots"])
+    local = df["prediction_for"].dt.tz_convert(tz)
+    minutes = local.dt.hour * 60 + local.dt.minute
+    df = df[(minutes >= _open_tot) & (minutes < _close_tot)].dropna(subset=["status"])
+    if df.empty:
+        return pd.DataFrame(columns=["status", "slots"])
+    return df.groupby("status").size().reset_index(name="slots")
 
 
 @st.cache_data(ttl=REFRESH_SEC)
 def load_model_breakdown():
-    """Per-model yhat for the most recent prediction run's upcoming slots (next display horizon)."""
+    """Raw per-model yhat inputs for the most recent run's upcoming slots (next display horizon),
+    plus the published forecast arrivals (published_arrivals) for the same slots."""
     with _conn() as conn:
         try:
             df = pd.read_sql(
                 f"""
                 SELECT prediction_for AS ds,
-                       prophet_yhat, lstm_yhat, xgb_yhat, ensemble_yhat
+                       prophet_yhat, lstm_yhat, xgb_yhat
                 FROM queue_predictions
                 WHERE prediction_for >= NOW()
                   AND prediction_for <= NOW() + INTERVAL '{FORECAST_DISPLAY_MIN} minutes'
@@ -1081,7 +1074,8 @@ def load_model_breakdown():
         except Exception:
             conn.rollback()
             df = pd.DataFrame()
-    return df
+    now = datetime.now(timezone.utc)
+    return _attach_published(df, now, now + timedelta(minutes=FORECAST_DISPLAY_MIN + BUCKET_MIN))
 
 
 @st.cache_data(ttl=REFRESH_SEC)
@@ -1235,31 +1229,9 @@ def load_lane_history(days: int, svc_min: float, slot_minutes: int = 15) -> pd.D
 
 
 @st.cache_data(ttl=REFRESH_SEC)
-def load_historical_wait_predictions(hours: int):
-    """Past est_wait_minutes from queue_predictions for the last N hours."""
-    with _conn() as conn:
-        try:
-            df = pd.read_sql(
-                f"""
-                SELECT DISTINCT ON (prediction_for)
-                       prediction_for AS ds,
-                       est_wait_minutes AS wait_min
-                FROM queue_predictions
-                WHERE prediction_for < NOW()
-                  AND prediction_for >= NOW() - INTERVAL '{int(hours)} hours'
-                ORDER BY prediction_for, predicted_at DESC
-                """,
-                conn,
-            )
-        except Exception:
-            conn.rollback()
-            df = pd.DataFrame()
-    return df
-
-
-@st.cache_data(ttl=REFRESH_SEC)
 def load_full_model_predictions(days: int = 30):
-    """Per-model yhat for every prediction slot over the last N days + upcoming future slots.
+    """Raw per-model yhat inputs for every prediction slot over the last N days + upcoming slots,
+    plus the published forecast arrivals (published_arrivals) for the same slots.
 
     Uses DISTINCT ON (prediction_for) to pick the most recent prediction run per slot,
     so past slots show the latest saved forecast for that slot, not an in-sample
@@ -1272,7 +1244,7 @@ def load_full_model_predictions(days: int = 30):
                 SELECT DISTINCT ON (prediction_for)
                        prediction_for AS ds,
                        predicted_at,
-                       prophet_yhat, lstm_yhat, xgb_yhat, ensemble_yhat
+                       prophet_yhat, lstm_yhat, xgb_yhat
                 FROM queue_predictions
                 WHERE prediction_for >= NOW() - INTERVAL '{days} days'
                 ORDER BY prediction_for, predicted_at DESC
@@ -1282,7 +1254,8 @@ def load_full_model_predictions(days: int = 30):
         except Exception:
             conn.rollback()
             df = pd.DataFrame()
-    return df
+    now = datetime.now(timezone.utc)
+    return _attach_published(df, now - timedelta(days=int(days)), now + timedelta(days=2))
 
 
 @st.cache_data(ttl=REFRESH_SEC)
@@ -1649,7 +1622,6 @@ _loading_notice.info("Loading live data and forecasts…")
 
 try:
     snap = load_snapshot()
-    pred_df = load_predictions()
     recent_entry_hist = load_recent_entrance_history()
     queue_hist = load_queue_history(st.session_state["history_range_hours"])
     traffic_today = load_today_traffic()
@@ -1668,6 +1640,7 @@ try:
     raw_arrivals = load_raw_arrivals(_span)
     service_history = load_service_history(_span)
     full_model_preds = load_full_model_predictions(_span)
+    published_past = load_published_history(_span * 24)
     prophet_training_fit = load_prophet_training_fit()
     if not full_model_preds.empty and "ds" in full_model_preds.columns:
         _ds_local = _to_local_series(full_model_preds["ds"])
@@ -1856,9 +1829,12 @@ _model_col_map = {"prophet": "prophet_yhat", "lstm": "lstm_yhat", "xgboost": "xg
 _arrival_cols_used = [_model_col_map[_name] for _name in _arrival_models_selected]
 _selected_models = _arrival_models_selected
 _arrival_calib_active = _shared_forecast.get("calibration_applied", False)
-_arrival_calib_note = "Shared background forecast; arrival calibration " + ("enabled." if _arrival_calib_active else "disabled.")
-if _shared_forecast.get("calibration", {}).get("requested") and not _arrival_calib_active:
-    _arrival_calib_note = "Arrival calibration was requested but not applied: " + _shared_forecast["calibration"].get("reason", "No validated correction available.")
+_calib_info = _shared_forecast.get("calibration") or {}
+_arrival_calib_note = (
+    f"Arrival coefficient {float(_shared_forecast.get('arrival_coefficient', 1.0)):.2f} (applied to every screen and alert) · "
+    "Validated calibration: "
+    + ("applied." if _arrival_calib_active else "not applied — " + str(_calib_info.get("reason") or "not requested") + ".")
+)
 _arrivals_capped = _shared_forecast.get("arrivals_capped", False)
 _pred_display = pred_future[(pred_future["ds"] >= _now_local_ts()) & (pred_future["ds"] <= _now_local_ts()+pd.Timedelta(minutes=FORECAST_DISPLAY_MIN))]["arrivals"] if not pred_future.empty else pd.Series(dtype=float)
 _pred_mean = _pred_display.mean()
@@ -2039,7 +2015,7 @@ st.markdown(
 _lane_rec = _lane_recommendation(lane_waits, selected_lanes, wait_0m if wait_0m is not None else wait_10m)
 if _lane_rec:
     _rec_wait = wait_0m if wait_0m is not None else wait_15m
-    _rec_color = "#ea580c" if _rec_wait is not None and _rec_wait >= WAIT_BUSY_MIN else "#16a34a"
+    _rec_color = "#ea580c" if status_for(_rec_wait) in ("BUSY", "ALERT") else "#16a34a"
     st.markdown(
         f'<div class="detail-note" style="border-left: 4px solid {_rec_color}; padding-left: 14px;">'
         f'<strong>Lane suggestion:</strong> {_lane_rec}</div>',
@@ -2129,6 +2105,16 @@ with action_model:
         key="calibration_enabled",
         on_change=lambda: update_settings({"calibration_enabled": st.session_state["calibration_enabled"]}),
         help="Apply a compatible, independently validated arrival correction on the next background publication. Raw model forecasts remain unchanged. Legacy or invalid coefficients are ignored.",
+    )
+    st.number_input(
+        "Arrival coefficient",
+        min_value=0.5,
+        max_value=2.0,
+        step=0.05,
+        format="%.2f",
+        key="arrival_coefficient",
+        on_change=lambda: update_settings({"arrival_coefficient": float(st.session_state["arrival_coefficient"])}),
+        help="One multiplier on blended arrivals, applied once on the next background publication; every screen and push alert reads that publication.",
     )
 with action_smooth:
     st.select_slider(
@@ -2334,6 +2320,7 @@ with st.expander("How was this predicted? (model inputs & simulation trace)"):
             f"({' + '.join(_exp_labels.get(m, m) for m in _exp_selected)}, "
             f"equal weight {_exp_weight} each)"
         )
+        st.caption("Model inputs (raw). 'Published forecast' is what every screen and alert uses, after the arrival coefficient, calibration, cap and smoothing.")
         if not model_breakdown.empty:
             mb = model_breakdown.copy()
             mb["ds"] = _to_local_series(mb["ds"])
@@ -2361,6 +2348,14 @@ with st.expander("How was this predicted? (model inputs & simulation trace)"):
                         "Predicted arrivals": _fmt_yhat(_dyn_avg),
                         "Time slot": mrow["ds"].strftime("%H:%M"),
                     })
+                _pub_arr = mrow.get("published_arrivals")
+                if _pub_arr is not None and not pd.isna(_pub_arr):
+                    rows_model.append({
+                        "Model": "Published forecast",
+                        "Weight": "after coefficient",
+                        "Predicted arrivals": _fmt_yhat(_pub_arr),
+                        "Time slot": mrow["ds"].strftime("%H:%M"),
+                    })
                 break  # first slot only
             st.dataframe(pd.DataFrame(rows_model), width='stretch', hide_index=True)
         else:
@@ -2376,7 +2371,7 @@ with st.expander("How was this predicted? (model inputs & simulation trace)"):
             for lid, svc in sorted(service_minutes_per_lane.items())
         ) if _has_per_lane else "no per-lane data yet"
         inputs_df = pd.DataFrame([
-            {"Input": "Current queue (backlog)", "Value": str(_waiting_backlog if not pred_df.empty else queue_count)},
+            {"Input": "Current queue (backlog)", "Value": str(_waiting_backlog if not pred_future.empty else queue_count)},
             {"Input": "Active lanes", "Value": str(selected_lanes)},
             {"Input": "Avg service time (global)", "Value": f"{service_minutes:.1f} min/customer  ({_svc_source_full})"},
             {"Input": "Service time per lane", "Value": _per_lane_str},
@@ -2394,7 +2389,7 @@ with st.expander("How was this predicted? (model inputs & simulation trace)"):
             _sim_rows = _sim_rows.head(5).copy()
             _sim_rows["ds"] = _to_local_series(_sim_rows["ds"])
             _svc_cap = selected_lanes * BUCKET_MIN / max(service_minutes, 0.5)
-            _running_q = float(_waiting_backlog if not pred_df.empty else queue_count)
+            _running_q = float(_waiting_backlog if not pred_future.empty else queue_count)
             trace_rows = []
             for _, sr in _sim_rows.iterrows():
                 _arr = max(0.0, float(sr["arrivals"]) if not pd.isna(sr["arrivals"]) else 0.0)
@@ -2919,7 +2914,7 @@ _arrivals_note = (
     f"Waiting: {int(max(0, queue_count - selected_lanes))} · In service: {_in_service}. "
     + _per_lane_svc_note
     + (" Arrivals capped to observed rate." if _arrivals_capped else "")
-) if not pred_df.empty else ""
+) if not pred_future.empty else ""
 st.markdown(
     f'<div class="detail-note">{lane_parameter_note} {lane_source_note} The trend below is calculated by the background worker '
     f'from the saved arrival forecast and current queue state.'
@@ -2936,7 +2931,7 @@ with st.expander("Arrival calibration details", expanded=False):
         st.caption("Applied calibration: " + _calibration_status["artifact_id"])
     st.caption("The background worker blends raw model forecasts, applies any validated correction once, then simulates waits. Settings changes apply on the next successful run.")
 
-if not pred_df.empty:
+if not pred_future.empty:
     pf_raw = pred_future.copy()
     # Direct positional assignment — forecast_waits is built from pred_future in the same order
     if not forecast_waits.empty and len(forecast_waits) == len(pf_raw):
@@ -2994,37 +2989,21 @@ if not pred_df.empty:
             fillcolor="rgba(148,163,184,0.10)",
             hovertemplate="%{x|%H:%M}<br>Actual wait (smoothed): %{y:.1f} min<extra></extra>",
         ))
-    # Historical forecast trace — derived from full_model_preds (past slots only)
-    if not full_model_preds.empty:
-        _hwp = full_model_preds.copy()
+    # Historical forecast trace: the published forecast (the last publication made before
+    # each slot), i.e. the same series and formula as the future half and the phone.
+    if not published_past.empty:
+        _hwp = published_past[["ds", "wait_min"]].copy()
         _hwp["ds"] = _to_local_series(_hwp["ds"])
-        _hwp = _hwp[_hwp["ds"] < _now_local_ts()].copy()
-        _hwp_cols = [_model_col_map[m] for m in _selected_models
-                     if _model_col_map.get(m) in _hwp.columns]
-        if not _hwp_cols:
-            for _fb in ["ensemble_yhat", "prophet_yhat", "lstm_yhat", "xgb_yhat"]:
-                if _fb in _hwp.columns:
-                    _hwp_cols = [_fb]
-                    break
-        if _hwp_cols:
-            _hwp_arr = _weighted_arrival_blend(_hwp, _hwp_cols)
-            _hwp["wait_min"] = (_hwp_arr * service_minutes / max(selected_lanes, 1)).clip(lower=0)
-            _hwp = _hwp.sort_values("ds")
-            _hwp["wait_min"] = (
-                _hwp["wait_min"]
-                .rolling(window=max(1, round(PRED_SMOOTH_MIN / BUCKET_MIN)),
-                          center=True, min_periods=1)
-                .mean()
-            )
-            _hwp = _insert_overnight_gaps(_hwp)
-            fig_wait.add_trace(go.Scatter(
-                x=_hwp["ds"],
-                y=_hwp["wait_min"],
-                mode="lines",
-                name="Forecast (past)",
-                line=dict(color="#2563eb", width=1.5, dash="dash"),
-                hovertemplate="%{x|%H:%M}<br>Predicted wait (past): %{y:.1f} min<extra></extra>",
-            ))
+        _hwp = _hwp[_hwp["ds"] < _now_local_ts()].sort_values("ds").copy()
+        _hwp = _insert_overnight_gaps(_hwp)
+        fig_wait.add_trace(go.Scatter(
+            x=_hwp["ds"],
+            y=_hwp["wait_min"],
+            mode="lines",
+            name="Forecast (past)",
+            line=dict(color="#2563eb", width=1.5, dash="dash"),
+            hovertemplate="%{x|%H:%M}<br>Predicted wait (past): %{y:.1f} min<extra></extra>",
+        ))
     # Future forecast trace — only when current predictions exist
     if not pf.empty:
         _pf_plot = pf.copy()
@@ -3063,7 +3042,7 @@ if not pred_df.empty:
             _wait_data_points.extend(_in_win["actual_wait"].dropna().tolist())
         elif "actual_wait" in _qh_raw:
             _wait_data_points.extend(_qh_raw["actual_wait"].dropna().tolist())
-    if not full_model_preds.empty and "_hwp" in locals() and "wait_min" in _hwp:
+    if "_hwp" in locals() and "wait_min" in _hwp:
         if "ds" in _hwp:
             _in_win = _hwp[(_hwp["ds"] >= _chart_x_start) & (_hwp["ds"] <= _chart_x_end)]
             _wait_data_points.extend(_in_win["wait_min"].dropna().tolist())

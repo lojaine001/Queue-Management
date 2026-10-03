@@ -1,5 +1,6 @@
 """Canonical settings and transactional storage for background wait forecasts."""
 import json
+import math
 import uuid
 import os
 from contextlib import closing
@@ -8,8 +9,12 @@ import psycopg2.extras
 from prediction.pipeline import DB_CONFIG
 from prediction.forecast_state import finite, freshness, scenario_for
 
+# arrival_coefficient: the single operator-set multiplier on blended arrivals, applied once
+# in wait_forecast.prepare_arrivals; every screen and alert reads that one publication.
 DEFAULT_SETTINGS = dict(arrival_models=['prophet','lstm','xgboost'], pred_smooth_min=5,
-                        dwell_model_mode='safe', dwell_forecast_models=['xgboost','lstm'], calibration_enabled=False)
+                        dwell_model_mode='safe', dwell_forecast_models=['xgboost','lstm'], calibration_enabled=False,
+                        arrival_coefficient=1.0)
+ARRIVAL_COEFFICIENT_RANGE = (0.5, 2.0)
 
 
 def connect():
@@ -26,6 +31,9 @@ def ensure_schema(conn):
             config JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
         cur.execute('INSERT INTO forecast_settings (id,config) VALUES (1,%s) ON CONFLICT(id) DO NOTHING',
                     (psycopg2.extras.Json(DEFAULT_SETTINGS),))
+        # Settings added after a row was stored get their default; existing values win.
+        cur.execute('UPDATE forecast_settings SET config=%s::jsonb || config WHERE NOT config ?& %s',
+                    (psycopg2.extras.Json(DEFAULT_SETTINGS), list(DEFAULT_SETTINGS)))
         cur.execute('''CREATE TABLE IF NOT EXISTS dashboard_state (
             id INTEGER PRIMARY KEY DEFAULT 1, updated_at TIMESTAMPTZ,
             queue_now INTEGER, service_min FLOAT, wait_0m FLOAT, wait_5m FLOAT, wait_10m FLOAT, wait_15m FLOAT,
@@ -47,6 +55,11 @@ def validate_settings(config):
     if config['pred_smooth_min'] not in (3,5,15,30):raise ValueError('Invalid smoothing interval')
     if config['dwell_model_mode'] not in ('safe','legacy'):raise ValueError('Invalid dwell mode')
     if not isinstance(config['calibration_enabled'],bool):raise ValueError('Invalid calibration setting')
+    coefficient=config['arrival_coefficient']
+    low,high=ARRIVAL_COEFFICIENT_RANGE
+    if isinstance(coefficient,bool) or not isinstance(coefficient,(int,float)) or not math.isfinite(coefficient) \
+            or not low<=coefficient<=high:
+        raise ValueError(f'Arrival coefficient must be between {low} and {high}')
     return config
 
 

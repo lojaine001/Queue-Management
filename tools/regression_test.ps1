@@ -24,6 +24,8 @@
       L5  /forecast updated within 15 min
       L6  camera pipelines running and snapshots refreshed < 120s
       L7  exactly one Web Push alert checker running
+      L8  alignment: /forecast fixed horizons == /forecast/wait for 0/5/10/15 min
+          (the same publication feeds phone, dashboard and push alerts)
 
     -Runtime   also runs the stop/start cycle first: stop_all must free every
                port and the tunnel, then start_all brings everything back
@@ -275,6 +277,22 @@ if ($StaticOnly) {
     if ($push.Count -eq 1) { Add-Result "L7" "PASS" "push alert checker running (single instance)" }
     elseif ($push.Count -gt 1) { Add-Result "L7" "FAIL" "$($push.Count) push alert checkers running - duplicate phone alerts" }
     else { Add-Result "L7" "FAIL" "push alert checker not running" }
+
+    # L8: one forecast source. The fixed horizons on /forecast must equal /forecast/wait for the
+    # same horizon (push alerts read the same wait_at_horizon value, covered by unit tests).
+    try {
+        $fc = Invoke-RestMethod "http://localhost:8000/forecast" -TimeoutSec 15
+        $mismatch = @()
+        foreach ($pair in @(@(0, "wait_now_min"), @(5, "wait_5_min"), @(10, "wait_10_min"), @(15, "wait_15_min"))) {
+            $w = Invoke-RestMethod "http://localhost:8000/forecast/wait?minutes=$($pair[0])" -TimeoutSec 15
+            $a = $fc.($pair[1]); $b = $w.wait_min
+            if (($null -ne $a -or $null -ne $b) -and [math]::Abs([double]$a - [double]$b) -gt 0.05) {
+                $mismatch += "$($pair[0])m: /forecast=$a vs /forecast/wait=$b"
+            }
+        }
+        if ($mismatch.Count) { Add-Result "L8" "FAIL" "screens disagree: $($mismatch -join '; ')" }
+        else { Add-Result "L8" "PASS" "/forecast and /forecast/wait agree at 0/5/10/15 min" }
+    } catch { Add-Result "L8" "FAIL" "alignment check failed: $($_.Exception.Message)" }
 }
 
 # ---------------------------------------------------------------- summary

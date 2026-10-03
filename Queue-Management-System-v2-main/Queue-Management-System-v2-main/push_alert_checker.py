@@ -27,12 +27,19 @@ import argparse
 import json
 import os
 import time
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 from dotenv import find_dotenv, load_dotenv
 from pywebpush import webpush, WebPushException
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+from prediction.forecast_state import wait_at_horizon
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -67,38 +74,20 @@ def _conn():
     return conn
 
 
-def _wait_for_horizon(cur, horizon_min: int) -> "float | None":
-    """
-    Mirrors /forecast (for 0/5/10/15) and /forecast/wait (for anything
-    else) in api.py exactly, so a push alert can never disagree with what
-    the app itself would show for the same horizon.
-    """
-    if horizon_min in (0, 5, 10, 15):
-        cur.execute("SELECT wait_0m, wait_5m, wait_10m, wait_15m FROM dashboard_state WHERE id = 1")
-        row = cur.fetchone()
-        if not row:
-            return None
-        col = {0: "wait_0m", 5: "wait_5m", 10: "wait_10m", 15: "wait_15m"}[horizon_min]
-        value = row[col]
-        return float(value) if value is not None else None
+def _load_state(cur) -> dict:
+    """dashboard_state exactly as api.py's /forecast/wait reads it."""
+    cur.execute("SELECT d.*, f.revision AS current_settings_revision "
+                "FROM dashboard_state d LEFT JOIN forecast_settings f ON f.id = d.id WHERE d.id = 1")
+    return cur.fetchone() or {}
 
-    cur.execute("SELECT MAX(predicted_at) AS latest FROM queue_predictions")
-    latest = (cur.fetchone() or {}).get("latest")
-    if latest is None:
-        return None
-    cur.execute("""
-        SELECT est_wait_minutes
-        FROM queue_predictions
-        WHERE predicted_at = %s
-        ORDER BY ABS(EXTRACT(EPOCH FROM (
-            prediction_for - (NOW() + (%s || ' minutes')::interval)
-        )))
-        LIMIT 1
-    """, (latest, horizon_min))
-    row = cur.fetchone()
-    if not row or row["est_wait_minutes"] is None:
-        return None
-    return float(row["est_wait_minutes"])
+
+def _wait_for_horizon(state, horizon_min: int) -> "float | None":
+    """
+    Same function as /forecast/wait (wait_at_horizon on dashboard_state), for
+    every horizon, so a push alert can never disagree with what the app
+    itself would show for the same horizon.
+    """
+    return wait_at_horizon(state, float(horizon_min))["wait_min"]
 
 
 def _send_push(sub) -> str:
@@ -138,9 +127,10 @@ def check_once():
             cur.execute("SELECT * FROM push_subscriptions")
             subs = cur.fetchall()
 
+            state = _load_state(cur)
             sent, cleared, removed = 0, 0, 0
             for sub in subs:
-                wait_value = _wait_for_horizon(cur, sub["horizon_min"])
+                wait_value = _wait_for_horizon(state, sub["horizon_min"])
                 if wait_value is None:
                     continue
                 is_over = wait_value >= sub["threshold_min"]

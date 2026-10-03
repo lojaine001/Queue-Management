@@ -9,6 +9,7 @@ import unittest
 from zoneinfo import ZoneInfo
 import pandas as pd
 from prediction.runtime import write_json, read_json
+from prediction.forecast_state import status_for
 
 APP=Path(__file__).resolve().parents[1]/'Queue-Management-System-v2-main/Queue-Management-System-v2-main/ensemble_predict.py'
 
@@ -32,7 +33,7 @@ class PublicationTests(unittest.TestCase):
         self.conn=Connection()
         self.env={'datetime':datetime,'timezone':timezone,'ZoneInfo':ZoneInfo,'STORE_TZ':'Europe/Paris',
                   'pd':pd,'DB_CONFIG':{},'BUCKET_MINUTES':3,'RUNTIME':Path(self.tmp.name),
-                  'write_json':write_json,'_connect':lambda:self.conn}
+                  'write_json':write_json,'status_for':status_for,'_connect':lambda:self.conn}
         tree=ast.parse(APP.read_text(encoding='utf-8'))
         nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('_save_to_db','_print_results')]
         exec(compile(ast.Module(body=nodes,type_ignores=[]),str(APP),'exec'),self.env)

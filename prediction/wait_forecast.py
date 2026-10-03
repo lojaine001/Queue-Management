@@ -35,6 +35,8 @@ def prepare_arrivals(frame,config,calibration,entries_hour,model_version=None):
         status.update(applied=False,artifact_id=None,reason='Missing selected model output; raw fallback')
     calibrated=status['applied']
     if calibrated:frame['arrivals']*=factors(frame['ds'],calibration)
+    # The one operator coefficient (dashboard setting), applied here and nowhere else.
+    frame['arrivals']*=float(config['arrival_coefficient'])
     frame.attrs['calibration']=status
     rate=entries_hour/(60/BUCKET_MINUTES)
     capped=rate>0 and frame['arrivals'].mean()>rate*5
@@ -137,6 +139,7 @@ def refresh_wait_forecast(days=30):
                 data_cutoff=lineage[2].isoformat() if lineage and lineage[2] else None,
                 dwell_by_model=predictions,dwell_values=dwell,dwell_meta=meta,
                 calibration_applied=calibrated,calibration=frame.attrs.get('calibration'),target=target_definition(),arrivals_capped=capped,
+                arrival_coefficient=float(config['arrival_coefficient']),
                 duration_seconds=round((datetime.now(timezone.utc)-started).total_seconds(),2))
             publish(conn,payload)
             write_json(RUNTIME/'wait_publication.json',{k:v for k,v in payload.items() if k not in ('lanes','dwell_by_model','dwell_values')})

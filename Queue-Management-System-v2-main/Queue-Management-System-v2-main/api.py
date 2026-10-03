@@ -30,7 +30,8 @@ load_dotenv(find_dotenv(usecwd=True))
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-from prediction.forecast_state import finite, freshness, lane_scenarios, scenario_for, wait_at_horizon
+from prediction.forecast_state import (finite, freshness, lane_scenarios, published_series, scenario_for,
+                                       wait_at_horizon)
 
 SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
 
@@ -445,16 +446,12 @@ def day_recap(date: Optional[str] = None):
                 busiest_row  = cur.fetchone()
                 busiest_lane = busiest_row["lane_id"] if busiest_row else None
 
-                # Alert minutes today (from ensemble predictions)
-                alert_date_filter = f"DATE(prediction_for) = '{ref_date}'" if ref_date else "DATE(prediction_for) = CURRENT_DATE"
-                cur.execute(f"""
-                    SELECT COUNT(*) AS alert_slots
-                    FROM queue_predictions
-                    WHERE {alert_date_filter}
-                      AND status = 'ALERT'
-                """)
-                alert_row     = cur.fetchone()
-                alert_minutes = int((alert_row["alert_slots"] or 0) if alert_row else 0) * BUCKET_MIN
+                # Alert minutes: slots of the published forecast (the one source every
+                # screen uses) whose predicted wait reaches the ALERT threshold.
+                _day_start = datetime.combine(ref_date or datetime.now().date(), datetime.min.time(),
+                                              tzinfo=ZoneInfo(STORE_TZ))
+                _day_series = published_series(conn, _day_start, _day_start + timedelta(days=1))
+                alert_minutes = sum(1 for row in _day_series if row["status"] == "ALERT") * BUCKET_MIN
 
                 # Equipment mix
                 cur.execute(f"""
@@ -643,11 +640,10 @@ def forecast_chart():
 def day_wait_chart(date: Optional[str] = None):
     """
     Full-day history of predicted arrivals/wait for the Statistique page's
-    Temps d'attente chart. Unlike /forecast-chart (always the next 60 min
-    forward from now), this covers a whole day - past or current - at
-    native prediction resolution. For today, it naturally tapers off
-    wherever the ensemble job's predictions currently stop (it doesn't
-    force the line to stop exactly at "now" or fabricate future points).
+    Temps d'attente chart, from the same published forecast as every other
+    screen: past slots show the last forecast published before each slot,
+    upcoming slots the current publication. Days before the forecast
+    history began (27 Sep 2026) return no slots.
     """
     try:
         if date:
@@ -658,25 +654,18 @@ def day_wait_chart(date: Optional[str] = None):
         else:
             ref_date = datetime.now().date()
 
+        tz = ZoneInfo(STORE_TZ)
+        start = datetime.combine(ref_date, datetime.min.time(), tzinfo=tz)
         with _conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT DISTINCT ON (prediction_for)
-                        prediction_for,
-                        COALESCE(ensemble_yhat, 0)    AS arrivals,
-                        COALESCE(est_wait_minutes, 0) AS wait_min
-                    FROM queue_predictions
-                    WHERE DATE(prediction_for) = %s
-                    ORDER BY prediction_for ASC, predicted_at DESC
-                """, (ref_date,))
-                rows = cur.fetchall()
+            rows = published_series(conn, start, start + timedelta(days=1))
 
         return {
             "slots": [
                 {
-                    "time":     row["prediction_for"].strftime("%H:%M"),
-                    "arrivals": round(float(row["arrivals"]), 1),
-                    "wait_min": round(float(row["wait_min"]), 1),
+                    "time":     row["prediction_for"].astimezone(tz).strftime("%H:%M"),
+                    "arrivals": round(row["arrivals"], 1) if row["arrivals"] is not None else None,
+                    "wait_min": round(row["wait_min"], 1) if row["wait_min"] is not None else None,
+                    "status":   row["status"],
                 }
                 for row in rows
             ]

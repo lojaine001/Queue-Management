@@ -90,4 +90,40 @@ class WaitWorkerTests(unittest.TestCase):
         for patch_value in [{'arrival_models':[]},{'pred_smooth_min':0},{'dwell_model_mode':'bad'},{'calibration_enabled':'true'}]:
             with self.assertRaises(ValueError):validate_settings({**DEFAULT_SETTINGS,**patch_value})
 
+    def _arrivals(self,coefficient,entries_hour=1000,**extra):
+        frame=pd.DataFrame(dict(ds=[datetime(2026,9,27,10,0)],prophet_yhat=[10.],lstm_yhat=[10.],xgb_yhat=[10.]))
+        config={**DEFAULT_SETTINGS,'pred_smooth_min':3,'arrival_coefficient':coefficient,**extra}
+        return prepare_arrivals(frame,config,None,entries_hour,'v1')
+
+    def test_coefficient_one_is_identity_and_scales_once(self):
+        base,_,_=self._arrivals(1.0)
+        self.assertAlmostEqual(base['arrivals'].iloc[0],10.)
+        scaled,_,_=self._arrivals(1.25)
+        self.assertAlmostEqual(scaled['arrivals'].iloc[0],12.5)
+
+    def test_coefficient_applies_before_the_observed_rate_cap(self):
+        # raw 10 is under the cap (3/min*5 = 15) but 10*2 is not: the cap sees the scaled value.
+        _,_,capped=self._arrivals(1.0,entries_hour=60)
+        self.assertFalse(capped)
+        result,_,capped=self._arrivals(2.0,entries_hour=60)
+        self.assertTrue(capped);self.assertAlmostEqual(result['arrivals'].iloc[0],15.)
+
+    def test_coefficient_is_independent_of_calibration_flag(self):
+        result,calibrated,_=self._arrivals(1.5,calibration_enabled=True)
+        self.assertFalse(calibrated)  # no validated artifact -> not applied, coefficient still is
+        self.assertAlmostEqual(result['arrivals'].iloc[0],15.)
+
+    def test_coefficient_is_in_the_publication_payload(self):
+        source=(Path(__file__).with_name('wait_forecast.py')).read_text(encoding='utf-8')
+        self.assertIn("arrival_coefficient=float(config['arrival_coefficient'])",source)
+
+    def test_dashboard_has_no_private_forecast_formula_or_legacy_source(self):
+        path=Path(__file__).resolve().parents[1]/'Queue-Management-System-v2-main/Queue-Management-System-v2-main/dashboard.py'
+        text=path.read_text(encoding='utf-8')
+        self.assertNotIn('load_predictions',text)
+        self.assertNotIn('load_historical_wait_predictions',text)
+        self.assertNotIn('est_wait_minutes',text)
+        self.assertNotIn('ensemble_yhat',text)
+        self.assertNotIn('_hwp_arr',text)
+
 if __name__=='__main__':unittest.main()
