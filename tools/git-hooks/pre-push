@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs the static regression checks before every push from Queue-Management and
+# blocks the push if any FAIL. Enabled with:  git config core.hooksPath tools/git-hooks
+# Skip once (e.g. emergency fix):            git push --no-verify
+root="$(git rev-parse --show-toplevel)"
+echo "pre-push: running static regression checks (about 1 minute)..."
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root/tools/regression_test.ps1" -StaticOnly
+status=$?
+if [ $status -ne 0 ]; then
+    echo "pre-push: regression checks FAILED - push blocked. See the report path above."
+fi
+exit $status

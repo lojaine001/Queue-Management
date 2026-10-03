@@ -22,7 +22,7 @@ class SimDB:
             self.conn.autocommit = True
             self.cursor = self.conn.cursor()
             self._init_db()
-            print(f"[SimDB] Connected to PostgreSQL and initialized tables for scenario {scenario_name} ✓")
+            print(f"[SimDB] Connected to PostgreSQL and initialized tables for scenario {scenario_name} [OK]")
         except Exception as e:
             print(f"[SimDB] Error connecting to DB: {e}")
             try:

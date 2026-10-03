@@ -23,11 +23,13 @@
       L4  scheduler heartbeat < 120s, no last_error, last success < 15 min
       L5  /forecast updated within 15 min
       L6  camera pipelines running and snapshots refreshed < 120s
+      L7  exactly one Web Push alert checker running
 
     -Runtime   also runs the stop/start cycle first: stop_all must free every
                port and the tunnel, then start_all brings everything back
                (add -SkipCameras to leave the cameras off). Leaves the system
                running.
+    -StaticOnly  skips the live checks (used by the git pre-push hook).
     -UpdateBaseline  records the current failing unit tests as the new baseline.
 
     Exit code 0 = no FAIL. A report is written to logs\regression_<time>.txt.
@@ -40,6 +42,7 @@
 param(
     [switch]$Runtime,
     [switch]$SkipCameras,
+    [switch]$StaticOnly,
     [switch]$UpdateBaseline
 )
 
@@ -212,7 +215,9 @@ else { Add-Result "S8" "PASS" "gitlink in sync, working trees clean" }
 # ---------------------------------------------------------------- live checks
 Write-Host "`n--- Live checks ---" -ForegroundColor Cyan
 $up = @{ 8000 = (Test-Port 8000); 8501 = (Test-Port 8501); 3001 = (Test-Port 3001) }
-if (-not ($up[8000] -or $up[8501] -or $up[3001])) {
+if ($StaticOnly) {
+    Add-Result "L*" "SKIP" "live checks skipped (-StaticOnly)"
+} elseif (-not ($up[8000] -or $up[8501] -or $up[3001])) {
     Add-Result "L*" "SKIP" "services not running (start_all.ps1, or re-run with -Runtime)"
 } else {
     $down = @($up.Keys | Where-Object { -not $up[$_] } | Sort-Object)
@@ -265,6 +270,11 @@ if (-not ($up[8000] -or $up[8501] -or $up[3001])) {
         elseif ($stale.Count) { Add-Result "L6" "FAIL" "snapshots older than 120s: $($stale -join ', ')" }
         else { Add-Result "L6" "PASS" "pipelines A and B running, snapshots fresh" }
     }
+
+    $push = @($py | Where-Object { $_.CommandLine -match "push_alert_checker\.py" -and $_.CommandLine -match "venv" })
+    if ($push.Count -eq 1) { Add-Result "L7" "PASS" "push alert checker running (single instance)" }
+    elseif ($push.Count -gt 1) { Add-Result "L7" "FAIL" "$($push.Count) push alert checkers running - duplicate phone alerts" }
+    else { Add-Result "L7" "FAIL" "push alert checker not running" }
 }
 
 # ---------------------------------------------------------------- summary
@@ -272,6 +282,9 @@ $fails = @($results | Where-Object Status -eq "FAIL").Count
 $warns = @($results | Where-Object Status -eq "WARN").Count
 $report = Join-Path $logDir ("regression_{0:yyyyMMdd_HHmmss}.txt" -f (Get-Date))
 $results | Format-Table -AutoSize | Out-String -Width 300 | Set-Content -Path $report -Encoding UTF8
+# One-line summary of the latest run, shown by status_all.ps1
+"{0:yyyy-MM-dd HH:mm}|{1}|{2}|{3}|{4}" -f (Get-Date), @($results | Where-Object Status -eq "PASS").Count, $warns, $fails, $report |
+    Set-Content -Path (Join-Path $logDir "regression_latest.txt") -Encoding UTF8
 Write-Host "`n==========================================================" -ForegroundColor Cyan
 $summaryColor = if ($fails) { "Red" } elseif ($warns) { "Yellow" } else { "Green" }
 Write-Host ("  {0} PASS, {1} WARN, {2} FAIL   (report: {3})" -f @($results | Where-Object Status -eq "PASS").Count, $warns, $fails, $report) -ForegroundColor $summaryColor

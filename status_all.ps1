@@ -63,8 +63,16 @@ if (Test-Path $schedJson) {
     Write-Host "[-] ML Scheduler:       No runtime heartbeat found" -ForegroundColor Red
 }
 
-# 4. Camera Pipelines
+# 4. Camera Pipelines (and the Web Push alert checker)
 $pyProcs = Get-CimInstance Win32_Process -Filter "name = 'python.exe'" -ErrorAction SilentlyContinue
+$pushProcs = @($pyProcs | Where-Object { $_.CommandLine -match "push_alert_checker\.py" -and $_.CommandLine -match "venv" })
+if ($pushProcs.Count -eq 1) {
+    Write-Host "[OK] Push Alerts:       Running (PID: $($pushProcs[0].ProcessId))" -ForegroundColor Green
+} elseif ($pushProcs.Count -gt 1) {
+    Write-Host "[!] Push Alerts:       $($pushProcs.Count) copies running - phones get duplicate alerts (run stop_all/start_all)" -ForegroundColor Yellow
+} else {
+    Write-Host "[-] Push Alerts:       Offline" -ForegroundColor Red
+}
 $pipeA = $pyProcs | Where-Object { $_.CommandLine -match "Head-Detector" -and $_.CommandLine -match "main.py" } | Select-Object -First 1
 $pipeB = $pyProcs | Where-Object { $_.CommandLine -match "queue_management_v2.py" } | Select-Object -First 1
 
@@ -78,6 +86,17 @@ if ($pipeB) {
     Write-Host "[OK] Pipeline B (Enter): Running (PID: $($pipeB.ProcessId), Camera: Bosch_Camera_Entrance)" -ForegroundColor Green
 } else {
     Write-Host "[-] Pipeline B (Enter): Offline" -ForegroundColor Red
+}
+
+# Last regression check (tools\regression_test.ps1; runs daily via Task Scheduler)
+$regFile = Join-Path $rootDir "logs\regression_latest.txt"
+if (Test-Path $regFile) {
+    $reg = (Get-Content $regFile -Raw).Trim().Split("|")
+    $regColor = if ([int]$reg[3] -gt 0) { "Red" } elseif ([int]$reg[2] -gt 0) { "Yellow" } else { "Green" }
+    $regTag = if ([int]$reg[3] -gt 0) { "[!]" } else { "[OK]" }
+    Write-Host "$regTag Regression:    $($reg[0]) - $($reg[1]) pass, $($reg[2]) warn, $($reg[3]) fail" -ForegroundColor $regColor
+} else {
+    Write-Host "[-] Regression:    never run (tools\regression_test.ps1)" -ForegroundColor Yellow
 }
 
 # 5. RTSP Camera Ping

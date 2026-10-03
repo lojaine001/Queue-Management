@@ -5,7 +5,7 @@
     1. Checks PostgreSQL service
     2. Runs stop_all.ps1 to prevent port conflicts or duplicate runs
     3. Starts FastAPI (port 8000) as background daemon
-    4. Starts Auto-Predict Scheduler (3m interval) as background daemon
+    4. Starts Auto-Predict Scheduler (3m interval) and the Web Push alert checker as background daemons
     5. Starts Streamlit Dashboard (port 8501) as background daemon
     6. Starts IQMS-Web React App (port 3001) as background daemon
     7. Starts the ngrok tunnel to IQMS-Web (public URL; /api is proxied to 8000 by Vite)
@@ -125,6 +125,17 @@ $servicePids["scheduler"] = Start-ServiceProcess -Title "ML Scheduler" `
     -ErrLog (Join-Path $logDir "scheduler_err.log") `
     -Visible $false
 Write-Host "      [OK] ML Scheduler launched (PID: $($servicePids['scheduler']))" -ForegroundColor Green
+
+# Web Push alert checker (sends phone notifications when a device's threshold is crossed)
+Write-Host "      Launching Web Push alert checker..." -ForegroundColor Yellow
+$servicePids["push_alerts"] = Start-ServiceProcess -Title "Push Alert Checker" `
+    -WorkingDir $qmDir `
+    -FilePath $qmVenvPy `
+    -Arguments "-u push_alert_checker.py" `
+    -OutLog (Join-Path $logDir "push_alerts.log") `
+    -ErrLog (Join-Path $logDir "push_alerts_err.log") `
+    -Visible $false
+Write-Host "      [OK] Push alert checker launched (PID: $($servicePids['push_alerts']))" -ForegroundColor Green
 
 # 6. Start Streamlit Operator Dashboard (Port 8501)
 Write-Host "`n[5/8] Launching Streamlit Operator Dashboard (Port 8501)..." -ForegroundColor Yellow

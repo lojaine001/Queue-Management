@@ -42,6 +42,7 @@ if (Test-Path $pidFile) {
 # 2. Kill by known script patterns
 $scriptPatterns = @(
     "run_scheduler\.py",
+    "push_alert_checker\.py",
     "queue_management_v2\.py",
     "Head-Detector",
     "main\.py",
