@@ -11,6 +11,7 @@ const T = {
     horizonLabel: 'Horizon', horizonLive: 'Actuel',
     horizonForecastAt: min => `Attente prévue à +${min} min`,
     horizonSourceNote: 'Basée sur les caisses détectées automatiquement par la caméra — peut différer du tableau de bord si un nombre de caisses est forcé manuellement là-bas.',
+    forecastUpdatedAt: hhmm => `Mis à jour ${hhmm}`, forecastStale: 'Prévision obsolète',
     selectCameraHint: 'Sélectionnez une caméra pour voir son flux',
     // Wording adapts to whichever horizon is selected — same value the
     // gauge itself is showing, so the alert and the display never disagree.
@@ -28,11 +29,7 @@ const T = {
     noHourlyData: 'Aucune donnée horaire disponible',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs hier`,
     statsTitle: 'Statistique',
-    femmeLabel: 'FEMME', hommeLabel: 'HOMME',
     waitChartTitle: "TEMPS D'ATTENTE", dayWaitHistory: 'Historique de la journée',
-    demographicsTitle: 'DÉMOGRAPHIE CLIENTS', demographicsSubtitle: 'Profil genre et âge des visiteurs',
-    genderSplitLabel: 'Répartition par genre', ageGroupLabel: 'Répartition par âge',
-    noDemographicsData: 'Aucune donnée démographique pour cette date',
     last7days: '7 derniers jours',
   },
   en: {
@@ -45,6 +42,7 @@ const T = {
     horizonLabel: 'Horizon', horizonLive: 'Current',
     horizonForecastAt: min => `Predicted wait at +${min} min`,
     horizonSourceNote: 'Based on lanes auto-detected by the camera — may differ from the dashboard if a lane count is manually overridden there.',
+    forecastUpdatedAt: hhmm => `Updated ${hhmm}`, forecastStale: 'Forecast stale',
     selectCameraHint: 'Select a camera to view its feed',
     // Wording adapts to whichever horizon is selected — same value the
     // gauge itself is showing, so the alert and the display never disagree.
@@ -62,11 +60,7 @@ const T = {
     noHourlyData: 'No hourly data available',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs yesterday`,
     statsTitle: 'Statistics',
-    femmeLabel: 'FEMALE', hommeLabel: 'MALE',
     waitChartTitle: 'WAIT TIME', dayWaitHistory: 'Full-day history',
-    demographicsTitle: 'CUSTOMER DEMOGRAPHICS', demographicsSubtitle: 'Gender and age profile of visitors',
-    genderSplitLabel: 'Gender split', ageGroupLabel: 'Age group distribution',
-    noDemographicsData: 'No demographic data for this date',
     last7days: 'Last 7 days',
   },
 };

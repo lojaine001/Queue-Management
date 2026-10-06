@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
@@ -17,7 +17,7 @@ const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/
 // the dashboard itself shows, guaranteed to match). +20 is the one horizon
 // the dashboard doesn't keep on hand, so it's the only one computed from
 // the saved forecast (/forecast/wait) instead.
-const HORIZON_PRESETS = [0, 5, 10, 15, 20];
+const HORIZON_PRESETS = [0, 5, 10, 15];
 
 // Count-driven lane color: 0 = idle/closed, 1 = green, 2-3 = orange, 4+ = red
 function countColor(count) {
@@ -301,6 +301,14 @@ export default function LiveScreen() {
   }[horizonMin];
   const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
 
+  // Independent of /forecast's own stale flag (10-min default threshold) --
+  // Live's own staleness rule here is a stricter 5 minutes.
+  const forecastUpdatedAt = forecastState?.updated_at;
+  const forecastStale = !forecastUpdatedAt || (Date.now() - new Date(forecastUpdatedAt).getTime()) > 5 * 60000;
+  const forecastUpdatedLabel = forecastUpdatedAt
+    ? new Date(forecastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
+
   // Single alert, tied to whichever horizon is currently selected — watches
   // gaugeValue, the exact same number the gauge itself displays, so the
   // alert can never disagree with what's on screen. (Previously: two
@@ -375,9 +383,14 @@ export default function LiveScreen() {
         <div>
           <div className="section-header" style={{ marginTop: 0 }}>
             <span className="section-title">SNAPSHOT</span>
+            <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: forecastStale ? '#d29922' : '#8b949e' }}>
+              {forecastStale ? t.forecastStale : t.forecastUpdatedAt(forecastUpdatedLabel)}
+            </span>
           </div>
           <HorizonPicker value={horizonMin} onChange={setHorizonMin} t={t} />
-          <Gauge current={gaugeValue} label={gaugeLabel} t={t} />
+          <div style={forecastStale ? { opacity: 0.5 } : undefined}>
+            <Gauge current={gaugeValue} label={gaugeLabel} t={t} />
+          </div>
         </div>
       </div>
 

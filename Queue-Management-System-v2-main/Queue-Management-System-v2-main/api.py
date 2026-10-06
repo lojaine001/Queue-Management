@@ -465,50 +465,9 @@ def day_recap(date: Optional[str] = None):
                 """)
                 equip_rows = cur.fetchall()
 
-                # Gender/age demographics — computed fresh for the requested
-                # day (not read from dashboard_state, which only ever holds
-                # today's cache and would be wrong for past dates).
-                cur.execute(f"""
-                    SELECT gender, COUNT(*) AS cnt
-                    FROM entrance_events
-                    WHERE {date_filter}
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND dwell_seconds >= 10
-                      AND gender IS NOT NULL AND gender != 'unknown'
-                    GROUP BY gender
-                """)
-                gender_rows = cur.fetchall()
-
-                cur.execute(f"""
-                    SELECT
-                        CASE
-                            WHEN age_estimate < 30 THEN '18-30'
-                            WHEN age_estimate < 50 THEN '30-50'
-                            ELSE '50+'
-                        END AS age_group,
-                        COUNT(*) AS cnt
-                    FROM entrance_events
-                    WHERE {date_filter}
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND dwell_seconds >= 10
-                      AND age_estimate IS NOT NULL
-                    GROUP BY 1
-                    ORDER BY MIN(age_estimate)
-                """)
-                age_rows = cur.fetchall()
-
-                cur.execute(f"""
-                    SELECT ROUND(AVG(age_estimate)::numeric, 1) AS avg_age
-                    FROM entrance_events
-                    WHERE {date_filter}
-                      AND camera_id NOT LIKE 'SIM_%%'
-                      AND dwell_seconds >= 10
-                      AND age_estimate IS NOT NULL
-                """)
-                avg_age_row = cur.fetchone()
 
                 # Hourly entries — also computed fresh per requested day,
-                # same reason as demographics above.
+                # computed fresh so past dates are correct, not just today.
                 cur.execute(f"""
                     SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour,
                            COUNT(*) AS cnt
@@ -543,31 +502,6 @@ def day_recap(date: Optional[str] = None):
                 "color":   colors[key],
             })
 
-        gender_total = sum(int(r["cnt"]) for r in gender_rows) or 1
-        gender_colors = {"female": "#ec4899", "male": "#3b82f6"}
-        gender_labels = {"female": "Femme", "male": "Homme"}
-        demographics_gender = [
-            {
-                "key":     r["gender"],
-                "label":   gender_labels.get(r["gender"], str(r["gender"]).capitalize()),
-                "count":   int(r["cnt"]),
-                "percent": round(int(r["cnt"]) / gender_total * 100),
-                "color":   gender_colors.get(r["gender"], "#94a3b8"),
-            }
-            for r in gender_rows
-        ]
-
-        age_colors = {"18-30": "#22d3ee", "30-50": "#a78bfa", "50+": "#fb923c"}
-        demographics_age = [
-            {
-                "group": r["age_group"],
-                "count": int(r["cnt"]),
-                "color": age_colors.get(r["age_group"], "#94a3b8"),
-            }
-            for r in age_rows
-        ]
-
-        avg_age = float(avg_age_row["avg_age"]) if avg_age_row and avg_age_row["avg_age"] else None
 
         peak_hourly_cnt = max((int(r["cnt"]) for r in hourly_rows), default=0)
         hourly_entries = [
@@ -599,9 +533,6 @@ def day_recap(date: Optional[str] = None):
             "lanes_today":         lanes_today,
             "busiest_lane":        busiest_lane,
             "alert_minutes":       alert_minutes,
-            "demographics_gender": demographics_gender,
-            "demographics_age":    demographics_age,
-            "avg_age":             avg_age,
             "entries_by_hour":     hourly_entries,
         }
 
