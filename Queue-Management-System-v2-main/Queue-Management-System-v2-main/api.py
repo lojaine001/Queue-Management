@@ -35,6 +35,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 from prediction.forecast_state import finite, freshness, lane_scenarios, scenario_for, wait_at_horizon
 
+# Sibling module: make it importable even when api.py is loaded by file
+# path (the unit tests do this), where this directory isn't on sys.path.
+API_DIR = Path(__file__).resolve().parent
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
 import camera_snapshot
 
 SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
