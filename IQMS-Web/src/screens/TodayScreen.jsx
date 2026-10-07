@@ -18,6 +18,13 @@ function todayStr() {
 // it's been validated against real open-hours data.
 const SHOW_WAIT_CHART = false;
 
+function fmtMinSec(min) {
+  if (min == null) return '—';
+  const m = Math.floor(min);
+  const sec = Math.round((min - m) * 60);
+  return sec > 0 ? `${m}:${String(sec).padStart(2, '0')}` : `${m}:00`;
+}
+
 function EntriesTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
@@ -40,6 +47,28 @@ function WaitTooltip({ active, payload, label, t }) {
           {t.waitLegend}: {p.value?.toFixed(1)}
         </div>
       ))}
+    </div>
+  );
+}
+
+function CheckoutWaitTooltip({ active, payload, label, t }) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0];
+  return (
+    <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
+      <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
+      <div style={{ color: p.color, fontWeight: 700, fontSize: 12 }}>{fmtMinSec(p.value)}</div>
+    </div>
+  );
+}
+
+function QueueWaitingTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0];
+  return (
+    <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
+      <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
+      <div style={{ color: p.color, fontWeight: 700, fontSize: 12 }}>{p.value?.toFixed(1)}</div>
     </div>
   );
 }
@@ -67,6 +96,12 @@ export default function TodayScreen() {
   }));
 
   const waitPoints = (dayWait?.slots ?? []).map(sl => ({ t: sl.time, wait: sl.wait_min }));
+
+  const waitStats = recap?.wait_stats ?? { avg_wait_min: null, max_wait_min: null, by_hour: [] };
+  const waitByHour = (waitStats.by_hour ?? []).map(h => ({ hour: h.hour, avg_wait_min: h.avg_wait_min }));
+
+  const queueStats = recap?.queue_stats ?? { avg_waiting: null, peak_waiting: null, peak_time: null, by_hour: [] };
+  const queueByHour = (queueStats.by_hour ?? []).map(h => ({ hour: h.hour, avg_waiting: h.avg_waiting }));
 
   return (
     <div className="screen-page">
@@ -180,6 +215,86 @@ export default function TodayScreen() {
             <div style={s.legendRow}>
               <span style={s.legendItem}><span style={{ ...s.legendDot, background: '#db6d28' }} /> {t.waitLegend}</span>
             </div>
+          </div>
+        </>
+      )}
+
+      {/* Checkout wait time */}
+      <div className="section-header">
+        <span className="section-title">{t.avgCheckoutWait}</span>
+      </div>
+      {loading ? (
+        <Skeleton height={96} radius={16} />
+      ) : waitByHour.length === 0 ? (
+        <div style={s.chartCard}>
+          <div style={s.emptyChart}>{t.noCheckoutQueueData}</div>
+        </div>
+      ) : (
+        <>
+          <div style={s.banner}>
+            <div style={s.bannerLeft}>
+              <div style={s.bannerIcon}>⏱</div>
+              <div>
+                <div style={s.statLabel}>{t.avgCheckoutWait}</div>
+                <div style={s.bannerValueRow}>
+                  <span style={s.bannerValue}>{fmtMinSec(waitStats.avg_wait_min)}</span>
+                  <span style={s.bannerDelta}>{t.maxCheckoutWait}: {fmtMinSec(waitStats.max_wait_min)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style={s.chartCard}>
+            <ResponsiveContainer width="100%" height={160}>
+              <ComposedChart data={waitByHour} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
+                <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} />
+                <Tooltip content={<CheckoutWaitTooltip t={t} />} />
+                <Bar dataKey="avg_wait_min" fill="#db6d28" radius={[3, 3, 0, 0]} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </>
+      )}
+
+      {/* People waiting at checkout */}
+      <div className="section-header">
+        <span className="section-title">{t.avgPeopleWaiting}</span>
+      </div>
+      {loading ? (
+        <Skeleton height={96} radius={16} />
+      ) : queueByHour.length === 0 ? (
+        <div style={s.chartCard}>
+          <div style={s.emptyChart}>{t.noCheckoutQueueData}</div>
+        </div>
+      ) : (
+        <>
+          <div style={s.banner}>
+            <div style={s.bannerLeft}>
+              <div style={s.bannerIcon}>🧍</div>
+              <div>
+                <div style={s.statLabel}>{t.avgPeopleWaiting}</div>
+                <div style={s.bannerValueRow}>
+                  <span style={s.bannerValue}>{queueStats.avg_waiting != null ? queueStats.avg_waiting.toFixed(1) : '—'}</span>
+                  {queueStats.peak_waiting != null && (
+                    <span style={s.bannerDelta}>
+                      {t.peakPeopleWaiting}: {queueStats.peak_waiting} {t.peopleUnit} ({queueStats.peak_time})
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style={s.chartCard}>
+            <ResponsiveContainer width="100%" height={160}>
+              <ComposedChart data={queueByHour} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
+                <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} allowDecimals={false} />
+                <Tooltip content={<QueueWaitingTooltip />} />
+                <Bar dataKey="avg_waiting" fill="#58a6ff" radius={[3, 3, 0, 0]} />
+              </ComposedChart>
+            </ResponsiveContainer>
           </div>
         </>
       )}

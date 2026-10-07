@@ -6,6 +6,8 @@ Run with:
 """
 from __future__ import annotations
 
+import csv
+import io
 import os
 import sys
 from zoneinfo import ZoneInfo
@@ -16,8 +18,9 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # Every other script in this codebase (dashboard.py, ensemble_predict.py,
@@ -30,8 +33,9 @@ load_dotenv(find_dotenv(usecwd=True))
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-from prediction.forecast_state import (finite, freshness, lane_scenarios, published_series, scenario_for,
-                                       wait_at_horizon)
+from prediction.forecast_state import finite, freshness, lane_scenarios, scenario_for, wait_at_horizon
+
+import camera_snapshot
 
 SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
 
@@ -74,6 +78,110 @@ def _lane_status(avg_wait_min: float, queue_depth: int) -> str:
     elif queue_depth > 0 or avg_wait_min > 0:
         return "open"
     return "closed"
+
+
+def kpi_wait(cur, start_date, end_date, bucket="hour"):
+    """Average/max checkout wait (minutes), from service_events.
+    start_date inclusive, end_date exclusive (both dates, store TZ).
+    bucket='hour' (used for a single day) or 'day' (used for week/month)."""
+    key = "by_hour" if bucket == "hour" else "by_day"
+    if start_date is None:
+        return {"avg_wait_min": None, "max_wait_min": None, "wait_source": "service_events", key: []}
+    trunc_unit = "hour" if bucket == "hour" else "day"
+    fmt = "%H:%M" if bucket == "hour" else "%Y-%m-%d"
+    label_key = "hour" if bucket == "hour" else "date"
+
+    cur.execute("""
+        SELECT DATE_TRUNC(%s, timestamp AT TIME ZONE %s) AS bucket,
+               ROUND(AVG(total_dwell_sec)::numeric / 60.0, 1) AS avg_wait_min,
+               ROUND(MAX(total_dwell_sec)::numeric / 60.0, 1) AS max_wait_min
+        FROM service_events
+        WHERE camera_id = %s
+          AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+        GROUP BY 1 ORDER BY 1 ASC
+    """, (trunc_unit, STORE_TZ, CHECKOUT_CAM_ID, STORE_TZ, start_date, STORE_TZ, end_date))
+    rows = cur.fetchall()
+
+    cur.execute("""
+        SELECT ROUND(AVG(total_dwell_sec)::numeric / 60.0, 1) AS avg_wait_min,
+               ROUND(MAX(total_dwell_sec)::numeric / 60.0, 1) AS max_wait_min
+        FROM service_events
+        WHERE camera_id = %s
+          AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+    """, (CHECKOUT_CAM_ID, STORE_TZ, start_date, STORE_TZ, end_date))
+    overall = cur.fetchone() or {}
+
+    return {
+        "avg_wait_min": float(overall["avg_wait_min"]) if overall.get("avg_wait_min") is not None else None,
+        "max_wait_min": float(overall["max_wait_min"]) if overall.get("max_wait_min") is not None else None,
+        "wait_source": "service_events",
+        key: [
+            {
+                label_key: r["bucket"].strftime(fmt),
+                "avg_wait_min": float(r["avg_wait_min"]) if r["avg_wait_min"] is not None else None,
+                "max_wait_min": float(r["max_wait_min"]) if r["max_wait_min"] is not None else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+def kpi_queue(cur, start_date, end_date, bucket="hour"):
+    """Average/peak people waiting at checkout, from queue_state_snapshots.
+    Same start/end/bucket contract as kpi_wait."""
+    key = "by_hour" if bucket == "hour" else "by_day"
+    if start_date is None:
+        return {"avg_waiting": None, "peak_waiting": None, "peak_time": None, key: []}
+    trunc_unit = "hour" if bucket == "hour" else "day"
+    fmt = "%H:%M" if bucket == "hour" else "%Y-%m-%d"
+    label_key = "hour" if bucket == "hour" else "date"
+
+    cur.execute("""
+        SELECT DATE_TRUNC(%s, timestamp AT TIME ZONE %s) AS bucket,
+               ROUND(AVG(queue_count)::numeric, 1) AS avg_waiting,
+               MAX(queue_count) AS max_waiting
+        FROM queue_state_snapshots
+        WHERE camera_id = %s
+          AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+        GROUP BY 1 ORDER BY 1 ASC
+    """, (trunc_unit, STORE_TZ, CHECKOUT_CAM_ID, STORE_TZ, start_date, STORE_TZ, end_date))
+    rows = cur.fetchall()
+
+    cur.execute("""
+        SELECT ROUND(AVG(queue_count)::numeric, 1) AS avg_waiting, MAX(queue_count) AS peak_waiting
+        FROM queue_state_snapshots
+        WHERE camera_id = %s
+          AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+    """, (CHECKOUT_CAM_ID, STORE_TZ, start_date, STORE_TZ, end_date))
+    overall = cur.fetchone() or {}
+
+    peak_time = None
+    if overall.get("peak_waiting") is not None:
+        cur.execute("""
+            SELECT timestamp FROM queue_state_snapshots
+            WHERE camera_id = %s
+              AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+              AND queue_count = %s
+            ORDER BY timestamp ASC LIMIT 1
+        """, (CHECKOUT_CAM_ID, STORE_TZ, start_date, STORE_TZ, end_date, overall["peak_waiting"]))
+        peak_row = cur.fetchone()
+        if peak_row:
+            peak_fmt = "%H:%M" if bucket == "hour" else "%Y-%m-%d %H:%M"
+            peak_time = peak_row["timestamp"].astimezone(ZoneInfo(STORE_TZ)).strftime(peak_fmt)
+
+    return {
+        "avg_waiting": float(overall["avg_waiting"]) if overall.get("avg_waiting") is not None else None,
+        "peak_waiting": int(overall["peak_waiting"]) if overall.get("peak_waiting") is not None else None,
+        "peak_time": peak_time,
+        key: [
+            {
+                label_key: r["bucket"].strftime(fmt),
+                "avg_waiting": float(r["avg_waiting"]) if r["avg_waiting"] is not None else None,
+                "max_waiting": int(r["max_waiting"]) if r["max_waiting"] is not None else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -446,12 +554,16 @@ def day_recap(date: Optional[str] = None):
                 busiest_row  = cur.fetchone()
                 busiest_lane = busiest_row["lane_id"] if busiest_row else None
 
-                # Alert minutes: slots of the published forecast (the one source every
-                # screen uses) whose predicted wait reaches the ALERT threshold.
-                _day_start = datetime.combine(ref_date or datetime.now().date(), datetime.min.time(),
-                                              tzinfo=ZoneInfo(STORE_TZ))
-                _day_series = published_series(conn, _day_start, _day_start + timedelta(days=1))
-                alert_minutes = sum(1 for row in _day_series if row["status"] == "ALERT") * BUCKET_MIN
+                # Alert minutes today (from ensemble predictions)
+                alert_date_filter = f"DATE(prediction_for) = '{ref_date}'" if ref_date else "DATE(prediction_for) = CURRENT_DATE"
+                cur.execute(f"""
+                    SELECT COUNT(*) AS alert_slots
+                    FROM queue_predictions
+                    WHERE {alert_date_filter}
+                      AND status = 'ALERT'
+                """)
+                alert_row     = cur.fetchone()
+                alert_minutes = int((alert_row["alert_slots"] or 0) if alert_row else 0) * BUCKET_MIN
 
                 # Equipment mix
                 cur.execute(f"""
@@ -465,9 +577,9 @@ def day_recap(date: Optional[str] = None):
                 """)
                 equip_rows = cur.fetchall()
 
-
-                # Hourly entries — also computed fresh per requested day,
-                # computed fresh so past dates are correct, not just today.
+                # Hourly entries — computed fresh per requested day, not from
+                # dashboard_state, which only ever holds today's cache and
+                # would be wrong for past dates.
                 cur.execute(f"""
                     SELECT DATE_TRUNC('hour', timestamp AT TIME ZONE 'Europe/Paris') AS hour,
                            COUNT(*) AS cnt
@@ -478,6 +590,8 @@ def day_recap(date: Optional[str] = None):
                     GROUP BY 1 ORDER BY 1 ASC
                 """)
                 hourly_rows = cur.fetchall()
+                wait_stats = kpi_wait(cur, ref_date, ref_date + timedelta(days=1)) if ref_date else kpi_wait(cur, None, None)
+                queue_stats = kpi_queue(cur, ref_date, ref_date + timedelta(days=1)) if ref_date else kpi_queue(cur, None, None)
 
         trend_by_day = {r["day"]: int(r["cnt"]) for r in trend_rows}
         trend_7d = []
@@ -501,7 +615,6 @@ def day_recap(date: Optional[str] = None):
                 "percent": round(count / denom * 100),
                 "color":   colors[key],
             })
-
 
         peak_hourly_cnt = max((int(r["cnt"]) for r in hourly_rows), default=0)
         hourly_entries = [
@@ -533,7 +646,7 @@ def day_recap(date: Optional[str] = None):
             "lanes_today":         lanes_today,
             "busiest_lane":        busiest_lane,
             "alert_minutes":       alert_minutes,
-            "entries_by_hour":     hourly_entries,
+            "entries_by_hour":     hourly_entries, "wait_stats": wait_stats, "queue_stats": queue_stats,
         }
 
     except HTTPException:
@@ -571,10 +684,11 @@ def forecast_chart():
 def day_wait_chart(date: Optional[str] = None):
     """
     Full-day history of predicted arrivals/wait for the Statistique page's
-    Temps d'attente chart, from the same published forecast as every other
-    screen: past slots show the last forecast published before each slot,
-    upcoming slots the current publication. Days before the forecast
-    history began (27 Sep 2026) return no slots.
+    Temps d'attente chart. Unlike /forecast-chart (always the next 60 min
+    forward from now), this covers a whole day - past or current - at
+    native prediction resolution. For today, it naturally tapers off
+    wherever the ensemble job's predictions currently stop (it doesn't
+    force the line to stop exactly at "now" or fabricate future points).
     """
     try:
         if date:
@@ -585,18 +699,25 @@ def day_wait_chart(date: Optional[str] = None):
         else:
             ref_date = datetime.now().date()
 
-        tz = ZoneInfo(STORE_TZ)
-        start = datetime.combine(ref_date, datetime.min.time(), tzinfo=tz)
         with _conn() as conn:
-            rows = published_series(conn, start, start + timedelta(days=1))
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (prediction_for)
+                        prediction_for,
+                        COALESCE(ensemble_yhat, 0)    AS arrivals,
+                        COALESCE(est_wait_minutes, 0) AS wait_min
+                    FROM queue_predictions
+                    WHERE DATE(prediction_for) = %s
+                    ORDER BY prediction_for ASC, predicted_at DESC
+                """, (ref_date,))
+                rows = cur.fetchall()
 
         return {
             "slots": [
                 {
-                    "time":     row["prediction_for"].astimezone(tz).strftime("%H:%M"),
-                    "arrivals": round(row["arrivals"], 1) if row["arrivals"] is not None else None,
-                    "wait_min": round(row["wait_min"], 1) if row["wait_min"] is not None else None,
-                    "status":   row["status"],
+                    "time":     row["prediction_for"].strftime("%H:%M"),
+                    "arrivals": round(float(row["arrivals"]), 1),
+                    "wait_min": round(float(row["wait_min"]), 1),
                 }
                 for row in rows
             ]
@@ -680,14 +801,32 @@ def forecast_chart_2d():
 
 
 @app.get("/snapshot/checkout")
-def snapshot_checkout():
-    import base64
-    p = SNAP_DIR / "latest_checkout.jpg"
-    if not p.exists():
-        return {"image": None}
-    with open(str(p), "rb") as f:
-        data = base64.b64encode(f.read()).decode()
-    return {"image": f"data:image/jpeg;base64,{data}"}
+def snapshot_checkout(request: Request, format: str = None):
+    if format == "json":
+        # Legacy JSON form, kept for IQMSManager compatibility until it is
+        # updated to the new binary endpoint too.
+        import base64
+        p = SNAP_DIR / "latest_checkout.jpg"
+        if not p.exists():
+            return {"image": None}
+        with open(str(p), "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        return {"image": f"data:image/jpeg;base64,{data}"}
+
+    result = camera_snapshot.get_snapshot()
+    if result["bytes"] is None:
+        raise HTTPException(status_code=503, detail="Checkout camera unavailable")
+    if request.headers.get("if-none-match") == result["etag"]:
+        return Response(status_code=304, headers={"ETag": result["etag"]})
+    return Response(
+        content=result["bytes"],
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-cache",
+            "ETag": result["etag"],
+            "X-Snapshot-Age": str(round(result["age_seconds"], 1)),
+        },
+    )
 
 
 @app.get("/snapshot/entrance")
@@ -766,3 +905,241 @@ def statistics_summary():
         if not row:return {"available":False,"stale":True}
         return {"available":True,**row,**freshness({"updated_at":row["updated_at"]})}
     finally:conn.close()
+
+PERIOD_BUCKET = {"day": "hour", "week": "day", "month": "day"}
+
+ALL_KPIS = ["customers", "avg_wait", "max_wait", "avg_waiting", "peak_waiting",
+            "lanes_used", "alert_minutes", "trolley", "store_basket", "peak_hour"]
+
+KPI_LABELS = {
+    "fr": {
+        "customers": "Clients total", "avg_wait": "Temps d'attente moyen (min)",
+        "max_wait": "Temps d'attente max (min)", "avg_waiting": "Personnes en attente (moy.)",
+        "peak_waiting": "Pic de personnes en attente", "lanes_used": "Files utilisees",
+        "alert_minutes": "Temps en alerte (min)", "trolley": "Chariots", "store_basket": "Paniers",
+        "peak_hour": "Heure de pointe",
+    },
+    "en": {
+        "customers": "Total customers", "avg_wait": "Avg checkout wait (min)",
+        "max_wait": "Max checkout wait (min)", "avg_waiting": "Avg people waiting",
+        "peak_waiting": "Peak people waiting", "lanes_used": "Lanes used",
+        "alert_minutes": "Time in alert (min)", "trolley": "Trolleys", "store_basket": "Baskets",
+        "peak_hour": "Peak hour",
+    },
+}
+
+
+def _period_bounds(period: str, date_str: str):
+    try:
+        ref = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    if period == "day":
+        return ref, ref + timedelta(days=1)
+    elif period == "week":
+        monday = ref - timedelta(days=ref.weekday())
+        return monday, monday + timedelta(days=7)
+    elif period == "month":
+        first = ref.replace(day=1)
+        next_first = (first.replace(year=first.year + 1, month=1)
+                      if first.month == 12 else first.replace(month=first.month + 1))
+        return first, next_first
+    raise HTTPException(status_code=400, detail="period must be day, week, or month")
+
+
+def _export_rows(cur, start_date, end_date, bucket):
+    """Returns (rows, total_row). rows: one per hour (day period) or per day
+    (week/month period). total_row: sums for counts, the true overall
+    avg/max from kpi_wait/kpi_queue (not an average-of-averages), and a
+    true distinct-lane count over the whole range (not a sum, which would
+    double-count a lane reused across multiple days)."""
+    trunc_unit = "hour" if bucket == "hour" else "day"
+    fmt = "%H:%M" if bucket == "hour" else "%Y-%m-%d"
+
+    cur.execute("""
+        SELECT DATE_TRUNC(%s, timestamp AT TIME ZONE %s) AS bucket,
+               COUNT(*) AS customers,
+               COUNT(*) FILTER (WHERE equipment_type = 'trolley') AS trolley,
+               COUNT(*) FILTER (WHERE equipment_type = 'store_basket') AS store_basket
+        FROM entrance_events
+        WHERE camera_id NOT LIKE 'SIM_%%' AND dwell_seconds >= 10
+          AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+        GROUP BY 1 ORDER BY 1
+    """, (trunc_unit, STORE_TZ, STORE_TZ, start_date, STORE_TZ, end_date))
+    entrance_by = {r["bucket"].strftime(fmt): r for r in cur.fetchall()}
+
+    wait = kpi_wait(cur, start_date, end_date, bucket)
+    wait_key = "by_hour" if bucket == "hour" else "by_day"
+    wait_by = {(r.get("hour") or r.get("date")): r for r in wait[wait_key]}
+
+    queue = kpi_queue(cur, start_date, end_date, bucket)
+    queue_by = {(r.get("hour") or r.get("date")): r for r in queue[wait_key]}
+
+    cur.execute("""
+        SELECT DATE_TRUNC(%s, timestamp AT TIME ZONE %s) AS bucket, COUNT(DISTINCT lane_id) AS lanes_used
+        FROM service_events
+        WHERE camera_id NOT LIKE 'SIM_%%'
+          AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+        GROUP BY 1 ORDER BY 1
+    """, (trunc_unit, STORE_TZ, STORE_TZ, start_date, STORE_TZ, end_date))
+    lanes_by = {r["bucket"].strftime(fmt): int(r["lanes_used"]) for r in cur.fetchall()}
+
+    cur.execute("""
+        SELECT DATE_TRUNC(%s, prediction_for AT TIME ZONE %s) AS bucket, COUNT(*) AS alert_slots
+        FROM queue_predictions
+        WHERE status = 'ALERT'
+          AND prediction_for AT TIME ZONE %s >= %s AND prediction_for AT TIME ZONE %s < %s
+        GROUP BY 1 ORDER BY 1
+    """, (trunc_unit, STORE_TZ, STORE_TZ, start_date, STORE_TZ, end_date))
+    alert_by = {r["bucket"].strftime(fmt): int(r["alert_slots"]) * BUCKET_MIN for r in cur.fetchall()}
+
+    peak_hour_by = {}
+    if bucket == "day":
+        cur.execute("""
+            SELECT DATE_TRUNC('day', timestamp AT TIME ZONE %s) AS day,
+                   DATE_TRUNC('hour', timestamp AT TIME ZONE %s) AS hour,
+                   COUNT(*) AS cnt
+            FROM entrance_events
+            WHERE camera_id NOT LIKE 'SIM_%%' AND dwell_seconds >= 10
+              AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+            GROUP BY 1, 2
+        """, (STORE_TZ, STORE_TZ, STORE_TZ, start_date, STORE_TZ, end_date))
+        by_day_hours = {}
+        for r in cur.fetchall():
+            d = r["day"].strftime("%Y-%m-%d")
+            by_day_hours.setdefault(d, []).append((r["hour"], int(r["cnt"])))
+        for d, hrs in by_day_hours.items():
+            peak_hour_by[d] = max(hrs, key=lambda x: x[1])[0].strftime("%H:%M")
+
+    rows = []
+    if bucket == "hour":
+        for h in range(24):
+            label = f"{h:02d}:00"
+            e = entrance_by.get(label)
+            w = wait_by.get(label, {})
+            q = queue_by.get(label, {})
+            rows.append({
+                "label": label, "customers": int(e["customers"]) if e else 0,
+                "avg_wait": w.get("avg_wait_min"), "max_wait": w.get("max_wait_min"),
+                "avg_waiting": q.get("avg_waiting"), "peak_waiting": q.get("max_waiting"),
+                "lanes_used": lanes_by.get(label, 0), "alert_minutes": alert_by.get(label, 0),
+                "trolley": int(e["trolley"]) if e else 0, "store_basket": int(e["store_basket"]) if e else 0,
+                "peak_hour": None,
+            })
+    else:
+        d = start_date
+        while d < end_date:
+            label = d.strftime("%Y-%m-%d")
+            e = entrance_by.get(label)
+            w = wait_by.get(label, {})
+            q = queue_by.get(label, {})
+            rows.append({
+                "label": label, "customers": int(e["customers"]) if e else 0,
+                "avg_wait": w.get("avg_wait_min"), "max_wait": w.get("max_wait_min"),
+                "avg_waiting": q.get("avg_waiting"), "peak_waiting": q.get("max_waiting"),
+                "lanes_used": lanes_by.get(label, 0), "alert_minutes": alert_by.get(label, 0),
+                "trolley": int(e["trolley"]) if e else 0, "store_basket": int(e["store_basket"]) if e else 0,
+                "peak_hour": peak_hour_by.get(label),
+            })
+            d += timedelta(days=1)
+
+    cur.execute("""
+        SELECT COUNT(DISTINCT lane_id) AS lanes_used
+        FROM service_events
+        WHERE camera_id NOT LIKE 'SIM_%%'
+          AND timestamp AT TIME ZONE %s >= %s AND timestamp AT TIME ZONE %s < %s
+    """, (STORE_TZ, start_date, STORE_TZ, end_date))
+    total_lanes_row = cur.fetchone()
+    total_lanes = int(total_lanes_row["lanes_used"]) if total_lanes_row and total_lanes_row["lanes_used"] else 0
+
+    total_row = {
+        "label": "TOTAL",
+        "customers": sum(r["customers"] for r in rows),
+        "avg_wait": wait.get("avg_wait_min"),
+        "max_wait": wait.get("max_wait_min"),
+        "avg_waiting": queue.get("avg_waiting"),
+        "peak_waiting": queue.get("peak_waiting"),
+        "lanes_used": total_lanes,
+        "alert_minutes": sum(r["alert_minutes"] for r in rows),
+        "trolley": sum(r["trolley"] for r in rows),
+        "store_basket": sum(r["store_basket"] for r in rows),
+        "peak_hour": None,
+    }
+
+    return rows, total_row
+
+
+@app.get("/export/preview")
+def export_preview(period: str, date: str, kpis: Optional[str] = None, lang: str = "fr"):
+    if period not in PERIOD_BUCKET:
+        raise HTTPException(status_code=400, detail="period must be day, week, or month")
+    start_date, end_date = _period_bounds(period, date)
+    bucket = PERIOD_BUCKET[period]
+    selected = kpis.split(",") if kpis else ALL_KPIS
+    unknown = [k for k in selected if k not in ALL_KPIS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown KPI(s): {unknown}")
+
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            rows, total_row = _export_rows(cur, start_date, end_date, bucket)
+
+    labels = KPI_LABELS.get(lang, KPI_LABELS["fr"])
+    return {
+        "period": period, "bucket": bucket, "kpis": selected,
+        "labels": {k: labels[k] for k in selected},
+        "rows": [{"label": r["label"], **{k: r[k] for k in selected}} for r in rows[:10]],
+        "total": {"label": total_row["label"], **{k: total_row[k] for k in selected}},
+        "row_count": len(rows),
+    }
+
+
+@app.get("/export")
+def export_csv(period: str, date: str, kpis: Optional[str] = None, format: str = "csv", lang: str = "fr"):
+    if format != "csv":
+        raise HTTPException(status_code=400, detail="Only format=csv is supported currently")
+    if period not in PERIOD_BUCKET:
+        raise HTTPException(status_code=400, detail="period must be day, week, or month")
+    start_date, end_date = _period_bounds(period, date)
+    bucket = PERIOD_BUCKET[period]
+    selected = kpis.split(",") if kpis else ALL_KPIS
+    unknown = [k for k in selected if k not in ALL_KPIS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown KPI(s): {unknown}")
+
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            rows, total_row = _export_rows(cur, start_date, end_date, bucket)
+
+    labels = KPI_LABELS.get(lang, KPI_LABELS["fr"])
+    sep = ";" if lang == "fr" else ","
+    row_label = ("Heure" if bucket == "hour" else "Date") if lang == "fr" else ("Hour" if bucket == "hour" else "Date")
+
+    def fmt_num(v):
+        if v is None:
+            return ""
+        s = f"{v}"
+        return s.replace(".", ",") if lang == "fr" else s
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, delimiter=sep)
+    writer.writerow([row_label] + [labels[k] for k in selected])
+    for r in rows:
+        writer.writerow([r["label"]] + [fmt_num(r[k]) for k in selected])
+    writer.writerow([total_row["label"]] + [fmt_num(total_row[k]) for k in selected])
+
+    csv_bytes = ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+    if period == "day":
+        filename = f"IQMS_{date}.csv"
+    elif period == "week":
+        iso_year, iso_week, _ = start_date.isocalendar()
+        filename = f"IQMS_semaine_{iso_year}-W{iso_week:02d}.csv"
+    else:
+        filename = f"IQMS_mois_{start_date.strftime('%Y-%m')}.csv"
+
+    return StreamingResponse(
+        iter([csv_bytes]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

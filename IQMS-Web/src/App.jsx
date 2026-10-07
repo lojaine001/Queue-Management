@@ -5,6 +5,7 @@ import Sidebar from './components/Sidebar';
 import TabBar from './components/TabBar';
 import LiveScreen from './screens/LiveScreen';
 import TodayScreen from './screens/TodayScreen';
+import ExportScreen from './screens/ExportScreen';
 
 function Shell() {
   const [tab, setTab] = useState('live');
@@ -13,6 +14,7 @@ function Shell() {
   const screen = {
     live:  <LiveScreen />,
     today: <TodayScreen />,
+    export: <ExportScreen />,
   }[tab];
 
   return (

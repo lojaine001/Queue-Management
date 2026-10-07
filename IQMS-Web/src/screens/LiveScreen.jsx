@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { API_URL } from '../config';
 import { useLang } from '../context/LanguageContext';
@@ -12,8 +12,9 @@ import {
 } from '../notify';
 
 const SNAP_INTERVAL = 30000;
-const GAUGE_MAX_MIN = 8; // top of the gauge — 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
-// 0/5/10/15 all come from /forecast (dashboard_state — the exact numbers
+const CHECKOUT_SNAP_INTERVAL = 10000;
+const GAUGE_MAX_MIN = 8; // top of the gauge -- 4 zones of 2 min each (0-2/2-4/4-6/6-8+)
+// 0/5/10/15 all come from /forecast (dashboard_state -- the exact numbers
 // the dashboard itself shows, guaranteed to match). +20 is the one horizon
 // the dashboard doesn't keep on hand, so it's the only one computed from
 // the saved forecast (/forecast/wait) instead.
@@ -168,11 +169,6 @@ function HorizonPicker({ value, onChange, t }) {
           {m === 0 ? t.horizonLive : `+${m}m`}
         </button>
       ))}
-      {/* 0/5/10/15 read the same source the dashboard itself writes to, so
-          those four always agree exactly. +20 is the one value the dashboard
-          doesn't keep on hand, so it's computed from the saved forecast
-          instead — the only case where a difference is possible. */}
-      {value === 20 && <div style={s.horizonSourceNote}>{t.horizonSourceNote}</div>}
     </div>
   );
 }
@@ -200,7 +196,7 @@ function Gauge({ current, label, t }) {
           <div style={{ ...s.gaugeZone, background: '#3fb950' }} />
         </div>
 
-        {/* Live wait — red marker, value sits right next to it at its actual position */}
+        {/* Live wait -- red marker, value sits right next to it at its actual position */}
         <div style={{ ...s.markerGroup, left: -70, bottom: `calc(${currentPct}% - 8px)` }}>
           <span className="mono" style={{ fontSize: 14, fontWeight: 700, color: zoneColor }}>
             {current != null ? `${Math.round(current)}m` : '—'}
@@ -210,6 +206,63 @@ function Gauge({ current, label, t }) {
       </div>
     </div>
   );
+}
+
+// Fetches the checkout snapshot as binary (not the old base64-in-JSON
+// shape -- see Feature 4). Shares the browser's own If-None-Match/304
+// handling via ETag, polls only while the tab is actually visible, and
+// cleans up its own object URL on every new fetch and on unmount.
+function useCheckoutSnapshot(apiUrl, intervalMs) {
+  const [state, setState] = useState({ url: null, ageSec: null, failed: false });
+  const etagRef = useRef(null);
+  const blobUrlRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchOnce = async () => {
+      if (document.visibilityState === 'hidden') return;
+      try {
+        const headers = etagRef.current ? { 'If-None-Match': etagRef.current } : {};
+        const resp = await fetch(`${apiUrl}/snapshot/checkout`, { headers });
+        if (resp.status === 304) {
+          if (!cancelled) setState(prev => ({ ...prev, ageSec: 0, failed: false }));
+          return;
+        }
+        if (!resp.ok) {
+          if (!cancelled) setState(prev => ({ ...prev, failed: true }));
+          return;
+        }
+        const etag = resp.headers.get('ETag');
+        const ageSec = parseFloat(resp.headers.get('X-Snapshot-Age') || '0');
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = url;
+        etagRef.current = etag;
+        if (!cancelled) setState({ url, ageSec, failed: false });
+      } catch {
+        if (!cancelled) setState(prev => ({ ...prev, failed: true }));
+      }
+    };
+
+    fetchOnce();
+    const timer = setInterval(fetchOnce, intervalMs);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') fetchOnce();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+    };
+  }, [apiUrl, intervalMs]);
+
+  return state;
 }
 
 export default function LiveScreen() {
@@ -236,8 +289,8 @@ export default function LiveScreen() {
   const wasAlertOverRef = useRef(false);
   const prevHorizonRef = useRef(0);
 
-  // Which "Predicted Wait" tile is shown in the gauge below — one of the
-  // HORIZON_PRESETS values (0/5/10/15/20 minutes from now).
+  // Which "Predicted Wait" tile is shown in the gauge below -- one of the
+  // HORIZON_PRESETS values (0/5/10/15 minutes from now).
   const [horizonMin, setHorizonMin] = useState(0);
 
   useEffect(() => {
@@ -269,35 +322,28 @@ export default function LiveScreen() {
   ]);
   const [lanesData] = data;
 
+  // Entrance stays on the old JSON/base64 shape; checkout moved to its own
+  // binary fetch (useCheckoutSnapshot) since it's no longer JSON at all.
   const { data: snapData } = useApi([
     `${API_URL}/snapshot/entrance`,
-    `${API_URL}/snapshot/checkout`,
   ], SNAP_INTERVAL);
-  const [entranceSnap, checkoutSnap] = snapData;
+  const [entranceSnap] = snapData;
+  const checkoutSnapshot = useCheckoutSnapshot(API_URL, CHECKOUT_SNAP_INTERVAL);
 
   const lanes = lanesData?.lanes ?? [];
   const snapshot = lanesData?.snapshot ?? {};
 
-  // The dashboard's own numbers, for 0/5/10/15 — this is the same
+  // The dashboard's own numbers, for 0/5/10/15 -- this is the same
   // dashboard_state row the Streamlit dashboard itself reads, so these four
   // values are guaranteed to agree with it exactly, not just approximately.
   const { data: forecastData } = useApi([`${API_URL}/forecast`]);
   const [forecastState] = forecastData;
-
-  // +20 is the one horizon the dashboard doesn't keep a saved value for, so
-  // it's the only one computed from the saved forecast instead — only
-  // fetched when actually selected, so this adds no load otherwise.
-  const { data: forecast20Data } = useApi(
-    horizonMin === 20 ? [`${API_URL}/forecast/wait?minutes=20`] : []
-  );
-  const [forecastWait20] = forecast20Data;
 
   const gaugeValue = {
     0:  forecastState?.wait_now_min,
     5:  forecastState?.wait_5_min,
     10: forecastState?.wait_10_min,
     15: forecastState?.wait_15_min,
-    20: forecastWait20?.wait_min,
   }[horizonMin];
   const gaugeLabel = horizonMin === 0 ? t.avgWait : t.horizonForecastAt(horizonMin);
 
@@ -309,17 +355,13 @@ export default function LiveScreen() {
     ? new Date(forecastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : null;
 
-  // Single alert, tied to whichever horizon is currently selected — watches
+  // Single alert, tied to whichever horizon is currently selected -- watches
   // gaugeValue, the exact same number the gauge itself displays, so the
-  // alert can never disagree with what's on screen. (Previously: two
-  // independent hardcoded alerts — one silently watching the 5-min forecast
-  // mislabeled as "current", one always fixed to +15min regardless of the
-  // horizon picker — which could both fire in the same poll and stack as
-  // two near-identical bars.)
+  // alert can never disagree with what's on screen.
   //
   // Fires only on the rising edge (crossing into alert), not every refresh.
   // While disabled, keep resetting the tracker so turning alerts back on
-  // always gets a fresh chance to fire if already over threshold — otherwise
+  // always gets a fresh chance to fire if already over threshold -- otherwise
   // a crossing that happened while OFF silently "used up" the rising edge.
   // A horizon switch changes what gaugeValue *means* (a different metric),
   // so it resets the tracker too -- but *before* evaluating, not instead of
@@ -428,7 +470,16 @@ export default function LiveScreen() {
           {openCams.includes('checkout') && (
             <div style={s.camWrap}>
               <button style={s.camClose} onClick={() => toggleCam('checkout')}>×</button>
-              <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnap?.image} />
+              {checkoutSnapshot.failed && !checkoutSnapshot.url ? (
+                <div style={s.camUnavailable}>{t.checkoutCameraUnavailable}</div>
+              ) : (
+                <>
+                  <CameraPlaceholder label="CAM 2 – CAISSES" dataUrl={checkoutSnapshot.url} />
+                  {checkoutSnapshot.ageSec != null && checkoutSnapshot.ageSec > 30 && (
+                    <div style={s.camDelayed}>{t.imageDelayed}</div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -557,6 +608,15 @@ const s = {
     background: 'rgba(0,0,0,0.5)', border: '1px solid var(--card-border)',
     color: '#e6edf3', fontSize: 14, lineHeight: '22px',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
+  },
+  camUnavailable: {
+    background: 'var(--card-bg)', border: '1px solid var(--card-border)', borderRadius: 16,
+    padding: '48px 20px', textAlign: 'center', color: '#8b949e', fontSize: 13,
+  },
+  camDelayed: {
+    position: 'absolute', bottom: 8, left: 8, zIndex: 5,
+    background: 'rgba(0,0,0,0.6)', borderRadius: 8, padding: '4px 10px',
+    color: '#d29922', fontSize: 11, fontWeight: 600,
   },
 
   hint: { color: '#8b949e', fontSize: 13, padding: '8px 0' },
