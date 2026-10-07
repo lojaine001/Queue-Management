@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   ComposedChart, Bar, Cell, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, PieChart, Pie, LineChart,
+  Tooltip, ResponsiveContainer, LineChart,
 } from 'recharts';
 import { useApi } from '../hooks/useApi';
 import { API_URL } from '../config';
@@ -18,14 +18,11 @@ function todayStr() {
 // it's been validated against real open-hours data.
 const SHOW_WAIT_CHART = false;
 
-function GenderTooltip({ active, payload }) {
-  if (!active || !payload?.length) return null;
-  const d = payload[0].payload;
-  return (
-    <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
-      <span style={{ color: d.color, fontWeight: 700, fontSize: 12 }}>{d.label} - {d.percent}%</span>
-    </div>
-  );
+function fmtMinSec(min) {
+  if (min == null) return '—';
+  const m = Math.floor(min);
+  const sec = Math.round((min - m) * 60);
+  return sec > 0 ? `${m}:${String(sec).padStart(2, '0')}` : `${m}:00`;
 }
 
 function EntriesTooltip({ active, payload, label }) {
@@ -54,6 +51,28 @@ function WaitTooltip({ active, payload, label, t }) {
   );
 }
 
+function CheckoutWaitTooltip({ active, payload, label, t }) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0];
+  return (
+    <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
+      <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
+      <div style={{ color: p.color, fontWeight: 700, fontSize: 12 }}>{fmtMinSec(p.value)}</div>
+    </div>
+  );
+}
+
+function QueueWaitingTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0];
+  return (
+    <div style={{ background: '#1c2128', border: '1px solid #30363d', borderRadius: 6, padding: '6px 10px' }}>
+      <div style={{ color: '#8b949e', fontSize: 11 }}>{label}</div>
+      <div style={{ color: p.color, fontWeight: 700, fontSize: 12 }}>{p.value?.toFixed(1)}</div>
+    </div>
+  );
+}
+
 export default function TodayScreen() {
   const { t } = useLang();
   const [selectedDate, setSelectedDate] = useState(() => todayStr());
@@ -69,10 +88,6 @@ export default function TodayScreen() {
   const totalCustomers = recap?.total_customers;
   const vsYesterdayPct = recap?.vs_yesterday_pct;
   const trend7d = recap?.trend_7d ?? [];
-  const genderRows = recap?.demographics_gender ?? [];
-  const ageRows = recap?.demographics_age ?? [];
-  const femme = genderRows.find(g => g.key === 'female');
-  const homme = genderRows.find(g => g.key === 'male');
 
   const hourlyData = (recap?.entries_by_hour ?? []).map(h => ({
     hour: h.hour,
@@ -81,6 +96,12 @@ export default function TodayScreen() {
   }));
 
   const waitPoints = (dayWait?.slots ?? []).map(sl => ({ t: sl.time, wait: sl.wait_min }));
+
+  const waitStats = recap?.wait_stats ?? { avg_wait_min: null, max_wait_min: null, by_hour: [] };
+  const waitByHour = (waitStats.by_hour ?? []).map(h => ({ hour: h.hour, avg_wait_min: h.avg_wait_min }));
+
+  const queueStats = recap?.queue_stats ?? { avg_waiting: null, peak_waiting: null, peak_time: null, by_hour: [] };
+  const queueByHour = (queueStats.by_hour ?? []).map(h => ({ hour: h.hour, avg_waiting: h.avg_waiting }));
 
   return (
     <div className="screen-page">
@@ -198,53 +219,84 @@ export default function TodayScreen() {
         </>
       )}
 
-      {/* Customer demographics */}
+      {/* Checkout wait time */}
       <div className="section-header">
-        <span className="section-title">{t.demographicsTitle}</span>
-        <span style={s.sub}>{t.demographicsSubtitle}</span>
+        <span className="section-title">{t.avgCheckoutWait}</span>
       </div>
-
-      {genderRows.length === 0 && ageRows.length === 0 ? (
+      {loading ? (
+        <Skeleton height={96} radius={16} />
+      ) : waitByHour.length === 0 ? (
         <div style={s.chartCard}>
-          <div style={s.emptyChart}>{t.noDemographicsData}</div>
+          <div style={s.emptyChart}>{t.noCheckoutQueueData}</div>
         </div>
       ) : (
-        <div className="demo-grid">
-          <div style={s.chartCard}>
-            <div style={s.demoLabel}>{t.genderSplitLabel}</div>
-            <ResponsiveContainer width="100%" height={220}>
-              <PieChart>
-                <Tooltip content={<GenderTooltip />} />
-                <Pie
-                  data={[femme, homme].filter(Boolean)}
-                  dataKey="count" nameKey="label"
-                  innerRadius={60} outerRadius={90} paddingAngle={2} strokeWidth={0}
-                >
-                  {[femme, homme].filter(Boolean).map((g, i) => <Cell key={i} fill={g.color} />)}
-                </Pie>
-              </PieChart>
-            </ResponsiveContainer>
-            <div style={s.legendRow}>
-              {femme && <span style={s.legendItem}><span style={{ ...s.legendDot, background: femme.color }} /> {t.femmeLabel}</span>}
-              {homme && <span style={s.legendItem}><span style={{ ...s.legendDot, background: homme.color }} /> {t.hommeLabel}</span>}
+        <>
+          <div style={s.banner}>
+            <div style={s.bannerLeft}>
+              <div style={s.bannerIcon}>⏱</div>
+              <div>
+                <div style={s.statLabel}>{t.avgCheckoutWait}</div>
+                <div style={s.bannerValueRow}>
+                  <span style={s.bannerValue}>{fmtMinSec(waitStats.avg_wait_min)}</span>
+                  <span style={s.bannerDelta}>{t.maxCheckoutWait}: {fmtMinSec(waitStats.max_wait_min)}</span>
+                </div>
+              </div>
             </div>
           </div>
-
           <div style={s.chartCard}>
-            <div style={s.demoLabel}>{t.ageGroupLabel}</div>
-            <ResponsiveContainer width="100%" height={220}>
-              <ComposedChart data={ageRows} margin={{ top: 24, right: 8, left: -20, bottom: 0 }}>
+            <ResponsiveContainer width="100%" height={160}>
+              <ComposedChart data={waitByHour} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                <XAxis dataKey="group" tick={{ fill: '#8b949e', fontSize: 11 }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip content={<EntriesTooltip />} />
-                <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                  {ageRows.map((a, i) => <Cell key={i} fill={a.color} />)}
-                </Bar>
+                <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
+                <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} />
+                <Tooltip content={<CheckoutWaitTooltip t={t} />} />
+                <Bar dataKey="avg_wait_min" fill="#db6d28" radius={[3, 3, 0, 0]} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
+        </>
+      )}
+
+      {/* People waiting at checkout */}
+      <div className="section-header">
+        <span className="section-title">{t.avgPeopleWaiting}</span>
+      </div>
+      {loading ? (
+        <Skeleton height={96} radius={16} />
+      ) : queueByHour.length === 0 ? (
+        <div style={s.chartCard}>
+          <div style={s.emptyChart}>{t.noCheckoutQueueData}</div>
         </div>
+      ) : (
+        <>
+          <div style={s.banner}>
+            <div style={s.bannerLeft}>
+              <div style={s.bannerIcon}>🧍</div>
+              <div>
+                <div style={s.statLabel}>{t.avgPeopleWaiting}</div>
+                <div style={s.bannerValueRow}>
+                  <span style={s.bannerValue}>{queueStats.avg_waiting != null ? queueStats.avg_waiting.toFixed(1) : '—'}</span>
+                  {queueStats.peak_waiting != null && (
+                    <span style={s.bannerDelta}>
+                      {t.peakPeopleWaiting}: {queueStats.peak_waiting} {t.peopleUnit} ({queueStats.peak_time})
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style={s.chartCard}>
+            <ResponsiveContainer width="100%" height={160}>
+              <ComposedChart data={queueByHour} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
+                <XAxis dataKey="hour" tick={{ fill: '#8b949e', fontSize: 9 }} tickLine={false} axisLine={false} interval={1} />
+                <YAxis tick={{ fill: '#8b949e', fontSize: 10 }} tickLine={false} axisLine={false} allowDecimals={false} />
+                <Tooltip content={<QueueWaitingTooltip />} />
+                <Bar dataKey="avg_waiting" fill="#58a6ff" radius={[3, 3, 0, 0]} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </>
       )}
     </div>
   );
@@ -289,8 +341,6 @@ const s = {
   legendItem: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#8b949e' },
   legendSq: { display: 'inline-block', width: 10, height: 10, borderRadius: 2 },
   legendDot: { display: 'inline-block', width: 8, height: 8, borderRadius: '50%' },
-
-  demoLabel: { fontSize: 13, color: '#8b949e', marginBottom: 8 },
 
   errorHint: { color: '#f85149', fontSize: 13, padding: '8px 0' },
 };

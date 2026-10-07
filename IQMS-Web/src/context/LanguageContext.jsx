@@ -2,7 +2,7 @@ import { createContext, useContext, useState } from 'react';
 
 const T = {
   fr: {
-    tabs: { live: 'En direct', today: 'Statistique' },
+    tabs: { live: 'En direct', today: 'Statistique', export: 'Export' },
     live: 'LIVE', open: 'OPEN', busy: 'BUSY', closed: 'CLOSED', clients: 'clients',
     liveQueueStatus: 'LIVE QUEUE STATUS',
     avgWait: 'ATTENTE',
@@ -11,6 +11,17 @@ const T = {
     horizonLabel: 'Horizon', horizonLive: 'Actuel',
     horizonForecastAt: min => `Attente prévue à +${min} min`,
     horizonSourceNote: 'Basée sur les caisses détectées automatiquement par la caméra — peut différer du tableau de bord si un nombre de caisses est forcé manuellement là-bas.',
+    forecastUpdatedAt: hhmm => `Mis à jour ${hhmm}`, forecastStale: 'Prévision obsolète',
+    avgCheckoutWait: "Temps d'attente moyen (caisse)", maxCheckoutWait: "Temps d'attente max",
+    imageDelayed: "Image en retard", checkoutCameraUnavailable: "Caméra caisse indisponible",
+    avgPeopleWaiting: "Nb moyen de personnes en attente en caisse", peakPeopleWaiting: "Pic de personnes en attente",
+    peopleUnit: "personnes", noCheckoutQueueData: "Aucune donnée de file en caisse pour cette journée",
+    periodLabel: "Période", periods: { day: "Jour", week: "Semaine", month: "Mois" },
+    kpisLabel: "KPIs", selectAll: "Tout sélectionner", deselectAll: "Tout désélectionner",
+    previewLabel: "Aperçu", hoursSuffix: "heures", daysSuffix: "jours",
+    selectAtLeastOne: "Sélectionnez au moins un KPI",
+    hourCol: "Heure", dateCol: "Date",
+    exportButton: "Exporter", exporting: "Export en cours...", exportError: "Erreur lors du chargement",
     selectCameraHint: 'Sélectionnez une caméra pour voir son flux',
     // Wording adapts to whichever horizon is selected — same value the
     // gauge itself is showing, so the alert and the display never disagree.
@@ -28,15 +39,11 @@ const T = {
     noHourlyData: 'Aucune donnée horaire disponible',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs hier`,
     statsTitle: 'Statistique',
-    femmeLabel: 'FEMME', hommeLabel: 'HOMME',
     waitChartTitle: "TEMPS D'ATTENTE", dayWaitHistory: 'Historique de la journée',
-    demographicsTitle: 'DÉMOGRAPHIE CLIENTS', demographicsSubtitle: 'Profil genre et âge des visiteurs',
-    genderSplitLabel: 'Répartition par genre', ageGroupLabel: 'Répartition par âge',
-    noDemographicsData: 'Aucune donnée démographique pour cette date',
     last7days: '7 derniers jours',
   },
   en: {
-    tabs: { live: 'Live', today: 'Statistics' },
+    tabs: { live: 'Live', today: 'Statistics', export: 'Export' },
     live: 'LIVE', open: 'OPEN', busy: 'BUSY', closed: 'CLOSED', clients: 'clients',
     liveQueueStatus: 'LIVE QUEUE STATUS',
     avgWait: 'WAIT',
@@ -45,6 +52,17 @@ const T = {
     horizonLabel: 'Horizon', horizonLive: 'Current',
     horizonForecastAt: min => `Predicted wait at +${min} min`,
     horizonSourceNote: 'Based on lanes auto-detected by the camera — may differ from the dashboard if a lane count is manually overridden there.',
+    forecastUpdatedAt: hhmm => `Updated ${hhmm}`, forecastStale: 'Forecast stale',
+    avgCheckoutWait: "Average checkout wait", maxCheckoutWait: "Max checkout wait",
+    imageDelayed: "Image delayed", checkoutCameraUnavailable: "Checkout camera unavailable",
+    avgPeopleWaiting: "Average people waiting at checkout", peakPeopleWaiting: "Peak people waiting",
+    peopleUnit: "people", noCheckoutQueueData: "No checkout queue data for this day",
+    periodLabel: "Period", periods: { day: "Day", week: "Week", month: "Month" },
+    kpisLabel: "KPIs", selectAll: "Select all", deselectAll: "Deselect all",
+    previewLabel: "Preview", hoursSuffix: "hours", daysSuffix: "days",
+    selectAtLeastOne: "Select at least one KPI",
+    hourCol: "Hour", dateCol: "Date",
+    exportButton: "Export", exporting: "Exporting...", exportError: "Error loading data",
     selectCameraHint: 'Select a camera to view its feed',
     // Wording adapts to whichever horizon is selected — same value the
     // gauge itself is showing, so the alert and the display never disagree.
@@ -62,11 +80,7 @@ const T = {
     noHourlyData: 'No hourly data available',
     vsYesterday: pct => `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct)}% vs yesterday`,
     statsTitle: 'Statistics',
-    femmeLabel: 'FEMALE', hommeLabel: 'MALE',
     waitChartTitle: 'WAIT TIME', dayWaitHistory: 'Full-day history',
-    demographicsTitle: 'CUSTOMER DEMOGRAPHICS', demographicsSubtitle: 'Gender and age profile of visitors',
-    genderSplitLabel: 'Gender split', ageGroupLabel: 'Age group distribution',
-    noDemographicsData: 'No demographic data for this date',
     last7days: 'Last 7 days',
   },
 };

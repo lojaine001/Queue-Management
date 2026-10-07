@@ -1,6 +1,6 @@
 import { useLang } from '../context/LanguageContext';
 
-const TABS = ['live', 'today'];
+const TABS = ['live', 'today', 'export'];
 
 export default function TabBar({ active, onChange }) {
   const { t } = useLang();
