@@ -66,3 +66,9 @@ _backup/
 
 # Safety copy written by tools/restore_forecaster.ps1
 *.before_restore
+
+# Evaluation data: customer footage, caches and run outputs never leave the machine
+eval/data/
+eval/runs/
+*.mkv
+*.dets.npz
