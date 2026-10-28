@@ -48,3 +48,9 @@ Thumbs.db
 # OpenVINO compiled-model cache (NPU/GPU)
 ov_cache/
 *.blob
+
+# Evaluation data: customer footage, caches and run outputs never leave the machine
+eval/data/
+eval/runs/
+*.mkv
+*.dets.npz

@@ -72,6 +72,7 @@ from utils.queue_utils import get_datetime_str, PersonDetectionLogger
 from utils.db_logger import DBLogger
 from utils.equipment_classifier import EquipmentClassifier, EQUIPMENT_COLOURS, EQUIPMENT_NONE
 from utils.owlv2_detector import OWLv2Detector
+from utils.frame_log import FrameLogWriter
 
 from utils.yolo import Color, is_package_installed, YOLOv9
 
@@ -203,6 +204,10 @@ class VideoStream :
     def __init__(self, cap_url:str, cap_loop: bool) :
         self.stream = cv2.VideoCapture(cap_url)
         (self.grabbed, self.frame) = self.stream.read()
+        # Counts frames delivered by the camera; read() records which one it handed out.
+        # Used only by the optional frame log to measure capture FPS and duplicate frames.
+        self.frame_seq = 0
+        self.last_read_seq = 0
         self.started = False
         self.cap_loop = cap_loop
         self.cap_url = cap_url
@@ -237,6 +242,7 @@ class VideoStream :
                     break
             self.read_lock.acquire()
             self.grabbed, self.frame = grabbed, frame
+            self.frame_seq += 1
             self.read_lock.release()
             time.sleep(0.01)
 
@@ -246,6 +252,7 @@ class VideoStream :
             frame = self.frame.copy()
         else:
             frame = None
+        self.last_read_seq = self.frame_seq
         self.read_lock.release()
         return frame
 
@@ -537,6 +544,12 @@ def main():
     thread.start()
 
     db = DBLogger()
+
+    # Optional per-frame timing log for offline evaluation (off by default).
+    frame_log = None
+    if bool(config2.get('frame_log_enabled', False)):
+        frame_log = FrameLogWriter(log_dir='LOGs', cam_id=camID)
+        print(Color.CYAN(f'[EVAL] Frame log enabled -> LOGs/frame_log_{camID}_<date>.csv'))
 
     thread_fps = processing_fps
     if thread_fps > 0:
@@ -1126,6 +1139,9 @@ def main():
 
             # Control loop timing to match desired FPS
             elapsed_time = time.time() - start_time
+            if frame_log is not None:
+                frame_log.log(start_time, elapsed_time, thread.last_read_seq,
+                              len(frame_detections), len(tracked_objects))
             if thread_fps > 0:
                 sleep_time = max(0, (1.0 / thread_fps) - elapsed_time)
                 time.sleep(sleep_time)
@@ -1196,6 +1212,7 @@ def main():
     #     systems_logger.info('Keyboard interrupt received. Stopping video stream and exiting.')
 
     finally:
+        if 'frame_log' in locals() and frame_log is not None: frame_log.close()
         if 'db' in locals(): db.close()
         if 'video_writer' in locals(): video_writer.release()
         if 'thread' in locals(): thread.stop()
