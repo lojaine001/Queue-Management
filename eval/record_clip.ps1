@@ -82,6 +82,7 @@ $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
 if (-not $ffmpeg) { throw 'ffmpeg not found on PATH. Install it with: winget install Gyan.FFmpeg' }
 
 $ffArgs = @(
+    '-nostdin',                                # ignore keys typed in this window (a 'q' would stop the recording)
     '-hide_banner', '-loglevel', 'warning',   # warning level keeps the URL (with password) out of the console
     '-rtsp_transport', 'tcp',
     '-i', $url,
