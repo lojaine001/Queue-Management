@@ -95,12 +95,12 @@ def estimate_offset(people, rows, span=5.0, step=0.25):
     return float(candidates[int(np.argmax(scores))])
 
 
-def evaluate(people, rows, window, min_dwell):
+def evaluate(people, rows, window, min_dwell, lanes):
     w0, w1 = window
     # Rows that belong to the labelled window: started inside it (people already present at the
-    # window start were not labelled, so their rows are left out).
+    # window start were not labelled, so their rows are left out). Only the marked lanes are scored.
     cand = [r for r in rows if w0 - 2.0 <= r['start'] <= w1]
-    lane_rows = [r for r in cand if r['lane'] is not None]
+    lane_rows = [r for r in cand if r['lane'] in lanes]
     short_rows = [r for r in cand if r['lane'] is None]
 
     # Each row goes to the marked person (same lane) whose stay it matches best (temporal IoU), so a
@@ -157,8 +157,9 @@ def evaluate(people, rows, window, min_dwell):
         'rows_per_person_mean': round(float(np.mean([r['n_rows'] for r in found])), 2) if found else None,
         'people_split_into_2plus_rows': sum(1 for r in found if r['n_rows'] >= 2),
         'false_rows_with_lane': len(false_rows),
-        'short_rows_without_lane': len(short_rows),
-        'all_rows_per_marked_person': round(len(cand) / len(people), 2) if people else None,
+        'lane_rows_per_marked_person': round(len(lane_rows) / len(people), 2) if people else None,
+        # Short rows have no lane in the DB, so they can't be split per lane: this counts all lanes.
+        'short_rows_without_lane_all_lanes': len(short_rows),
     }
     return summary, per_person
 
@@ -175,6 +176,8 @@ def main():
     ap.add_argument('--min-dwell', type=float, default=3.0, help='real dwell below this = passer-by (not scored)')
     ap.add_argument('--include-staff', action='store_true')
     ap.add_argument('--window', nargs=2, type=float, help='override the labelling window (seconds)')
+    ap.add_argument('--lanes', nargs='+', type=int,
+                    help='lanes that were marked (1-4, as in mark_events.py); default: lanes found in the labels')
     ap.add_argument('--out-dir', default=str(REPO_ROOT / 'eval' / 'runs' / 'compare'))
     args = ap.parse_args()
 
@@ -202,10 +205,13 @@ def main():
         r['start'] += offset
         r['end'] += offset
 
-    summary, per_person = evaluate(people, rows, window, args.min_dwell)
+    lanes = sorted(set(args.lanes) if args.lanes else {p['lane'] for p in people})
+    people = [p for p in people if p['lane'] in lanes]
+    summary, per_person = evaluate(people, rows, window, args.min_dwell, set(lanes))
     clip = Path(args.labels).name.replace('.labels.csv', '')
     summary = {'clip': clip, 'source': source, 'source_file': str(args.db_export or args.replay_events),
-               'window_s': list(window), 'clock_offset_s': offset, 'min_dwell_s': args.min_dwell, **summary}
+               'window_s': list(window), 'lanes_scored': lanes, 'clock_offset_s': offset,
+               'min_dwell_s': args.min_dwell, **summary}
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -221,7 +227,7 @@ def main():
             w.writerow(r)
 
     d, s = summary['dwell_error_main_row_s'], summary['dwell_error_stitched_s']
-    print(f"{clip} vs {source}  (window {window[0]:g}-{window[1]:g}s, clock offset {offset:+.2f}s)")
+    print(f"{clip} vs {source}  (lanes {lanes}, window {window[0]:g}-{window[1]:g}s, clock offset {offset:+.2f}s)")
     print(f"  people scored            : {summary['people_scored']}  (+{summary['passers_by_excluded']} passers-by not scored)")
     print(f"  missed (no row at all)   : {summary['missed']}")
     if d:
@@ -229,8 +235,8 @@ def main():
         print(f"  dwell error, stitched    : MAE {s['mae']}s  median {s['median_abs']}s  P90 {s['p90_abs']}s  bias {s['bias']:+}s")
     print(f"  rows per person          : {summary['rows_per_person_mean']}  ({summary['people_split_into_2plus_rows']} people split into 2+ rows)")
     print(f"  false rows (with lane)   : {summary['false_rows_with_lane']}")
-    print(f"  short rows (no lane, <3s): {summary['short_rows_without_lane']}")
-    print(f"  all rows / marked person : {summary['all_rows_per_marked_person']}")
+    print(f"  rows / marked person     : {summary['lane_rows_per_marked_person']}  (rows >= 3 s in these lanes)")
+    print(f"  short rows (<3s, no lane): {summary['short_rows_without_lane_all_lanes']}  (all lanes together)")
     print(f"  -> {out_dir / (stem + '.summary.json')}")
 
 
