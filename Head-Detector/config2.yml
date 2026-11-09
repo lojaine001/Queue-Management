@@ -99,8 +99,9 @@ caddy_collect_max_gb: 2.0
 # When true, a background thread appends one CSV row per processed frame to
 # LOGs/frame_log_<camID>_<YYYYMMDD>.csv: wall_ts, loop_sec, frame_seq (camera
 # frame counter, repeated value = same frame processed twice), n_dets, n_tracks.
-# ~35 MB/day at 8 fps, so only switch it on while recording evaluation clips.
-frame_log_enabled: true
+# ~130 MB/day at the live loop rate (~33 rows/s), so only switch it on while
+# recording evaluation clips.
+frame_log_enabled: false
 
 
 
