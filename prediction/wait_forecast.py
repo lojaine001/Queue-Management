@@ -85,7 +85,7 @@ def refresh_wait_forecast(days=30):
                 ORDER BY prediction_for LIMIT 60''',conn)
             if frame.empty:raise RuntimeError('No future arrival forecast available')
             source_published=frame['predicted_at'].min().isoformat()
-            frame['ds']=pd.to_datetime(frame['ds']).dt.tz_convert(STORE_TZ).dt.tz_localize(None)
+            frame['ds']=pd.to_datetime(frame['ds'],utc=True).dt.tz_convert(STORE_TZ).dt.tz_localize(None)
             frame=frame[frame['ds'].map(is_open)].reset_index(drop=True)
             history=pd.read_sql('''SELECT time_bucket('15 minutes',timestamp) AS ds,
                 PERCENTILE_CONT(.5) WITHIN GROUP(ORDER BY total_dwell_sec/60.0) AS dwell_min,COUNT(*) AS n_events

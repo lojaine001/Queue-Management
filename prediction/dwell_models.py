@@ -17,7 +17,11 @@ DWELL_LSTM_MIN_EVENTS = int(os.getenv("DWELL_LSTM_MIN_EVENTS", 120))
 
 
 def _to_local_series(series):
-    local = pd.to_datetime(series)
+    try:
+        local = pd.to_datetime(series)
+    except ValueError:
+        # Rows on both sides of a DST change carry different UTC offsets.
+        local = pd.to_datetime(series, utc=True)
     if getattr(local.dt, "tz", None) is not None:
         local = local.dt.tz_convert(ZoneInfo(os.getenv("STORE_TZ", "Europe/Paris"))).dt.tz_localize(None)
     return local

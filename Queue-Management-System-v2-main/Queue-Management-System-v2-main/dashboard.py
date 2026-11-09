@@ -235,7 +235,11 @@ def _to_local_timestamp(value):
 
 
 def _to_local_series(series):
-    local = pd.to_datetime(series)
+    try:
+        local = pd.to_datetime(series)
+    except ValueError:
+        # Rows on both sides of a DST change carry different UTC offsets.
+        local = pd.to_datetime(series, utc=True)
     if getattr(local.dt, "tz", None) is not None:
         local = local.dt.tz_convert(LOCAL_TZ).dt.tz_localize(None)
     return local

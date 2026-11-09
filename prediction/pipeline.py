@@ -94,7 +94,13 @@ def to_local(series: pd.Series) -> pd.Series:
     pd.Series  Timezone-naive timestamps in local wall-clock time.
     """
     utc_offset = datetime.now(timezone.utc).astimezone().utcoffset()
-    return pd.to_datetime(series).dt.tz_localize(None) + utc_offset
+    try:
+        ts = pd.to_datetime(series)
+    except ValueError:
+        # Rows on both sides of a DST change carry different UTC offsets; put them
+        # all in the store time zone so each keeps its wall-clock time.
+        ts = pd.to_datetime(series, utc=True).dt.tz_convert(os.getenv("STORE_TZ", "Europe/Paris"))
+    return ts.dt.tz_localize(None) + utc_offset
 
 
 def load_arrivals(
