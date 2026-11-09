@@ -72,3 +72,7 @@ eval/data/
 eval/runs/
 *.mkv
 *.dets.npz
+
+# Generated from the Markdown docs by docs/generate_pdf.py and docs/export_doc.py
+*.pdf
+docs/*.docx

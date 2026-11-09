@@ -1,7 +1,9 @@
 """
 Convert all project Markdown files to PDF using ReportLab.
 Run from the Queue-Management directory:
-    python generate_pdf.py
+    python docs/generate_pdf.py
+
+The PDFs are written next to each Markdown file and are not tracked in git.
 """
 
 import re
@@ -18,14 +20,14 @@ from reportlab.platypus import (
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# All project Markdown files to convert (relative to SCRIPT_DIR)
+# All project Markdown files to convert (relative to REPO_DIR)
 MD_FILES = [
-    "IQMS_FULL_DOC.md",
-    "DEVELOPER_DOC.md",
-    "SIMULATOR_OVERVIEW.md",
-    "BUG_FIXES.md",
+    "docs/IQMS_FULL_DOC.md",
+    "docs/DEVELOPER_DOC.md",
+    "docs/SIMULATOR_OVERVIEW.md",
+    "docs/BUG_FIXES.md",
     "Head-Detector/README.md",
     (
         "Queue-Management-System-v2-main/"
@@ -280,7 +282,7 @@ def build_pdf(md_path, pdf_path):
     story = parse_md(md)
     doc.build(story)
     size_kb = os.path.getsize(pdf_path) // 1024
-    print(f"  OK  {os.path.relpath(pdf_path, SCRIPT_DIR):50s}  {size_kb} KB")
+    print(f"  OK  {os.path.relpath(pdf_path, REPO_DIR):50s}  {size_kb} KB")
 
 
 # ── Convert all MDs ───────────────────────────────────────────────────────────
@@ -288,7 +290,7 @@ if __name__ == "__main__":
     print("Converting Markdown files to PDF...\n")
     errors = []
     for rel_md in MD_FILES:
-        md_path  = os.path.join(SCRIPT_DIR, rel_md)
+        md_path  = os.path.join(REPO_DIR, rel_md)
         if not os.path.isfile(md_path):
             print(f"  SKIP {rel_md}  (not found)")
             continue
