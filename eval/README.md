@@ -37,3 +37,18 @@ size test first; a sub-stream is usually a few MB per minute. Caches are a few M
 - `000_baseline` = production settings, unchanged. Every later run changes one key, via `--override`.
 - Use the same `.dets.npz` for every tracker run; re-run `detect_cache.py` only for detector experiments.
 - Use norfair 2.3.0 (production version); `track_replay.py` warns otherwise.
+
+## Hand-marked ground truth (dwell error without box labelling)
+
+1. Watch the first 10 minutes of a clip with the lane zones drawn and mark each person's lane, arrival and departure:
+   `python eval/mark_events.py --video <clip>.mkv --start 0 --end 600`
+   (keys are printed at start; saves after every change to `eval/data/labels/<clip>.labels.csv`; rerun to resume)
+2. On the production machine, export what the live system wrote during that clip (numbers only):
+   `python eval/db_check.py export eval/data/raw/<clip>.json`  ->  `<clip>.db.csv`
+3. Compare (any machine):
+   `python eval/compare.py --labels eval/data/labels/<clip>.labels.csv --sidecar <clip>.json --db-export <clip>.db.csv`
+   Later, the same labels score each replay: `--replay-events eval/runs/<run>/<clip>/events.csv`.
+
+Marking rules: one line per head (a couple is two lines); a person is in a lane when the bottom-centre of
+their head is inside the zone; skip people already in a lane when the window starts; follow people still in a
+lane at the window end until they leave; note `staff`, `walked through`, `hidden 5s` where it applies.
