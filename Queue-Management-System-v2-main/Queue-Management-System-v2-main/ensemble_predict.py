@@ -269,7 +269,14 @@ def _fmt_ts(value) -> str:
 def _to_local_wall_series(series: pd.Series) -> pd.Series:
     """Convert DB UTC timestamps into timezone-naive local wall-clock time."""
     utc_offset = datetime.now(timezone.utc).astimezone().utcoffset()
-    return pd.to_datetime(series).dt.tz_localize(None) + utc_offset
+    try:
+        ts = pd.to_datetime(series)
+    except ValueError:
+        # Rows on both sides of a DST change come back with different UTC offsets
+        # (session time zone is STORE_TZ), which pandas refuses to mix. Put them
+        # all in STORE_TZ so each row keeps the wall-clock time it had.
+        ts = pd.to_datetime(series, utc=True).dt.tz_convert(STORE_TZ)
+    return ts.dt.tz_localize(None) + utc_offset
 
 
 def _frame_fingerprint(df: pd.DataFrame) -> str:
