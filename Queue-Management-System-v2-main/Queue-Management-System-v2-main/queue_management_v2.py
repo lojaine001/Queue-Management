@@ -861,7 +861,7 @@ def main():
             if args.save_demo:
                 video_writer.write(viz_img)
 
-            FPS = max(round(1 / (end_time - start_time)), 1)
+            FPS = max(round(1 / max(end_time - start_time, 1e-6)), 1)
             write_text(viz_img, f"FPS: {FPS}", position="top_left")
 
             # ── Periodic per-stage timing report ──────────────────────────────

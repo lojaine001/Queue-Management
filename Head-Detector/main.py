@@ -613,7 +613,7 @@ def main():
 
     try:
         while True:
-            start_time = time.time()
+            start_time = time.perf_counter()
             im0 = thread.read()
 
             if im0 is None:
@@ -1140,12 +1140,13 @@ def main():
                 last_caddy_frame_time = current_time
 
             # Control loop timing to match desired FPS
-            elapsed_time = time.time() - start_time
+            elapsed_time = time.perf_counter() - start_time
             if thread_fps > 0:
                 sleep_time = max(0, (1.0 / thread_fps) - elapsed_time)
                 time.sleep(sleep_time)
-            end_time = time.time()
-            fps = max(round(1 / (end_time - start_time)), 1)
+            end_time = time.perf_counter()
+            # Protect the preview against equal clock readings and clock resolution.
+            fps = max(round(1 / max(end_time - start_time, 1e-6)), 1)
             write_text(img, f"FPS: {fps}", position="bottom_right")
 
             expired_outcome_ids = [
