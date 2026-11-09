@@ -1,8 +1,11 @@
-# Tracking evaluation (step 1: measure the current checkout pipeline)
+# Tracking evaluation
 
-Everything here runs on the production machine. Nothing in this folder is imported by
-the live system; the only live-code change is the optional frame log (`frame_log_enabled`
-in `Head-Detector/config2.yml`, off by default).
+- Step 1, measure the current checkout pipeline: this file. Findings in `step1_summary.md`.
+- Step 2 and 3, detectors and trackers on overhead fisheye datasets: `fisheye/README.md`.
+
+Step 1 runs on the production machine; `fisheye/` runs on any machine with the datasets.
+Nothing in this folder is imported by the live system; the only live-code change is the
+optional frame log (`frame_log_enabled` in `Head-Detector/config2.yml`, off by default).
 
 ## Workflow
 
@@ -14,7 +17,7 @@ in `Head-Detector/config2.yml`, off by default).
 | 4 | prod | set `frame_log_enabled: false` again, restart | |
 | 5 | prod, **after closing** (NPU is shared) | `python eval/detect_cache.py --video eval/data/raw/<clip>.mkv` (Head-Detector venv) | `eval/data/cache/<clip>.dets.npz` |
 | 6 | anywhere | `python eval/track_replay.py --cache <npz> --run-name 000_baseline [--frame-log ... --sidecar ...]` | `eval/runs/000_baseline/<clip>/` |
-| 7 | prod | annotate in CVAT, then `evaluate.py` (next step) | metrics |
+| 7 | anywhere | `python eval/mark_events.py --video <clip>.mkv`, then `python eval/compare.py ...` (see below) | dwell error per marked person |
 
 Sanity check without footage: `python eval/tests/test_replay_synthetic.py`.
 
