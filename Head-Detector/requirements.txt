@@ -1,27 +1,29 @@
-# hydra-core
-PyYAML
-python-dotenv
-pyrootutils
-opencv-python<4.11
-numpy>=1.23.0,<2.0.0
-colorlog
-Pillow
-scipy>=1.10,<1.16
-scikit-image
-shapely
-ipyfilechooser
+# Checkout pipeline (Head-Detector/main.py). Python 3.10.
+# Pinned to the versions production runs (2026-11-10).
+#   pip install -r requirements.txt -c requirements.lock.txt
+#       recommended: only what the code imports, at production's exact versions
+#   pip install -r requirements.lock.txt   the complete production venv, unused packages included
+
+# Detection: ONNX head model on the Intel NPU/CPU through OpenVINO
 onnx==1.12.0
-protobuf<=3.20.1
-# OpenVINO-enabled ONNX Runtime used by this app on Windows.
+protobuf==3.20.1                 # onnx 1.12 fails with newer protobuf
 onnxruntime-openvino==1.23.0
 openvino==2025.3.0
-# Default tracker dependency. The code can now skip Norfair at runtime when a
-# different tracker path is selected, but the standard Head-Detector install
-# still keeps it available.
+numpy==1.26.4                    # stays on 1.x for onnx 1.12
+opencv-python==4.10.0.84
+Pillow==12.2.0
+
+# Tracking and lanes
 norfair==2.3.0
-torch
-transformers
-requests
-pandas
-tqdm
-psycopg2-binary
+scipy==1.15.3
+shapely==2.1.2
+
+# Config, database, camera
+PyYAML==6.0.3
+python-dotenv==1.2.2
+psycopg2-binary==2.9.11
+requests==2.33.1
+
+# utils/owlv2_detector.py is imported at startup and imports torch, although the
+# OWLv2 detector is off (owlv2_enabled: false). Turning it on also needs transformers.
+torch==2.12.0

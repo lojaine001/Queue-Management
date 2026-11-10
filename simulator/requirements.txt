@@ -1,17 +1,21 @@
+# Simulator (run_simulator.py, simulator/). Python 3.10.
+# Pinned to the versions of the production simulator venv (2026-11-10).
+#   pip install -r requirements.txt -c requirements.lock.txt
+#       recommended: only what the code imports, at production's exact versions
+#   pip install -r requirements.lock.txt   the complete production venv, unused packages included
+
 # Core simulator DB + data dependencies
-psycopg2-binary
-python-dotenv
-pandas
-numpy
+psycopg2-binary==2.9.11
+python-dotenv==1.2.2
+pandas==2.3.3
+numpy==2.2.6
 
 # Streamlit dashboard
-streamlit
-plotly
+streamlit==1.56.0
+plotly==6.7.0
 
 # Smooth local viewer
-pygame
+pygame==2.6.1
 
 # Web viewer backend
-websockets>=11.0
-
-profet
+websockets==16.0

@@ -1,36 +1,49 @@
-# hydra-core
-PyYAML
-# Ensemble prediction dependencies
-prophet
-xgboost
-tensorflow
-scikit-learn
-psycopg2-binary
-python-dotenv
-pyrootutils
-opencv-python
-numpy
-colorlog
-Pillow
-scipy
-scikit-image
-shapely
-ipyfilechooser
-onnx
-# OpenVINO-enabled ONNX Runtime used by queue_management_v2.py
+# Entrance pipeline, API, dashboard, push alerts and forecasting:
+# queue_management_v2.py, api.py, dashboard.py, push_alert_checker.py, ensemble_predict.py,
+# plus ../../prediction and ../../run_scheduler.py, which run in this venv. Python 3.10.
+# Pinned to the versions production runs (2026-11-10).
+#   pip install -r requirements.txt -c requirements.lock.txt
+#       recommended: only what the code imports, at production's exact versions
+#   pip install -r requirements.lock.txt   the complete production venv, unused packages included
+
+# Entrance camera pipeline
+opencv-python==4.13.0.92
+numpy==2.2.6
+Pillow==12.2.0
+onnx==1.21.0
 onnxruntime-openvino==1.23.0
 openvino==2025.3.0
-requests
-pandas
-tqdm
-uniface
-pygame
-streamlit
-plotly
-<<<<<<< HEAD
-psutil>=5.9
-=======
-# Web Push (push_alert_checker.py) -- also installs py-vapid, which
-# provides the `vapid` CLI used to generate the VAPID keypair.
-pywebpush
->>>>>>> dec15c7870f50b447d9b53408c9f14fa88d87078
+norfair==2.1.1
+scipy==1.15.3
+shapely==2.1.2
+pyrootutils==1.0.4
+PyYAML==6.0.3
+scikit-image==0.25.2             # bundled uniface/face_utils.py
+tqdm==4.67.3                     # bundled uniface/model_store.py
+
+# API, dashboard, push alerts
+fastapi==0.136.3
+uvicorn==0.48.0
+pydantic==2.13.4
+streamlit==1.56.0
+plotly==6.7.0
+pywebpush==2.5.0                 # also installs py-vapid (the `vapid` key tool)
+psutil==7.2.2
+
+# Forecasting
+pandas==2.3.3
+prophet==1.3.0
+xgboost==3.2.0
+tensorflow==2.21.0
+scikit-learn==1.7.2
+
+# Database, config, HTTP
+psycopg2-binary==2.9.11
+python-dotenv==1.2.2
+requests==2.33.1
+urllib3==1.26.20                 # camera_snapshot.py
+
+# Left out on purpose:
+#   torch, torchvision, lap  only imported by parts of the bundled uniface copy that are not used
+#   uniface (pip)            the bundled copy in ./uniface is the one imported
+#   playwright               only scripts/iphone.py, a developer tool
