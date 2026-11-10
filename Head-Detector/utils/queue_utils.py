@@ -3,7 +3,9 @@ import cv2
 import time
 import math 
 import yaml
+import sys
 import logging
+import logging.handlers
 import datetime
 import requests
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
@@ -284,6 +286,17 @@ def match_boxes(Vehicle_boxes, Pattern_boxes, Vehicles_conf, Patterns_conf, min_
         
     return vehicles
 
+def _console_log_level():
+    """Full detail in an interactive console window; only warnings and errors when the
+    output is redirected to a file (start_all.ps1 background mode), where it piled up to
+    hundreds of MB. LOG_CONSOLE_LEVEL overrides both."""
+    level = os.getenv('LOG_CONSOLE_LEVEL')
+    if level:
+        return level.upper()
+    stream = sys.stderr
+    return 'DEBUG' if stream is not None and stream.isatty() else 'WARNING'
+
+
 def create_logger(name, level = 'DEBUG', log_dir=None, file = None):
     logger = logging.getLogger(name)
     logger.propagate = False
@@ -296,6 +309,7 @@ def create_logger(name, level = 'DEBUG', log_dir=None, file = None):
     #if no streamhandler present, add one
     if sum([isinstance(handler, logging.StreamHandler) for handler in logger.handlers]) == 0:
         ch = logging.StreamHandler()
+        ch.setLevel(_console_log_level())
         ch.setFormatter(logging.Formatter('%(asctime)s.%(msecs)03d-%(name)s-%(levelname)s>>>%(message)s', "%Y-%m-%d %H:%M:%S"))
         logger.addHandler(ch)
 
@@ -303,7 +317,12 @@ def create_logger(name, level = 'DEBUG', log_dir=None, file = None):
     if file is not None:
         if sum([isinstance(handler, logging.FileHandler) for handler in logger.handlers]) == 0:
             log_dir = os.path.join(log_dir, file)
-            ch = logging.FileHandler(log_dir, mode='a', encoding='utf-8')
+            # Rotate instead of growing forever (systems.log alone reached 1.6 GB):
+            # at most LOG_BACKUP_COUNT old copies of LOG_MAX_MB each are kept.
+            max_bytes = int(float(os.getenv('LOG_MAX_MB', '50')) * 1024 * 1024)
+            backups = int(os.getenv('LOG_BACKUP_COUNT', '3'))
+            ch = logging.handlers.RotatingFileHandler(log_dir, mode='a', maxBytes=max_bytes,
+                                                      backupCount=backups, encoding='utf-8')
             ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', "%Y-%m-%d %H:%M:%S"))
             logger.addHandler(ch)
         

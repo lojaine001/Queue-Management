@@ -96,7 +96,11 @@ function Start-ServiceProcess {
         $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -WorkingDirectory $WorkingDir -PassThru
         return $proc.Id
     } else {
-        # Launch detached background daemon with direct native log redirection
+        # Launch detached background daemon with direct native log redirection.
+        # Keep only the previous run's output (*.prev.log) so these files cannot pile up.
+        foreach ($log in @($OutLog, $ErrLog)) {
+            if (Test-Path $log) { Move-Item -Force $log ($log -replace '\.log$', '.prev.log') -ErrorAction SilentlyContinue }
+        }
         $argList = if ($Arguments) { $Arguments.Split(" ") } else { @() }
         $proc = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDir `
             -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -WindowStyle Hidden -PassThru
