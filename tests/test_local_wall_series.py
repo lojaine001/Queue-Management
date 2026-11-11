@@ -37,7 +37,6 @@ def load_ensemble_function():
 class LocalWallSeriesTests(unittest.TestCase):
     def setUp(self):
         self.convert = load_ensemble_function()
-        self.offset = datetime.now(timezone.utc).astimezone().utcoffset()
         # psycopg2 returns timestamptz with a fixed-offset tzinfo per row, taken
         # from the session time zone (Europe/Paris).
         self.summer = timezone(timedelta(hours=2))
@@ -47,24 +46,22 @@ class LocalWallSeriesTests(unittest.TestCase):
         rows = [datetime(2026, 10, 24, 18, 0, tzinfo=self.summer),
                 datetime(2026, 10, 26, 18, 0, tzinfo=self.winter)]
         out = self.convert(pd.Series(rows, dtype=object))
-        expected = [pd.Timestamp('2026-10-24 18:00') + self.offset, pd.Timestamp('2026-10-26 18:00') + self.offset]
+        expected = [pd.Timestamp('2026-10-24 18:00'), pd.Timestamp('2026-10-26 18:00')]
         self.assertEqual(list(out), expected)
 
     def test_single_offset_unchanged(self):
         rows = [datetime(2026, 11, 2, 9, 0, tzinfo=self.winter), datetime(2026, 11, 2, 9, 15, tzinfo=self.winter)]
         out = self.convert(pd.Series(rows, dtype=object))
-        self.assertEqual(list(out), [pd.Timestamp('2026-11-02 09:00') + self.offset,
-                                     pd.Timestamp('2026-11-02 09:15') + self.offset])
+        self.assertEqual(list(out), [pd.Timestamp('2026-11-02 09:00'), pd.Timestamp('2026-11-02 09:15')])
 
-    def test_naive_timestamps_unchanged(self):
-        out = self.convert(pd.Series([datetime(2026, 11, 2, 9, 0)]))
-        self.assertEqual(out.iloc[0], pd.Timestamp('2026-11-02 09:00') + self.offset)
+    def test_naive_timestamps_are_read_as_utc(self):
+        out = self.convert(pd.Series([datetime(2026, 11, 2, 8, 0), datetime(2026, 7, 2, 7, 0)]))
+        self.assertEqual(list(out), [pd.Timestamp('2026-11-02 09:00'), pd.Timestamp('2026-07-02 09:00')])
 
     def test_pipeline_to_local_across_dst_change(self):
         rows = [datetime(2026, 10, 24, 18, 0, tzinfo=self.summer), datetime(2026, 10, 26, 18, 0, tzinfo=self.winter)]
         out = pipeline_to_local(pd.Series(rows, dtype=object))
-        self.assertEqual(list(out), [pd.Timestamp('2026-10-24 18:00') + self.offset,
-                                     pd.Timestamp('2026-10-26 18:00') + self.offset])
+        self.assertEqual(list(out), [pd.Timestamp('2026-10-24 18:00'), pd.Timestamp('2026-10-26 18:00')])
 
 
 class LocalSeriesTests(unittest.TestCase):

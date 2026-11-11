@@ -81,9 +81,9 @@ DB_CONFIG = {
 def to_local(series: pd.Series) -> pd.Series:
     """Convert UTC-aware DB timestamps to local naive timestamps.
 
-    TimescaleDB stores all timestamps as UTC.  This function applies the
-    local UTC offset so that Prophet sees wall-clock times matching the
-    shop's daily/weekly seasonality pattern.
+    TimescaleDB stores all timestamps as UTC.  This function converts them to
+    STORE_TZ wall-clock time so that Prophet sees times matching the shop's
+    daily/weekly seasonality pattern.
 
     Parameters
     ----------
@@ -93,14 +93,9 @@ def to_local(series: pd.Series) -> pd.Series:
     -------
     pd.Series  Timezone-naive timestamps in local wall-clock time.
     """
-    utc_offset = datetime.now(timezone.utc).astimezone().utcoffset()
-    try:
-        ts = pd.to_datetime(series)
-    except ValueError:
-        # Rows on both sides of a DST change carry different UTC offsets; put them
-        # all in the store time zone so each keeps its wall-clock time.
-        ts = pd.to_datetime(series, utc=True).dt.tz_convert(os.getenv("STORE_TZ", "Europe/Paris"))
-    return ts.dt.tz_localize(None) + utc_offset
+    # Each row gets its own offset (summer or winter); see ensemble_predict._to_local_wall_series.
+    return (pd.to_datetime(series, utc=True)
+            .dt.tz_convert(os.getenv("STORE_TZ", "Europe/Paris")).dt.tz_localize(None))
 
 
 def load_arrivals(
@@ -572,10 +567,11 @@ def load_lane_history_agg(
     """
     since = datetime.now(timezone.utc) - timedelta(days=days)
     since_str = since.isoformat()
-    # Convert UTC timestamps to local time in SQL so slot labels match the local-time
+    # Convert to store-local time in SQL so slot labels match the local-time
     # slot labels produced by _forecast_lanes_vector (which uses local pd.Timestamps).
-    utc_offset_sec = int(datetime.now(timezone.utc).astimezone().utcoffset().total_seconds())
-    _local_ts = f"(timestamp + INTERVAL '{utc_offset_sec} seconds')"
+    # AT TIME ZONE gives each row its own offset and does not depend on the session time zone.
+    _store_tz = os.getenv("STORE_TZ", "Europe/Paris").replace("'", "")
+    _local_ts = f"(timestamp AT TIME ZONE '{_store_tz}')"
     slot_expr = (
         f"LPAD(EXTRACT(HOUR FROM {_local_ts})::int::text, 2, '0') || ':' || "
         f"LPAD((FLOOR(EXTRACT(MINUTE FROM {_local_ts}) / {slot_minutes}) * {slot_minutes})::int::text, 2, '0')"

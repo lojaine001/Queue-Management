@@ -6,6 +6,7 @@ import sys
 import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -183,7 +184,8 @@ DB_CONFIG = dict(
     password=os.getenv("DB_PASSWORD", "0000"),
 )
 
-LOCAL_TZ = datetime.now(timezone.utc).astimezone().tzinfo
+# The store's time zone with its DST rules (a fixed offset would show summer rows an hour early in winter).
+LOCAL_TZ = ZoneInfo(os.getenv("STORE_TZ", "Europe/Paris"))
 
 
 def _conn():
