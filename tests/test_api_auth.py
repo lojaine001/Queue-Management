@@ -16,6 +16,7 @@ Run:  python -m unittest tests.test_api_auth -v
 """
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,12 +36,16 @@ except Exception:  # pragma: no cover - httpx missing
     TestClient = None
 
 
-def load_api():
-    os.environ['IQMS_API_KEY'] = TEST_KEY
-    spec = importlib.util.spec_from_file_location('api_auth_test', API_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module  # as uvicorn does; pydantic resolves the request models through it
-    spec.loader.exec_module(module)
+def load_api(name='api_auth_test', **env):
+    """Load api.py with a test key. The environment is restored afterwards, so other
+    tests in this process (e.g. the DST tests using the real DB_PASSWORD) are unaffected."""
+    overrides = {'IQMS_API_KEY': TEST_KEY, 'CORS_ALLOWED_ORIGINS': '', **env}
+    with mock.patch.dict(os.environ, overrides):
+        os.environ.setdefault('DB_PASSWORD', 'test-password')  # never used: no DB in these tests
+        spec = importlib.util.spec_from_file_location(name, API_PATH)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # as uvicorn does; pydantic resolves the request models through it
+        spec.loader.exec_module(module)
     return module
 
 
@@ -142,17 +147,109 @@ class ApiKeyTests(unittest.TestCase):
         self.assertIn('/health', reading)
 
 
+@unittest.skipIf(TestClient is None, 'fastapi TestClient needs httpx')
+class CorsTests(unittest.TestCase):
+    ALLOWED = 'https://allowed.example'
+    UNKNOWN = 'https://evil.example'
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.default = TestClient(load_api('api_cors_default').app)  # CORS_ALLOWED_ORIGINS empty
+            cls.listed = TestClient(load_api('api_cors_listed', CORS_ALLOWED_ORIGINS=cls.ALLOWED + '/').app)
+        except TypeError as exc:
+            raise unittest.SkipTest(f'TestClient incompatible with installed httpx ({exc})')
+
+    def preflight(self, client, origin):
+        return client.options('/set-lanes', headers={'Origin': origin, 'Access-Control-Request-Method': 'POST',
+                                                     'Access-Control-Request-Headers': 'content-type,x-api-key'})
+
+    def test_unknown_origin_is_rejected(self):
+        for client in (self.default, self.listed):
+            r = self.preflight(client, self.UNKNOWN)
+            self.assertEqual(r.status_code, 400)
+            self.assertNotIn('access-control-allow-origin', r.headers)
+            r = client.get('/health', headers={'Origin': self.UNKNOWN})
+            self.assertNotIn('access-control-allow-origin', r.headers)  # browser will not hand it to the page
+
+    def test_listed_origin_is_allowed_with_only_the_needed_methods_and_headers(self):
+        r = self.preflight(self.listed, self.ALLOWED)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers['access-control-allow-origin'], self.ALLOWED)
+        self.assertNotIn('*', r.headers['access-control-allow-origin'])
+        self.assertNotIn('DELETE', r.headers['access-control-allow-methods'])
+        self.assertNotIn('access-control-allow-credentials', r.headers)
+
+    def test_same_origin_requests_are_unaffected(self):
+        # The web app: same address as /api through Caddy, so the browser sends no preflight.
+        self.assertEqual(self.default.get('/health').status_code, 200)
+
+
 class StartupTests(unittest.TestCase):
+    CODE = ('import importlib.util,sys; s=importlib.util.spec_from_file_location("a", sys.argv[1]); '
+            'm=importlib.util.module_from_spec(s); s.loader.exec_module(m)')
+
+    def start(self, path, **env_changes):
+        """Load a module in a fresh process from a folder with no .env above it."""
+        env = {k: v for k, v in os.environ.items() if k not in ('IQMS_API_KEY', 'DB_PASSWORD', 'CORS_ALLOWED_ORIGINS')}
+        env.update(PYTHONPATH=str(ROOT), **env_changes)
+        with tempfile.TemporaryDirectory() as tmp:
+            return subprocess.run([sys.executable, '-c', self.CODE, str(path)], cwd=tmp, env=env,
+                                  capture_output=True, text=True, timeout=120)
+
     def test_api_refuses_to_start_without_key(self):
-        env = {k: v for k, v in os.environ.items() if k != 'IQMS_API_KEY'}
-        env['PYTHONPATH'] = str(ROOT)
-        code = ('import importlib.util,sys; s=importlib.util.spec_from_file_location("a", sys.argv[1]); '
-                'm=importlib.util.module_from_spec(s); s.loader.exec_module(m)')
-        with tempfile.TemporaryDirectory() as tmp:  # no .env in this folder or above it
-            r = subprocess.run([sys.executable, '-c', code, str(API_PATH)], cwd=tmp, env=env,
-                               capture_output=True, text=True, timeout=120)
+        r = self.start(API_PATH, DB_PASSWORD='x')
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('IQMS_API_KEY is not set', r.stderr)
+
+    def test_api_refuses_to_start_without_db_password(self):
+        for value in ('', 'change-me'):
+            r = self.start(API_PATH, IQMS_API_KEY='x', DB_PASSWORD=value)
+            self.assertNotEqual(r.returncode, 0, value)
+            self.assertIn('DB_PASSWORD is not set', r.stderr)
+
+    def test_api_refuses_wildcard_cors(self):
+        r = self.start(API_PATH, IQMS_API_KEY='x', DB_PASSWORD='x', CORS_ALLOWED_ORIGINS='*')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('not \'*\'', r.stderr)
+
+    def test_api_starts_with_all_secrets(self):
+        r = self.start(API_PATH, IQMS_API_KEY='x', DB_PASSWORD='x')
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+
+
+class DefaultCredentialTests(unittest.TestCase):
+    """No password is built into the code any more; services stop clearly without one."""
+
+    def test_no_default_db_password_anywhere_in_python(self):
+        offenders = []
+        for f in ROOT.rglob('*.py'):
+            if f.name == Path(__file__).name or {'node_modules', 'venv', '.venv'} & set(f.parts):
+                continue
+            for n, line in enumerate(f.read_text(encoding='utf-8', errors='ignore').splitlines(), 1):
+                if 'DB_PASSWORD' in line and 'getenv' in line and not re.search(r"""getenv\(\s*["']DB_PASSWORD["']\s*(,\s*["']{2}\s*)?\)""", line):
+                    offenders.append(f'{f.relative_to(ROOT)}:{n}')
+        self.assertEqual(offenders, [], 'DB_PASSWORD read with a non-empty default')
+
+    def test_no_camera_password_fallback_in_code(self):
+        for rel in ('Head-Detector/main.py', 'Queue-Management-System-v2-main/Queue-Management-System-v2-main/queue_management_v2.py'):
+            text = (ROOT / rel).read_text(encoding='utf-8')
+            for m in re.finditer(r"get\('password',\s*'([^']*)'\)", text):
+                self.assertEqual(m.group(1), '', f'{rel} has a built-in camera password')
+
+    def test_camera_db_loggers_stop_without_db_password(self):
+        for rel in ('Head-Detector/utils/db_logger.py',
+                    'Queue-Management-System-v2-main/Queue-Management-System-v2-main/utils/db_logger.py'):
+            spec = importlib.util.spec_from_file_location('dblogger_' + rel.split('/')[0].replace('-', '_'), ROOT / rel)
+            module = importlib.util.module_from_spec(spec)
+            with mock.patch.dict(os.environ, {'DB_PASSWORD': ''}):
+                spec.loader.exec_module(module)
+                if getattr(module, 'psycopg2', True) is None:
+                    continue  # psycopg2 not installed in this venv: the logger never connects
+                with mock.patch.object(module.psycopg2, 'connect') as connect, \
+                        self.assertRaisesRegex(RuntimeError, 'DB_PASSWORD is not set'):
+                    module.DBLogger()
+                connect.assert_not_called()
 
 
 class WebServingTests(unittest.TestCase):

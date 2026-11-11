@@ -48,7 +48,7 @@ DB_CONFIG = dict(
     port=int(os.getenv("DB_PORT", 5432)),
     dbname=os.getenv("DB_NAME", "iqms"),
     user=os.getenv("DB_USER", "postgres"),
-    password=os.getenv("DB_PASSWORD", "0000"),
+    password=os.getenv("DB_PASSWORD", ""),
 )
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
 
@@ -169,6 +169,9 @@ def main():
     if not VAPID_PRIVATE_KEY_PATH:
         print("[push_alert_checker] ERROR: VAPID_PRIVATE_KEY_PATH is not set. See VAPID_SETUP.md.")
         return
+    if not DB_CONFIG["password"] or DB_CONFIG["password"] == "change-me":
+        print("[push_alert_checker] ERROR: DB_PASSWORD is not set. Add it to .env (see .env.example).")
+        sys.exit(1)
 
     print(f"[Scheduler] Starting push alert checker -- every {args.interval}s")
     print("[Scheduler] Press Ctrl+C to stop.\n")

@@ -326,7 +326,7 @@ def main():
     auth_type = stored_config.get('auth_type', 'none')
 
     username = stored_config.get('username', 'admin')
-    password = stored_config.get('password', 'Wt@5651%')
+    password = stored_config.get('password', '')
 
     pretrained_model = stored_config.get('pretrained_model', 'models/yolov9s.onnx')
 

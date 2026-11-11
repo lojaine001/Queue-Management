@@ -181,8 +181,10 @@ DB_CONFIG = dict(
     port=int(os.getenv("DB_PORT", 5432)),
     dbname=os.getenv("DB_NAME", "iqms"),
     user=os.getenv("DB_USER", "postgres"),
-    password=os.getenv("DB_PASSWORD", "0000"),
+    password=os.getenv("DB_PASSWORD", ""),
 )
+if not DB_CONFIG["password"] or DB_CONFIG["password"] == "change-me":
+    raise RuntimeError("DB_PASSWORD is not set. Add it to .env (see .env.example).")
 
 # The store's time zone with its DST rules (a fixed offset would show summer rows an hour early in winter).
 LOCAL_TZ = ZoneInfo(os.getenv("STORE_TZ", "Europe/Paris"))

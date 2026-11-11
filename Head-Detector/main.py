@@ -322,7 +322,7 @@ def main():
     camID = stored_config.get('camID', 'camera1')
     ip_address = stored_config.get('ip_address', '192.168.1.136:1033/axis-media/media.amp')
     username = stored_config.get('username', 'admin')
-    password = stored_config.get('password', 'Wt@5651%')
+    password = stored_config.get('password', '')
 
     if not is_package_installed('onnxruntime'):
         print(Color.RED('ERROR: onnxruntime is not installed. pip install onnxruntime or pip install onnxruntime-gpu'))

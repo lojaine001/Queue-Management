@@ -70,19 +70,36 @@ def require_api_key(request: Request, x_api_key: Optional[str] = Header(default=
 
 app = FastAPI(title="IQMS Manager API", version="2.0")
 
+# CORS: which OTHER websites may call this API from a browser. Empty (the
+# default) = none. The web app does not need an entry: Caddy serves it and
+# /api from the same address. Native apps (IQMSManager) and scripts are not
+# browsers, so CORS does not apply to them. Never "*".
+CORS_ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if "*" in CORS_ALLOWED_ORIGINS:
+    raise RuntimeError("CORS_ALLOWED_ORIGINS must list explicit origins (https://host), not '*'.")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-API-Key"],
+    allow_credentials=False,
 )
+
+
+def _required_env(name: str) -> str:
+    """A secret with no default: stop at startup with a clear message if it is missing."""
+    value = os.getenv(name, "").strip()
+    if not value or value == "change-me":
+        raise RuntimeError(f"{name} is not set. Add it to .env (see .env.example).")
+    return value
+
 
 DB_CONFIG = dict(
     host=os.getenv("DB_HOST", "localhost"),
     port=int(os.getenv("DB_PORT", 5432)),
     dbname=os.getenv("DB_NAME", "iqms"),
     user=os.getenv("DB_USER", "postgres"),
-    password=os.getenv("DB_PASSWORD", "0000"),
+    password=_required_env("DB_PASSWORD"),
 )
 
 LANE_MAX_CAPACITY = 10  # denominator for fill bar

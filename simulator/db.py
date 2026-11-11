@@ -10,7 +10,7 @@ DB_CONFIG = {
     "port":     int(os.getenv("DB_PORT", 5432)),
     "dbname":   os.getenv("DB_NAME",     "iqms"),
     "user":     os.getenv("DB_USER",     "postgres"),
-    "password": os.getenv("DB_PASSWORD", "0000"),
+    "password": os.getenv("DB_PASSWORD", ""),
 }
 
 class SimDB:

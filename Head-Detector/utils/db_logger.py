@@ -24,13 +24,18 @@ class DBLogger:
         if psycopg2 is None:
             print("[DB] WARNING: psycopg2 is not installed — running without DB.")
             return
+        password = os.getenv("DB_PASSWORD", "")
+        if not password or password == "change-me":
+            # A missing setting is a configuration error, not a database outage:
+            # stop instead of silently tracking lanes without saving them.
+            raise RuntimeError("DB_PASSWORD is not set. Add it to .env (see .env.example).")
         try:
             self.conn = psycopg2.connect(
                 host=os.getenv("DB_HOST",     "localhost"),
                 port=int(os.getenv("DB_PORT", 5432)),
                 dbname=os.getenv("DB_NAME",   "iqms"),
                 user=os.getenv("DB_USER",     "postgres"),
-                password=os.getenv("DB_PASSWORD", "0000"),
+                password=password,
             )
             self.conn.autocommit = True
             self.cursor = self.conn.cursor()

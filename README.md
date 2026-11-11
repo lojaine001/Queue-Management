@@ -127,8 +127,16 @@ unsubscribe from alerts through the web app; that is the feature. `/set-lanes` a
 - `IQMS_API_KEY`: required, the API refuses to start without it. `install.ps1` adds a random one.
   To make a new one: `python -c "import secrets; print(secrets.token_urlsafe(32))"`, put it in
   `.env`, then run `.\start_all.ps1` (the API and Caddy read it when they start).
-- `DB_PASSWORD`, `CHECKOUT_CAM_PASSWORD`, `VAPID_PRIVATE_KEY_PATH`.
-- The camera logins are in each `config.yml`.
+- `DB_PASSWORD`: required. No program has a built-in password any more: the API, dashboard,
+  push alerts and both cameras stop at startup with "DB_PASSWORD is not set" if it is missing,
+  and `start_all.ps1` checks it before stopping anything.
+- `CHECKOUT_CAM_PASSWORD`, `VAPID_PRIVATE_KEY_PATH`.
+- The camera logins are in each `config.yml` (the code has no fallback password).
+
+**CORS.** Browsers only let other websites call the API if they are listed in
+`CORS_ALLOWED_ORIGINS` in `.env` (comma-separated, e.g. `https://example.com`). It is empty by
+default, which is all the system needs: the web app is served from the same address as `/api`,
+and native apps (IQMSManager) and scripts are not affected by CORS. `*` is refused at startup.
 
 Never put the key in the web app's code or in git.
 

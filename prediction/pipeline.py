@@ -22,7 +22,7 @@ Environment variables (DB connection)
   DB_PORT      default 5432
   DB_NAME      default "iqms"
   DB_USER      default "postgres"
-  DB_PASSWORD  default "0000"
+  DB_PASSWORD  required, no default (set it in .env)
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ DB_CONFIG = {
     "port":     int(os.getenv("DB_PORT", 5432)),
     "dbname":   os.getenv("DB_NAME",     "iqms"),
     "user":     os.getenv("DB_USER",     "postgres"),
-    "password": os.getenv("DB_PASSWORD", "0000"),
+    "password": os.getenv("DB_PASSWORD", ""),
 }
 
 

@@ -70,6 +70,9 @@ if (Test-Path $envPath) {
 $apiKey = if ($env:IQMS_API_KEY) { $env:IQMS_API_KEY } else { $dotEnv["IQMS_API_KEY"] }
 $preflight = @()
 if (-not $apiKey) { $preflight += "IQMS_API_KEY is missing from .env (the API refuses to start without it). See .env.example." }
+$dbPassword = if ($env:DB_PASSWORD) { $env:DB_PASSWORD } else { $dotEnv["DB_PASSWORD"] }
+if (-not $dbPassword -or $dbPassword -eq "change-me") { $preflight += "DB_PASSWORD is missing from .env (no service has a default any more). See .env.example." }
+if ($dotEnv["CORS_ALLOWED_ORIGINS"] -match '\*') { $preflight += "CORS_ALLOWED_ORIGINS must list explicit origins, not '*'." }
 if (-not (Test-Path $caddyExe)) { $preflight += "Caddy not found at $caddyExe. Run .\tools\install.ps1 to download it." }
 if ($preflight.Count) {
     Write-Host "`n[ERROR] Not starting; nothing was stopped:" -ForegroundColor Red
