@@ -222,9 +222,13 @@ class DefaultCredentialTests(unittest.TestCase):
     """No password is built into the code any more; services stop clearly without one."""
 
     def test_no_default_db_password_anywhere_in_python(self):
+        # Only the code in the repository: a machine can hold other, untracked scripts.
+        listed = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '*.py'], capture_output=True, text=True)
+        if listed.returncode != 0:
+            self.skipTest('not a git checkout')
         offenders = []
-        for f in ROOT.rglob('*.py'):
-            if f.name == Path(__file__).name or {'node_modules', 'venv', '.venv'} & set(f.parts):
+        for f in (ROOT / p for p in listed.stdout.splitlines()):
+            if f.name == Path(__file__).name or not f.exists():
                 continue
             for n, line in enumerate(f.read_text(encoding='utf-8', errors='ignore').splitlines(), 1):
                 if 'DB_PASSWORD' in line and 'getenv' in line and not re.search(r"""getenv\(\s*["']DB_PASSWORD["']\s*(,\s*["']{2}\s*)?\)""", line):
