@@ -16,6 +16,7 @@
           tools\regression_baseline.txt
       S7  IQMS-Web production build succeeds
       S8  outer gitlink == Queue-Management HEAD, working trees clean (WARN)
+      S9  Caddy installed and IQMS_API_KEY set in .env (WARN)
     Live (skipped when the services are not running)
       L1  ports 8000 / 8501 / 3001 listening
       L2  /health, web root and /api proxy answer 200
@@ -213,6 +214,13 @@ foreach ($repo in @($outer, $qm)) {
 if ($gitlink -ne $qmHead) { Add-Result "S8" "WARN" "outer gitlink $($gitlink.Substring(0,7)) != Queue-Management HEAD $($qmHead.Substring(0,7)) (commit the outer repo)" }
 elseif ($dirty.Count) { Add-Result "S8" "WARN" "gitlink in sync; uncommitted changes in: $($dirty -join ', ')" }
 else { Add-Result "S8" "PASS" "gitlink in sync, working trees clean" }
+
+# S9 production web setup: Caddy installed and the API key set (WARN only, so a push is never blocked)
+$s9 = @()
+if (-not (Test-Path (Join-Path $qm "tools\bin\caddy.exe"))) { $s9 += "Caddy missing (run tools\install.ps1)" }
+$envFile = Join-Path $qm ".env"
+if (-not ((Test-Path $envFile) -and ((Get-Content $envFile) -match '^\s*IQMS_API_KEY\s*=\s*\S+'))) { $s9 += "IQMS_API_KEY not set in .env (the API will not start)" }
+if ($s9.Count) { Add-Result "S9" "WARN" ($s9 -join '; ') } else { Add-Result "S9" "PASS" "Caddy installed, IQMS_API_KEY set" }
 
 # ---------------------------------------------------------------- live checks
 Write-Host "`n--- Live checks ---" -ForegroundColor Cyan

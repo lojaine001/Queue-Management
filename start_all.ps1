@@ -7,8 +7,9 @@
     3. Starts FastAPI (port 8000) as background daemon
     4. Starts Auto-Predict Scheduler (3m interval) and the Web Push alert checker as background daemons
     5. Starts Streamlit Dashboard (port 8501) as background daemon
-    6. Starts IQMS-Web React App (port 3001) as background daemon
-    7. Starts the ngrok tunnel to IQMS-Web (public URL; /api is proxied to 8000 by Vite)
+    6. Builds IQMS-Web (npm run build) and serves it with Caddy on 127.0.0.1:3001
+       (IQMS-Web\Caddyfile; /api is proxied to 8000, the dev server is never used)
+    7. Starts the ngrok tunnel to Caddy on port 3001 (public URL)
     8. Starts Pipeline A (Head-Detector / Checkout lanes) - View Img ON by default (visible window)
     9. Starts Pipeline B (Queue-Management-v2 / Entrance) - View Img ON by default (visible window)
    10. Performs health check on ports and endpoints
@@ -56,6 +57,28 @@ if ($pgService) {
     }
 }
 
+# 1b. Pre-flight: refuse to stop the running system if the new one cannot start.
+$webDir   = Join-Path $rootDir "IQMS-Web"
+$caddyExe = Join-Path $rootDir "tools\bin\caddy.exe"
+$dotEnv = @{}
+$envPath = Join-Path $rootDir ".env"
+if (Test-Path $envPath) {
+    foreach ($line in Get-Content $envPath) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$') { $dotEnv[$Matches[1]] = $Matches[2].Trim('"', "'") }
+    }
+}
+$apiKey = if ($env:IQMS_API_KEY) { $env:IQMS_API_KEY } else { $dotEnv["IQMS_API_KEY"] }
+$preflight = @()
+if (-not $apiKey) { $preflight += "IQMS_API_KEY is missing from .env (the API refuses to start without it). See .env.example." }
+if (-not (Test-Path $caddyExe)) { $preflight += "Caddy not found at $caddyExe. Run .\tools\install.ps1 to download it." }
+if ($preflight.Count) {
+    Write-Host "`n[ERROR] Not starting; nothing was stopped:" -ForegroundColor Red
+    $preflight | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    exit 1
+}
+# Caddy reads the key from its environment ({env.IQMS_API_KEY} in the Caddyfile).
+$env:IQMS_API_KEY = $apiKey
+
 # 2. Clean teardown of existing services
 Write-Host "`n[2/8] Cleaning existing processes and locks..." -ForegroundColor Yellow
 & (Join-Path $rootDir "stop_all.ps1")
@@ -65,7 +88,6 @@ $qmDir       = Join-Path $rootDir "Queue-Management-System-v2-main\Queue-Managem
 $qmVenvPy    = Join-Path $qmDir "venv\Scripts\python.exe"
 $hdDir       = Join-Path $rootDir "Head-Detector"
 $hdVenvPy    = Join-Path $hdDir ".venv\Scripts\python.exe"
-$webDir      = Join-Path $rootDir "IQMS-Web"
 $ngrokDomain = if ($env:NGROK_DOMAIN) { $env:NGROK_DOMAIN } else { "wildfowl-agenda-curve.ngrok-free.dev" }
 
 # Validate virtualenvs
@@ -152,16 +174,32 @@ $servicePids["dashboard"] = Start-ServiceProcess -Title "Streamlit Dashboard" `
     -Visible $false
 Write-Host "      [OK] Streamlit Dashboard launched (PID: $($servicePids['dashboard']))" -ForegroundColor Green
 
-# 7. Start IQMS-Web Frontend (Port 3001)
-Write-Host "`n[6/8] Launching IQMS-Web React App (Port 3001)..." -ForegroundColor Yellow
-$servicePids["web"] = Start-ServiceProcess -Title "IQMS-Web" `
-    -WorkingDir $webDir `
-    -FilePath "cmd.exe" `
-    -Arguments "/c npm run dev" `
-    -OutLog (Join-Path $logDir "web.log") `
-    -ErrLog (Join-Path $logDir "web_err.log") `
-    -Visible $false
-Write-Host "      [OK] IQMS-Web launched (PID: $($servicePids['web']))" -ForegroundColor Green
+# 7. Build IQMS-Web and serve it with Caddy (Port 3001, this machine only).
+#    Never the Vite dev server: that is for development and must not be tunnelled.
+Write-Host "`n[6/8] Building IQMS-Web and launching Caddy (Port 3001)..." -ForegroundColor Yellow
+$buildLog = Join-Path $logDir "web_build.log"
+Push-Location $webDir
+try { & cmd.exe /c "npm run build > `"$buildLog`" 2>&1"; $buildOk = ($LASTEXITCODE -eq 0) } finally { Pop-Location }
+$distIndex = Join-Path $webDir "dist\index.html"
+if ($buildOk) {
+    Write-Host "      [OK] Build succeeded" -ForegroundColor Green
+} elseif (Test-Path $distIndex) {
+    Write-Host "      [!] Build failed (see $buildLog) - serving the previous build" -ForegroundColor Yellow
+} else {
+    Write-Host "      [!] Build failed and no previous build exists (see $buildLog)" -ForegroundColor Red
+}
+if (Test-Path $distIndex) {
+    $servicePids["web"] = Start-ServiceProcess -Title "IQMS-Web (Caddy)" `
+        -WorkingDir $webDir `
+        -FilePath $caddyExe `
+        -Arguments "run --config Caddyfile --adapter caddyfile" `
+        -OutLog (Join-Path $logDir "web.log") `
+        -ErrLog (Join-Path $logDir "web_err.log") `
+        -Visible $false
+    Write-Host "      [OK] Caddy launched (PID: $($servicePids['web']))" -ForegroundColor Green
+} else {
+    Write-Host "      [!] IQMS-Web not started" -ForegroundColor Red
+}
 
 # 8. Start ngrok tunnel to IQMS-Web (Port 3001)
 $ngrokCmd = Get-Command ngrok -ErrorAction SilentlyContinue
@@ -170,7 +208,7 @@ if ($NoTunnel) {
 } elseif (-not $ngrokCmd) {
     Write-Host "`n[7/8] [!] ngrok not found on PATH - tunnel not started" -ForegroundColor Yellow
 } else {
-    Write-Host "`n[7/8] Launching ngrok tunnel (https://$ngrokDomain -> localhost:3001)..." -ForegroundColor Yellow
+    Write-Host "`n[7/8] Launching ngrok tunnel (https://$ngrokDomain -> Caddy on localhost:3001)..." -ForegroundColor Yellow
     try {
         $servicePids["ngrok"] = Start-ServiceProcess -Title "ngrok Tunnel" `
             -WorkingDir $rootDir `

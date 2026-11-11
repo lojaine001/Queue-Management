@@ -1,0 +1,40 @@
+# Production server for IQMS-Web (replaces the Vite dev server).
+#
+# - Serves the built app (npm run build -> dist/) on 127.0.0.1:3001 only.
+#   The ngrok tunnel connects to it locally; nothing else on the network can.
+# - Forwards /api/* to the FastAPI backend on 127.0.0.1:8000 (prefix removed).
+# - Adds the API key (IQMS_API_KEY, from the environment start_all.ps1 sets
+#   from .env) ONLY to the two push-notification calls the web app makes.
+#   The key is never sent to the browser. Every other POST (/set-lanes,
+#   /alert-response) must bring its own X-API-Key or the API answers 401.
+#
+# Started by start_all.ps1:  tools\bin\caddy.exe run --config Caddyfile --adapter caddyfile
+# Check the syntax:          tools\bin\caddy.exe validate --config IQMS-Web\Caddyfile --adapter caddyfile
+
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:3001 {
+	bind 127.0.0.1 [::1]
+
+	handle_path /api/* {
+		@push path /push-subscribe /push-unsubscribe
+		request_header @push X-API-Key {env.IQMS_API_KEY}
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		root * dist
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

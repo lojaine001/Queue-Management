@@ -4,7 +4,7 @@
 .DESCRIPTION
     1. Kills processes recorded in logs/pids.json
     2. Finds and terminates remaining python processes running IQMS scripts
-    3. Stops the ngrok agent tunnelling port 3001
+    3. Stops Caddy (tools\bin\caddy.exe) and the ngrok agent tunnelling port 3001
     4. Kills any processes still bound to ports 8000, 8501, 3001
     5. Cleans up stale runtime locks (.runtime/*.lock)
 #>
@@ -76,6 +76,15 @@ $forks = Get-CimInstance Win32_Process -Filter "name = 'python.exe'" -ErrorActio
     Where-Object { $_.CommandLine -match "multiprocessing-fork" -and $_.CommandLine -match $rootPattern }
 foreach ($p in $forks) {
     Write-Host "[-] Terminating orphaned worker (PID: $($p.ProcessId))..." -ForegroundColor Yellow
+    Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+# Caddy serving IQMS-Web -- only this project's copy (tools\bin\caddy.exe)
+$caddyPath = [regex]::Escape((Join-Path $rootDir "tools\bin\caddy.exe"))
+$caddyProcs = Get-CimInstance Win32_Process -Filter "name = 'caddy.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ExecutablePath -and $_.ExecutablePath -match "^$caddyPath$" }
+foreach ($p in $caddyProcs) {
+    Write-Host "[-] Stopping Caddy (PID: $($p.ProcessId))..." -ForegroundColor Yellow
     Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
 }
 

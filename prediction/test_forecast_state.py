@@ -6,6 +6,8 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from prediction.forecast_state import build_payload, freshness, waiting_backlog, wait_at_horizon, horizon_value
 
+import os
+os.environ.setdefault('IQMS_API_KEY', 'test-key')  # api.py refuses to load without a key
 API_PATH=Path(__file__).resolve().parents[1]/'Queue-Management-System-v2-main/Queue-Management-System-v2-main/api.py'
 spec=importlib.util.spec_from_file_location('forecast_api_test',API_PATH)
 api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)

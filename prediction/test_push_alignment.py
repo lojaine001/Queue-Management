@@ -8,6 +8,8 @@ from unittest.mock import patch
 from prediction.forecast_state import build_payload, wait_at_horizon
 
 PUSH_PATH=Path(__file__).resolve().parents[1]/'Queue-Management-System-v2-main/Queue-Management-System-v2-main/push_alert_checker.py'
+import os
+os.environ.setdefault('IQMS_API_KEY', 'test-key')  # api.py refuses to load without a key
 API_PATH=PUSH_PATH.with_name('api.py')
 
 

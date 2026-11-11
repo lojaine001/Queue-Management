@@ -81,3 +81,6 @@ docs/*.docx
 accuracy_*.csv
 correlation_results.csv
 tools/smoke_logs/
+
+# Caddy (downloaded by tools/install.ps1)
+tools/bin/

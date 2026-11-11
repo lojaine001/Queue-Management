@@ -9,8 +9,10 @@
            Head-Detector\.venv                                    checkout pipeline
            Queue-Management-System-v2-main\...\venv               entrance, API, dashboard, forecast
            simulator\.venv                                        simulator (skip with -SkipSimulator)
-      3. creates .env from .env.example (edit DB_PASSWORD afterwards)
-      4. installs the web app (npm ci in IQMS-Web)
+      3. creates .env from .env.example (edit DB_PASSWORD afterwards) and adds a random
+         IQMS_API_KEY if it has none (the value is never printed)
+      4. installs the web app (npm ci in IQMS-Web) and downloads Caddy, the web server
+         that serves it in production (tools\bin\caddy.exe, pinned version, SHA-512 checked)
       5. creates the database from .env if it does not exist and checks TimescaleDB
          (the apps create their tables themselves on first start)
       6. downloads missing detector models from Hugging Face (tools\models.json)
@@ -114,12 +116,55 @@ else {
     Todo "Edit .env: set DB_PASSWORD (and the other settings) for this machine."
 }
 
+# 3b. API key for the endpoints that change data (never printed) ---------------------
+Step "API key (IQMS_API_KEY in .env)"
+if ((Test-Path $envFile) -and ((Get-Content $envFile) -match '^\s*IQMS_API_KEY\s*=\s*\S+')) { Ok "set" }
+elseif (Test-Path $envFile) {
+    Run "add a random IQMS_API_KEY to .env" {
+        $bytes = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $key = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $text = [IO.File]::ReadAllText($envFile)
+        if ($text -match '(?m)^\s*IQMS_API_KEY\s*=\s*$') { $text = $text -replace '(?m)^\s*IQMS_API_KEY\s*=\s*$', "IQMS_API_KEY=$key" }
+        else { if ($text -and -not $text.EndsWith("`n")) { $text += "`r`n" }; $text += "IQMS_API_KEY=$key`r`n" }
+        [IO.File]::WriteAllText($envFile, $text, (New-Object System.Text.UTF8Encoding $false))
+    }
+    if (-not $DryRun) { Ok "added (value not shown; restart the API and Caddy to use it)" }
+}
+
 # 4. Web app ------------------------------------------------------------------------
 if (-not $SkipWeb) {
     Step "web app (IQMS-Web)"
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { Todo "npm not found: install Node.js, then run 'npm ci' in IQMS-Web." }
     elseif (Test-Path (Join-Path $root "IQMS-Web\node_modules\.bin\vite.cmd")) { Ok "node_modules present" }
     else { Run "npm ci in IQMS-Web" { Push-Location (Join-Path $root "IQMS-Web"); try { npm ci } finally { Pop-Location } } }
+
+    # Caddy serves the built app in production (start_all.ps1); pinned and checksum-verified.
+    $caddyVersion = "2.11.7"
+    $caddyExe = Join-Path $root "tools\bin\caddy.exe"
+    $haveCaddy = (Test-Path $caddyExe) -and ((& $caddyExe version 2>$null) -match "^v$([regex]::Escape($caddyVersion))\b")
+    if ($haveCaddy) { Ok "Caddy $caddyVersion present" }
+    else {
+        Run "download Caddy $caddyVersion to tools\bin" {
+            $base = "https://github.com/caddyserver/caddy/releases/download/v$caddyVersion"
+            $zipName = "caddy_${caddyVersion}_windows_amd64.zip"
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ("caddy_" + [guid]::NewGuid().ToString("N"))
+            New-Item -ItemType Directory -Force $tmp | Out-Null
+            try {
+                $zip = Join-Path $tmp $zipName
+                Invoke-WebRequest -Uri "$base/$zipName" -OutFile $zip -UseBasicParsing
+                $sums = (Invoke-WebRequest -Uri "$base/caddy_${caddyVersion}_checksums.txt" -UseBasicParsing).Content
+                if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+                $expected = ($sums -split "`n" | Where-Object { $_ -match [regex]::Escape($zipName) } | Select-Object -First 1) -replace '\s.*$', ''
+                $actual = (Get-FileHash $zip -Algorithm SHA512).Hash.ToLower()
+                if (-not $expected -or $actual -ne $expected.Trim().ToLower()) { throw "Caddy download does not match the published SHA-512 checksum." }
+                Expand-Archive $zip -DestinationPath $tmp -Force
+                New-Item -ItemType Directory -Force (Split-Path $caddyExe -Parent) | Out-Null
+                Copy-Item (Join-Path $tmp "caddy.exe") $caddyExe -Force
+            } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        if (-not $DryRun) { Ok "Caddy $caddyVersion installed (checksum verified)" }
+    }
 }
 
 # 5. Database -----------------------------------------------------------------------

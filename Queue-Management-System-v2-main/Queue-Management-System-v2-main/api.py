@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import os
+import secrets
 import sys
 from zoneinfo import ZoneInfo
 from datetime import datetime, timezone, timedelta
@@ -18,7 +20,7 @@ from typing import Optional
 import psycopg2
 import psycopg2.extras
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -43,6 +45,28 @@ if str(API_DIR) not in sys.path:
 import camera_snapshot
 
 SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
+
+# Endpoints that change data require this key in the X-API-Key header.
+# Read-only (GET) endpoints stay open. The web app never holds the key: the
+# Caddy proxy (IQMS-Web/Caddyfile) adds it to the two push calls it forwards.
+API_KEY = os.getenv("IQMS_API_KEY", "").strip()
+if not API_KEY:
+    raise RuntimeError(
+        "IQMS_API_KEY is not set. Add a long random value to .env (see .env.example), "
+        "e.g. python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+    )
+auth_log = logging.getLogger("iqms.api.auth")
+
+
+def require_api_key(request: Request, x_api_key: Optional[str] = Header(default=None)):
+    """FastAPI dependency: 401 unless the X-API-Key header matches IQMS_API_KEY."""
+    if x_api_key and secrets.compare_digest(x_api_key.encode(), API_KEY.encode()):
+        return
+    auth_log.warning("Rejected %s %s from %s: %s API key", request.method, request.url.path,
+                     request.client.host if request.client else "?", "wrong" if x_api_key else "no")
+    raise HTTPException(status_code=401, detail="Missing or invalid API key",
+                        headers={"WWW-Authenticate": "X-API-Key"})
+
 
 app = FastAPI(title="IQMS Manager API", version="2.0")
 
@@ -288,7 +312,7 @@ def vapid_public_key():
     return {"public_key": key}
 
 
-@app.post("/push-subscribe")
+@app.post("/push-subscribe", dependencies=[Depends(require_api_key)])
 def push_subscribe(body: PushSubscribeRequest):
     try:
         with _conn() as conn:
@@ -321,7 +345,7 @@ def push_subscribe(body: PushSubscribeRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/push-unsubscribe")
+@app.post("/push-unsubscribe", dependencies=[Depends(require_api_key)])
 def push_unsubscribe(body: PushUnsubscribeRequest):
     try:
         with _conn() as conn:
@@ -868,7 +892,7 @@ def snapshot_entrance():
     return {"image": f"data:image/jpeg;base64,{data}"}
 
 
-@app.post("/set-lanes")
+@app.post("/set-lanes", dependencies=[Depends(require_api_key)])
 def set_lanes(body: SetLanesRequest):
     if not (1 <= body.lanes <= 4):
         raise HTTPException(status_code=400, detail="lanes must be between 1 and 4")
@@ -896,7 +920,7 @@ def set_lanes(body: SetLanesRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/alert-response")
+@app.post("/alert-response", dependencies=[Depends(require_api_key)])
 def post_alert_response(body: AlertResponse):
     valid = {"opening_lane", "cannot_open", "false_alarm"}
     if body.response not in valid:
