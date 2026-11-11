@@ -1,0 +1,30 @@
+{
+  "_comment": "Detector models that are not in git. tools/install.ps1 downloads missing ones from the Hugging Face repo below (https://huggingface.co/<repo>/resolve/main/<file name>) and checks sha256 when it is set. The face models (retinaface, age_gender) are not listed: the entrance app downloads them itself on first start.",
+  "huggingface_repo": "",
+  "models": [
+    {
+      "path": "Head-Detector/models/yolov9_s_discrete_headpose_nonms_1x3x480x640.onnx",
+      "used_by": "checkout pipeline (Head-Detector/config.yml custom_model)",
+      "required": true,
+      "sha256": ""
+    },
+    {
+      "path": "Queue-Management-System-v2-main/Queue-Management-System-v2-main/models/yolov9t.onnx",
+      "used_by": "entrance pipeline (config.yml pretrained_model)",
+      "required": true,
+      "sha256": ""
+    },
+    {
+      "path": "Head-Detector/models/yolov9_s_discrete_headpose_post_0100_1x3x480x640.onnx",
+      "used_by": "checkout pipeline, original export with NMS (only if config.yml points to it)",
+      "required": false,
+      "sha256": ""
+    },
+    {
+      "path": "Queue-Management-System-v2-main/Queue-Management-System-v2-main/models/yolov9s.onnx",
+      "used_by": "entrance pipeline, larger model (only if config.yml points to it)",
+      "required": false,
+      "sha256": ""
+    }
+  ]
+}
