@@ -76,3 +76,8 @@ eval/runs/
 # Generated from the Markdown docs by docs/generate_pdf.py and docs/export_doc.py
 *.pdf
 docs/*.docx
+
+# Outputs of accuracy_eval.py / analysis scripts and the smoke test (regenerated on demand)
+accuracy_*.csv
+correlation_results.csv
+tools/smoke_logs/
