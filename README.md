@@ -40,8 +40,9 @@ cd Queue-Management
 # edit .env: at least DB_PASSWORD (the PostgreSQL password); see .env.example for every setting
 notepad .env
 
-# second run: creates the database, downloads the detector models, registers the daily check
-.\tools\install.ps1 -ModelsRepo <huggingface-account>/<models-repo> -RegisterTasks
+# copy the two detector models into place (see "Models" below), then the second run:
+# creates the database, checks the models, registers the daily check
+.\tools\install.ps1 -RegisterTasks
 ```
 `install.ps1` can be run again at any time; it skips what is already done and ends with a list
 of anything left to do. `-DryRun` shows the steps without doing them. `-Exact` installs the
@@ -56,17 +57,16 @@ Runtime options (tracker, OpenVINO device, logging) are in each folder's `config
 ### Models
 Not in git. `tools/models.json` lists them:
 
-| Model | Used by | Source |
+| Model | Used by | Where it goes |
 |---|---|---|
-| `yolov9_s_discrete_headpose_nonms_1x3x480x640.onnx` | checkout pipeline | project Hugging Face repo |
-| `yolov9t.onnx` | entrance pipeline | project Hugging Face repo |
+| `yolov9_s_discrete_headpose_nonms_1x3x480x640.onnx` | checkout pipeline | `Head-Detector/models/` |
+| `yolov9t.onnx` | entrance pipeline | `Queue-Management-System-v2-main/Queue-Management-System-v2-main/models/` |
 | `retinaface_mnet_v2.onnx`, `age_gender.onnx` | entrance faces | downloaded automatically on first start (uniface releases on GitHub) |
 
-To set up the Hugging Face repo once: create a model repo (keep it private unless the model
-licences allow publishing), upload the two files from a working machine (web page "Add file", or
-`huggingface-cli upload <repo> <file>`), and put the repo name in `huggingface_repo` in
-`tools/models.json`. For a private repo, set `HF_TOKEN` (a read token) before running the install.
-Put the files' SHA256 (`Get-FileHash <file>`) in `models.json` so the install checks them.
+Copy the two detector models from an existing installation into those folders before starting.
+Optional: if they are kept in a Hugging Face model repo, `install.ps1 -ModelsRepo <account>/<repo>`
+downloads missing ones (set `HF_TOKEN` for a private repo; SHA256 values in `tools/models.json`
+are checked when filled in).
 
 ### Database
 `install.ps1` creates the database named in `.env` (`DB_NAME`, default `iqms`). The apps enable
