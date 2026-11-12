@@ -102,7 +102,7 @@ The `.bat` files do the same for double-clicking.
 |---|---|
 | http://localhost:3001 | web / phone app (Caddy: reachable only from this machine and through ngrok) |
 | http://localhost:8501 | operator dashboard |
-| http://localhost:8000/health | API health |
+| http://localhost:8000/health | API health, including `db_pool`: connections in use out of the maximum |
 
 ## 3. Security
 

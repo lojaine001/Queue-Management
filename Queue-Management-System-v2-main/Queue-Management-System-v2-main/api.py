@@ -22,7 +22,7 @@ import psycopg2.extras
 from dotenv import find_dotenv, load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 # Every other script in this codebase (dashboard.py, ensemble_predict.py,
@@ -43,6 +43,7 @@ API_DIR = Path(__file__).resolve().parent
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 import camera_snapshot
+from db_pool import DbPool, PoolBusy
 
 SNAP_DIR = Path(__file__).resolve().parent / "snapshots"
 
@@ -108,12 +109,40 @@ CHECKOUT_CAM_ID = os.getenv("CHECKOUT_CAM_ID", "Bosch_Camera_exit")
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))
 
 
+# One shared pool instead of a new connection per request (see db_pool.py).
+# Each connection is opened once with the store time zone and a query time limit.
+DB_POOL = DbPool(
+    {**DB_CONFIG, "connect_timeout": 5, "application_name": "iqms-api"},  # visible in pg_stat_activity
+    minconn=int(os.getenv("DB_POOL_MIN", 5)),   # kept open; psycopg2 closes extras above this when returned
+    maxconn=int(os.getenv("DB_POOL_MAX", 10)),
+    wait_sec=float(os.getenv("DB_POOL_WAIT_SEC", 5)),
+    session_options=f"-c timezone={STORE_TZ} -c statement_timeout={int(os.getenv('DB_STATEMENT_TIMEOUT_MS', 15000))}",
+)
+
+
 def _conn():
-    conn = psycopg2.connect(**DB_CONFIG)
-    with conn.cursor() as cur:
-        cur.execute("SET timezone = %s", (STORE_TZ,))
-    conn.commit()
-    return conn
+    """A pooled connection: `with _conn() as conn:` commits on success, rolls back on
+    error, and always gives the connection back."""
+    return DB_POOL.connection()
+
+
+def _http_error(exc: Exception) -> HTTPException:
+    """What an endpoint answers when something fails: 503 while the pool is busy, else 500."""
+    if isinstance(exc, PoolBusy):
+        return HTTPException(status_code=503, detail="The database is busy; try again in a few seconds.",
+                             headers={"Retry-After": "5"})
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@app.exception_handler(PoolBusy)
+def _pool_busy_handler(request: Request, exc: PoolBusy):
+    err = _http_error(exc)
+    return JSONResponse(status_code=err.status_code, content={"detail": err.detail}, headers=err.headers)
+
+
+@app.on_event("shutdown")
+def _close_pool():
+    DB_POOL.close()
 
 
 def _lane_status(avg_wait_min: float, queue_depth: int) -> str:
@@ -318,7 +347,9 @@ except Exception as exc:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+    # db_pool: connections in use out of max, requests waiting, requests refused as busy,
+    # broken connections replaced. in_use == max for long = something holds connections.
+    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat(), "db_pool": DB_POOL.stats()}
 
 
 @app.get("/vapid-public-key")
@@ -359,7 +390,7 @@ def push_subscribe(body: PushSubscribeRequest):
             conn.commit()
         return {"status": "subscribed"}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.post("/push-unsubscribe", dependencies=[Depends(require_api_key)])
@@ -371,7 +402,7 @@ def push_unsubscribe(body: PushUnsubscribeRequest):
             conn.commit()
         return {"status": "unsubscribed"}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/live-lanes")
@@ -432,7 +463,7 @@ def live_lanes():
         return {"lanes": lanes, "snapshot": snapshot}
 
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/alerts")
@@ -469,17 +500,14 @@ def get_alerts():
         }
 
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 def _forecast_state():
-    conn = _conn()
-    try:
+    with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT d.*, f.revision AS current_settings_revision FROM dashboard_state d LEFT JOIN forecast_settings f ON f.id=d.id WHERE d.id=1")
             return cur.fetchone() or {}
-    finally:
-        conn.close()
 
 
 @app.get("/forecast")
@@ -501,7 +529,7 @@ def forecast():
             **freshness(state),
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/forecast/wait")
@@ -512,7 +540,7 @@ def forecast_wait(minutes: float = 0):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/day-recap")
@@ -721,7 +749,7 @@ def day_recap(date: Optional[str] = None):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 def _shared_forecast_chart(horizon_minutes):
@@ -746,7 +774,7 @@ def forecast_chart():
     try:
         return _shared_forecast_chart(60)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/day-wait-chart")
@@ -794,7 +822,7 @@ def day_wait_chart(date: Optional[str] = None):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/forecast-chart-3h")
@@ -802,7 +830,7 @@ def forecast_chart_3h():
     try:
         return _shared_forecast_chart(180)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/forecast-chart-12h")
@@ -834,7 +862,7 @@ def forecast_chart_12h():
             ]
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/forecast-chart-2d")
@@ -866,7 +894,7 @@ def forecast_chart_2d():
             ]
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/snapshot/checkout")
@@ -934,7 +962,7 @@ def set_lanes(body: SetLanesRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.post("/alert-response", dependencies=[Depends(require_api_key)])
@@ -960,20 +988,18 @@ def post_alert_response(body: AlertResponse):
             conn.commit()
         return {"status": "recorded", "response": body.response}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise _http_error(exc)
 
 
 @app.get("/statistics/summary")
 def statistics_summary():
     """Background demographic/traffic snapshot, with its own freshness timestamp."""
-    conn=_conn()
-    try:
+    with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute('SELECT * FROM dashboard_statistics WHERE id=1')
             row=dict(cur.fetchone() or {})
-        if not row:return {"available":False,"stale":True}
-        return {"available":True,**row,**freshness({"updated_at":row["updated_at"]})}
-    finally:conn.close()
+    if not row:return {"available":False,"stale":True}
+    return {"available":True,**row,**freshness({"updated_at":row["updated_at"]})}
 
 PERIOD_BUCKET = {"day": "hour", "week": "day", "month": "day"}
 
