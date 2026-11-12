@@ -279,10 +279,14 @@ def draw_text_lines(frame, lines, position="bottom_left", padding_ratio=0.02, co
 
 
 _LOCK_MUTEX = None
-_k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+# Windows: a named mutex stops a second copy from starting. On Linux (Docker) the
+# container already guarantees a single copy, so there is no lock to take.
+_k32 = ctypes.WinDLL('kernel32', use_last_error=True) if os.name == 'nt' else None
 
 def _acquire_lock() -> bool:
     global _LOCK_MUTEX
+    if _k32 is None:
+        return True
     _LOCK_MUTEX = _k32.CreateMutexW(None, True, "QueueManagementV2Lock")
     err = ctypes.get_last_error()
     print(f"[LOCK] PID={os.getpid()} err={err} exe={sys.executable[-40:]}", flush=True)

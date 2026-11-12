@@ -1,0 +1,33 @@
+# Caddy inside Docker (deploy/docker/Dockerfile.web). Same rules as IQMS-Web/Caddyfile
+# (Windows), adapted to the container network:
+# - listens on :3001 inside the container; docker-compose.yml publishes it to
+#   127.0.0.1:3001 on the host only, and the ngrok container reaches it as web:3001
+# - /api/* goes to the api service (api:8000), prefix removed
+# - the API key is added ONLY to the two push calls the web app makes; it comes from
+#   the container's environment (IQMS_API_KEY from .env) and never reaches the browser
+
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:3001 {
+	handle_path /api/* {
+		@push path /push-subscribe /push-unsubscribe
+		request_header @push X-API-Key {env.IQMS_API_KEY}
+		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

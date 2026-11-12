@@ -1,0 +1,14 @@
+# Web image: builds IQMS-Web and serves it with Caddy (never the Vite dev server).
+# Build context: the repository root.
+FROM node:22.12.0-alpine AS build
+WORKDIR /web
+COPY IQMS-Web/package.json IQMS-Web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY IQMS-Web/ ./
+RUN npm run build
+
+FROM caddy:2.11.7-alpine
+COPY deploy/docker/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /web/dist /srv
+EXPOSE 3001
+CMD ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

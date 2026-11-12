@@ -1,0 +1,27 @@
+# Keep machine-specific and bulky files out of the Docker build context.
+**/.git
+**/.venv
+**/venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.env
+**/*.env
+**/*.pem
+**/LOGs
+**/logs
+**/.runtime
+**/ov_cache
+**/snapshots
+IQMS-Web/dist
+eval/data
+eval/runs
+tools/bin
+docs
+*.pdf
+# Model files are mounted as volumes, not baked into images.
+**/models
+**/*.onnx
+**/*.keras
+**/*.pkl
+**/*.blob

@@ -1,0 +1,43 @@
+# Camera image for an NVIDIA GPU: one Dockerfile, two images.
+#   docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=checkout -t iqms-camera-checkout .
+#   docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=entrance -t iqms-camera-entrance .
+# The two cameras need different package versions (numpy 1.x vs 2.x), hence two images.
+# Build context: the repository root. Needs the NVIDIA Container Toolkit at run time.
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+ARG CAMERA=checkout
+ENV TZ=Europe/Paris \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Ubuntu 22.04 ships Python 3.10, the version production uses.
+# libgl1/libglib2.0-0: OpenCV runtime; ffmpeg libs come with the OpenCV wheel (RTSP).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip tzdata libglib2.0-0 libgl1 curl \
+ && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
+ && ln -sf /usr/bin/python3 /usr/local/bin/python \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY deploy/docker/requirements-camera-${CAMERA}.txt deploy/docker/
+RUN python -m pip install -r deploy/docker/requirements-camera-${CAMERA}.txt
+
+COPY shared_tracking/ shared_tracking/
+COPY Head-Detector/ Head-Detector/
+COPY Queue-Management-System-v2-main/Queue-Management-System-v2-main/ Queue-Management-System-v2-main/Queue-Management-System-v2-main/
+
+RUN useradd --create-home --uid 1000 iqms \
+ && mkdir -p Head-Detector/models Head-Detector/LOGs Head-Detector/ov_cache \
+             Queue-Management-System-v2-main/Queue-Management-System-v2-main/models \
+             Queue-Management-System-v2-main/Queue-Management-System-v2-main/LOGs \
+             Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots \
+ && chown -R iqms:iqms /app
+USER iqms
+
+# docker-compose.yml sets working_dir and command per camera:
+#   checkout: Head-Detector,  python main.py --execution_provider cuda --no-view-img
+#   entrance: Queue-Management-System-v2-main/..., python queue_management_v2.py --device cuda --no-view-img
+CMD ["python", "-c", "print('Set the camera command in docker-compose.yml')"]

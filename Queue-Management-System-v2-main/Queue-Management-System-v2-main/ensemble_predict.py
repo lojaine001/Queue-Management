@@ -719,14 +719,17 @@ def run_ensemble_forecast(source: str = "REAL", bootstrap: bool = False, data_sp
             f"({len(opening_profile_scaled)} buckets over first {LSTM_OPENING_BLEND_MINUTES} min)"
         )
 
+    # Opening-window constants, also used by the opening floor after XGBoost, so they
+    # must exist on the naive-fallback path too (a new install with little data).
+    opening_span = max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
+    opening_fade_span = max(1, opening_span - BUCKET_MINUTES)
+
     # Seed from the last SEQUENCE_LEN open-hour values -- not the raw tail
     # which may end in overnight zeros and cause near-zero rollout predictions.
     if _lstm_has_enough_data:
         last_seq = y_open_scaled[-SEQUENCE_LEN:].copy() if len(y_open_scaled) >= SEQUENCE_LEN \
                    else y_open_scaled.copy()
         lstm_scaled_preds = []
-        opening_span = max(BUCKET_MINUTES, LSTM_OPENING_BLEND_MINUTES)
-        opening_fade_span = max(1, opening_span - BUCKET_MINUTES)
         for ts in future_timestamps:
             inp      = last_seq.reshape(1, SEQUENCE_LEN, 1)
             next_val = float(lstm_model(inp, training=False).numpy()[0][0])

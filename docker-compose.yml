@@ -1,0 +1,173 @@
+# IQMS on Docker Engine (Linux, e.g. inside WSL) with an NVIDIA GPU for the cameras.
+#
+#   docker compose up -d --build        start everything (builds the images the first time)
+#   docker compose ps                   status, including health
+#   docker compose logs -f api          follow one service's output
+#   docker compose restart scheduler    restart one service
+#   docker compose stop / down          stop everything (down also removes the containers)
+#
+# Every service has `restart: unless-stopped`: it comes back after a crash and after the
+# machine (and Docker) restarts, unless it was stopped on purpose.
+# Settings come from .env (same file and names as the Windows setup); the few that differ
+# inside Docker (database host, file paths) are set in `environment` below and win over .env.
+# Setup and moving the data from the Windows machine: deploy/docker/README.md
+
+x-app: &app
+  image: iqms-app:latest
+  build: { context: ., dockerfile: deploy/docker/Dockerfile.app }
+  env_file: ${IQMS_ENV_FILE:-.env}
+  environment: &app-env
+    DB_HOST: db
+    DB_PORT: "5432"
+  restart: unless-stopped
+  depends_on:
+    db: { condition: service_healthy }
+  volumes:
+    - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/models:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/models
+    - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots
+    - ./.runtime:/app/.runtime
+  logging: &logging
+    driver: json-file
+    options: { max-size: "20m", max-file: "3" }
+
+x-camera: &camera
+  env_file: ${IQMS_ENV_FILE:-.env}
+  environment:
+    DB_HOST: db
+    DB_PORT: "5432"
+  restart: unless-stopped
+  depends_on:
+    db: { condition: service_healthy }
+  logging: *logging
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - { driver: nvidia, count: 1, capabilities: [gpu] }
+
+services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-iqms}
+      TZ: Europe/Paris
+      PGTZ: Europe/Paris
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"   # this machine only, for psql / backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  api:
+    <<: *app
+    command: ["python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  scheduler:
+    <<: *app
+    working_dir: /app
+    command: ["python", "run_scheduler.py", "--interval", "3", "--days", "60", "--source", "REAL"]
+    healthcheck:
+      # unhealthy when the scheduler's heartbeat (written every second while it runs) is older than 2 minutes
+      test: ["CMD", "python", "-c", "import json,sys,datetime as d; s=json.load(open('/app/.runtime/scheduler.json')); sys.exit(0 if (d.datetime.now(d.timezone.utc)-d.datetime.fromisoformat(s['heartbeat'])).total_seconds()<120 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  push_alerts:
+    <<: *app
+    command: ["python", "-u", "push_alert_checker.py"]
+    environment:
+      <<: *app-env
+      VAPID_PRIVATE_KEY_PATH: /run/secrets/vapid_private_key.pem
+    secrets: [vapid_private_key]
+
+  dashboard:
+    <<: *app
+    command: ["python", "-m", "streamlit", "run", "dashboard.py", "--server.port=8501", "--server.headless=true", "--server.address=0.0.0.0"]
+    ports:
+      - "127.0.0.1:8501:8501"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  web:
+    image: iqms-web:latest
+    build: { context: ., dockerfile: deploy/docker/Dockerfile.web }
+    restart: unless-stopped
+    environment:
+      IQMS_API_KEY: ${IQMS_API_KEY:?Set IQMS_API_KEY in .env}
+    depends_on:
+      api: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:3001:3001"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3001/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *logging
+
+  ngrok:
+    image: ngrok/ngrok:3.19.0-alpine
+    restart: unless-stopped
+    command: ["http", "--url=https://${NGROK_DOMAIN:-set-NGROK_DOMAIN-in-.env}", "web:3001", "--log=stdout"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    depends_on:
+      web: { condition: service_healthy }
+    profiles: ["tunnel"]               # started only with: docker compose --profile tunnel up -d
+    logging: *logging
+
+  camera_checkout:
+    <<: *camera
+    image: iqms-camera-checkout:latest
+    build: { context: ., dockerfile: deploy/docker/Dockerfile.camera, args: { CAMERA: checkout } }
+    working_dir: /app/Head-Detector
+    command: ["python", "main.py", "--execution_provider", "cuda", "--no-view-img"]
+    volumes:
+      - ./Head-Detector/config.yml:/app/Head-Detector/config.yml:ro
+      - ./Head-Detector/config2.yml:/app/Head-Detector/config2.yml:ro
+      - ./Head-Detector/models:/app/Head-Detector/models:ro
+      - ./Head-Detector/LOGs:/app/Head-Detector/LOGs
+    profiles: ["cameras"]
+
+  camera_entrance:
+    <<: *camera
+    image: iqms-camera-entrance:latest
+    build: { context: ., dockerfile: deploy/docker/Dockerfile.camera, args: { CAMERA: entrance } }
+    working_dir: /app/Queue-Management-System-v2-main/Queue-Management-System-v2-main
+    command: ["python", "queue_management_v2.py", "--device", "cuda", "--no-view-img"]
+    volumes:
+      - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/config.yml:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/config.yml:ro
+      - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/config2.yml:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/config2.yml:ro
+      - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/models:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/models
+      - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots
+      - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/LOGs:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/LOGs
+    profiles: ["cameras"]
+
+secrets:
+  vapid_private_key:
+    file: ${VAPID_PRIVATE_KEY_FILE:-./secrets/vapid_private_key.pem}
+
+volumes:
+  pgdata:

@@ -16,6 +16,10 @@ dashboard, a web/phone app and push alerts.
 
 More documentation: `docs/` (developer guide, user guide, design reviews).
 
+This README covers the current Windows machine (Python venvs, `start_all.ps1`). The new
+production machine runs everything with Docker under WSL and an NVIDIA GPU:
+see `deploy/docker/README.md` and `docker-compose.yml`.
+
 ## 1. Install on a new machine
 
 ### Software to install first

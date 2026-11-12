@@ -84,3 +84,6 @@ tools/smoke_logs/
 
 # Caddy (downloaded by tools/install.ps1)
 tools/bin/
+
+# Docker secrets (deploy/docker/README.md)
+secrets/

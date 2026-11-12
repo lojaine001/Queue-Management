@@ -1,0 +1,30 @@
+# App image (deploy/docker/Dockerfile.app): API, forecast scheduler + ensemble,
+# push alert checker, operator dashboard. Linux, Python 3.10.
+# Only what these programs import (checked with an import scan), at production's
+# versions from Queue-Management-System-v2-main/.../requirements.txt. No camera
+# packages (OpenCV, ONNX, OpenVINO): the cameras have their own image.
+
+# API, dashboard, push alerts
+fastapi==0.136.3
+uvicorn==0.48.0
+pydantic==2.13.4
+streamlit==1.56.0
+plotly==6.7.0
+pywebpush==2.5.0
+psutil==7.2.2
+Pillow==12.2.0                   # camera_snapshot.py (checkout snapshot resize)
+
+# Forecasting. tensorflow-cpu: same version as production, without the GPU parts
+# the forecast does not use.
+numpy==2.2.6
+pandas==2.3.3
+prophet==1.3.0
+xgboost==3.2.0
+tensorflow-cpu==2.21.0
+scikit-learn==1.7.2
+
+# Database, config, HTTP
+psycopg2-binary==2.9.11
+python-dotenv==1.2.2
+requests==2.33.1
+urllib3==1.26.20
