@@ -101,7 +101,8 @@ data is lost between the two.
 ## 4. Start and check
 
 ```bash
-docker compose up -d --build      # first time: builds the images (about 20 min, about 20 GB of disk)
+./deploy/docker/prepare.sh        # once: creates the mounted folders, owned by the containers' user
+docker compose up -d --build      # first time: builds the images (about 15 min, about 15 GB of disk)
 docker compose ps                 # every service "Up", the checked ones "(healthy)"
 curl -s localhost:8000/health     # {"status":"ok", ... "db_pool": ...}
 docker compose logs --tail 50 camera_checkout   # "[ORT] Requested provider: cuda", "Snapshot saved"
