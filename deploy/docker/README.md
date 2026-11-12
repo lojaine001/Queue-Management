@@ -46,9 +46,25 @@ docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu22.04 nvidia-smi
 ```
 It must print the GPU. If it does not, fix the driver / toolkit before going on.
 
-**Starting at Windows boot.** WSL starts when a user opens it. To start it (and so Docker and
-every container) at boot without anyone logging in, add a Windows scheduled task, "At startup",
-"Run whether user is logged on or not", action: `wsl.exe -d Ubuntu-24.04 --exec /bin/true`.
+**Starting at Windows boot, and staying up.** WSL starts Ubuntu when something runs in it and
+**shuts it down again a few seconds after the last command ends**, even with Docker running
+inside (tested: with only `wsl.exe --exec /bin/true` the containers stopped). A start-up task
+that keeps one small process running (`sleep infinity`) starts Ubuntu at boot and keeps Docker
+and every container up. In an administrator PowerShell, as the Windows user who installed
+Ubuntu (it asks for that user's password, so the task also runs when nobody is logged on):
+```powershell
+$cred = Get-Credential "$env:USERDOMAIN\$env:USERNAME"
+$action = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d Ubuntu-24.04 --exec sleep infinity"
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName "IQMS_WSL_KeepAlive" -Action $action -Trigger $trigger -Settings $settings `
+    -User $cred.UserName -Password $cred.GetNetworkCredential().Password
+Start-ScheduledTask -TaskName "IQMS_WSL_KeepAlive"
+```
+Check after a reboot, before logging in to Ubuntu: `wsl -l -v` shows Ubuntu-24.04 Running, and
+`http://localhost:8000/health` answers. Inside Ubuntu, Docker starts through systemd and brings
+every container back (`restart: unless-stopped`); tested by stopping and restarting Ubuntu.
 
 ## 2. Code, settings, models, secrets
 
@@ -130,10 +146,17 @@ their rotating logs to `Head-Detector/LOGs/` and `.../LOGs/`. Data that must sur
 container being recreated lives in the `pgdata` volume (database) and in the mounted folders
 (`models/`, `snapshots/`, `.runtime/`).
 
-## Tested so far (laptop, Docker 28, NVIDIA RTX 3060)
+## Tested so far (laptop, NVIDIA RTX 3060)
 
-All images build; the database, API, scheduler, dashboard and web app run healthy; the API key
-and the web proxy behave as on Windows (401 without key, the web app's push calls accepted);
-both cameras run on CUDA from a recorded store clip and write to the database; a crashing
-service was restarted automatically. Not tested yet: Docker Engine without Desktop, the real
-cameras (only reachable from the store network), ngrok, and the data move.
+On Docker Engine 29.9 in WSL Ubuntu 24.04 (no Docker Desktop), following this guide from a
+fresh clone: the install steps of section 1 ran without errors and a container sees the GPU;
+the images build (about 13 min); the database, API, scheduler, dashboard and web app run
+healthy; the API key and the web proxy behave as on Windows (401 without key, the web app's
+push calls accepted); the checkout camera runs on CUDA from a recorded store clip and writes to
+the database; a process ended inside a container was restarted by Docker; after stopping and
+restarting Ubuntu with the keep-alive, every container came back by itself. Earlier, on Docker
+Desktop, the entrance camera also ran on CUDA. Found and fixed on the way: folder owners
+(`prepare.sh`) and Ubuntu shutting down when idle (keep-alive task).
+
+Not tested yet: a real reboot with nobody logged on, the real cameras (only reachable from the
+store network), ngrok, and the data move.
