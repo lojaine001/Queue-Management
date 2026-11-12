@@ -1,5 +1,5 @@
 """
-The API's database connection pool (Queue-Management-System-v2-main/.../db_pool.py).
+The API's database connection pool (Queue-Management-System-v2-main/.../iqms_api/db_pool.py).
 
 [DB] tests use a real PostgreSQL from .env (TEMP tables only, nothing written to
 real tables) and are skipped without a database:
@@ -24,7 +24,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 QM2 = ROOT / 'Queue-Management-System-v2-main/Queue-Management-System-v2-main'
 sys.path.insert(0, str(QM2))
-from db_pool import DbPool, PoolBusy  # noqa: E402
+from iqms_api.db_pool import DbPool, PoolBusy  # noqa: E402
 
 try:
     import psycopg2
@@ -223,16 +223,18 @@ class ApiUsesThePool(unittest.TestCase):
         with mock.patch.dict(os.environ, {'IQMS_API_KEY': 'test-key', 'CORS_ALLOWED_ORIGINS': ''}):
             os.environ.setdefault('DB_PASSWORD', 'test-password')
             spec = importlib.util.spec_from_file_location('api_pool_test', QM2 / 'api.py')
-            cls.api = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = cls.api
-            spec.loader.exec_module(cls.api)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            from iqms_api import db, main, settings
+            cls.db, cls.key, cls.app = db, settings.API_KEY, main.create_app()
         try:
-            cls.client = TestClient(cls.api.app)
+            cls.client = TestClient(cls.app)
         except TypeError as exc:
             raise unittest.SkipTest(f'TestClient incompatible with installed httpx ({exc})')
 
     def busy(self):
-        return mock.patch.object(self.api, '_conn', side_effect=PoolBusy('all busy'))
+        return mock.patch.object(self.db.DB_POOL, 'connection', side_effect=PoolBusy('all busy'))
 
     def test_busy_pool_gives_503_on_read_endpoints(self):
         with self.busy():
@@ -242,7 +244,7 @@ class ApiUsesThePool(unittest.TestCase):
 
     def test_busy_pool_gives_503_not_500_on_endpoints_that_wrap_errors(self):
         with self.busy():
-            r = self.client.post('/alert-response', json={'response': 'false_alarm'}, headers={'X-API-Key': 'test-key'})
+            r = self.client.post('/alert-response', json={'response': 'false_alarm'}, headers={'X-API-Key': self.key})
         self.assertEqual(r.status_code, 503)
 
     def test_health_shows_the_pool(self):
@@ -251,9 +253,11 @@ class ApiUsesThePool(unittest.TestCase):
         self.assertEqual(body['db_pool']['max'], int(os.getenv('DB_POOL_MAX', 10)))
 
     def test_api_has_no_unpooled_connections_left(self):
-        source = (QM2 / 'api.py').read_text(encoding='utf-8')
-        self.assertNotIn('psycopg2.connect(', source)
-        self.assertNotIn('conn.close()', source)
+        files = [QM2 / 'api.py'] + [f for f in (QM2 / 'iqms_api').rglob('*.py') if f.name != 'db_pool.py']
+        for f in files:
+            source = f.read_text(encoding='utf-8')
+            self.assertNotIn('psycopg2.connect(', source, f)
+            self.assertNotIn('conn.close()', source, f)
 
 
 if __name__ == '__main__':

@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,16 +38,22 @@ except Exception:  # pragma: no cover - httpx missing
 
 
 def load_api(name='api_auth_test', **env):
-    """Load api.py with a test key. The environment is restored afterwards, so other
-    tests in this process (e.g. the DST tests using the real DB_PASSWORD) are unaffected."""
+    """Load the API through api.py with a test key and build an app with the given
+    environment (CORS is read when the app is built). The environment is restored
+    afterwards, so other tests in this process (e.g. the DST tests using the real
+    DB_PASSWORD) are unaffected."""
     overrides = {'IQMS_API_KEY': TEST_KEY, 'CORS_ALLOWED_ORIGINS': '', **env}
     with mock.patch.dict(os.environ, overrides):
         os.environ.setdefault('DB_PASSWORD', 'test-password')  # never used: no DB in these tests
         spec = importlib.util.spec_from_file_location(name, API_PATH)
         module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module  # as uvicorn does; pydantic resolves the request models through it
-        spec.loader.exec_module(module)
-    return module
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)  # api.py: the entry point uvicorn uses
+        from iqms_api import db, main, security, settings
+        from iqms_api.routes import forecasts
+        app = main.create_app()
+    # settings.API_KEY is read once per process, so use it rather than assuming TEST_KEY.
+    return types.SimpleNamespace(app=app, db=db, security=security, forecasts=forecasts, key=settings.API_KEY)
 
 
 class FakeCursor:
@@ -94,7 +101,7 @@ class ApiKeyTests(unittest.TestCase):
 
     def setUp(self):
         self.conn = FakeConnection(fresh_state())
-        patcher = mock.patch.object(self.api, '_conn', return_value=self.conn)
+        patcher = mock.patch.object(self.api.db.DB_POOL, 'connection', return_value=self.conn)
         self.db = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -117,7 +124,7 @@ class ApiKeyTests(unittest.TestCase):
                     '/push-subscribe': 'subscribed', '/push-unsubscribe': 'unsubscribed'}
         for path, body in BODIES.items():
             with self.subTest(path=path):
-                r = self.client.post(path, json=body, headers={'X-API-Key': TEST_KEY})
+                r = self.client.post(path, json=body, headers={'X-API-Key': self.api.key})
                 self.assertEqual(r.status_code, 200, r.text)
                 self.assertEqual(r.json()['status'], expected[path])
         self.assertTrue(self.conn.committed)
@@ -127,7 +134,7 @@ class ApiKeyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'VAPID_PUBLIC_KEY': 'public-test-key'}):
             r = self.client.get('/vapid-public-key')
         self.assertEqual((r.status_code, r.json()['public_key']), (200, 'public-test-key'))
-        with mock.patch.object(self.api, '_forecast_state', return_value=fresh_state()):
+        with mock.patch.object(self.api.forecasts, '_forecast_state', return_value=fresh_state()):
             self.assertEqual(self.client.get('/forecast').status_code, 200)
 
     def test_every_route_that_changes_data_requires_the_key_and_reads_do_not(self):
@@ -136,7 +143,7 @@ class ApiKeyTests(unittest.TestCase):
         for route in self.api.app.routes:
             if not isinstance(route, APIRoute):
                 continue
-            guarded = any(d.call is self.api.require_api_key for d in route.dependant.dependencies)
+            guarded = any(d.call is self.api.security.require_api_key for d in route.dependant.dependencies)
             if route.methods & {'POST', 'PUT', 'PATCH', 'DELETE'}:
                 changing.append(route.path)
                 self.assertTrue(guarded, f'{route.path} changes data but has no API key check')

@@ -8,7 +8,7 @@ dashboard, a web/phone app and push alerts.
 |---|---|---|
 | Checkout pipeline (head detection + tracking per lane) | `Head-Detector/` | `main.py` |
 | Entrance pipeline (person counting, age/gender) | `Queue-Management-System-v2-main/Queue-Management-System-v2-main/` | `queue_management_v2.py` |
-| API (port 8000), operator dashboard (port 8501), push alerts, forecast | same folder | `api.py`, `dashboard.py`, `push_alert_checker.py`, `ensemble_predict.py` |
+| API (port 8000), operator dashboard (port 8501), push alerts, forecast | same folder | `api.py` (entry point; the API is the `iqms_api/` package, layout in `iqms_api/main.py`), `dashboard.py`, `push_alert_checker.py`, `ensemble_predict.py` |
 | Forecast scheduler (every 3 min) and shared forecasting code | `run_scheduler.py`, `prediction/` | run with the entrance app's venv |
 | Web / phone app (port 3001, public through ngrok) | `IQMS-Web/` | React, built with Vite, served by Caddy |
 | Simulator (development only) | `simulator/`, `run_simulator.py` | own venv |

@@ -165,8 +165,11 @@ foreach ($pair in @(
     & $pair[0] -m py_compile $pair[1] 2>$null
     if ($LASTEXITCODE -ne 0) { $compileFail += (Split-Path $pair[1] -Leaf) }
 }
+# api.py is only the entry point; the API itself is the iqms_api package.
+& $qmPy -m compileall -q (Join-Path $qm2 "iqms_api") 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) { $compileFail += "iqms_api package" }
 if ($compileFail.Count) { Add-Result "S5" "FAIL" "do not compile: $($compileFail -join ', ')" }
-else { Add-Result "S5" "PASS" "7 entry-point files compile" }
+else { Add-Result "S5" "PASS" "7 entry-point files and the iqms_api package compile" }
 
 # S6 unit tests vs baseline
 Push-Location $qm

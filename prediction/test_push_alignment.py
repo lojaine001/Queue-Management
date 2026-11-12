@@ -42,6 +42,9 @@ def load_api():
     spec = importlib.util.spec_from_file_location('forecast_api_push_test', API_PATH)
     _API = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(_API)
+    # The endpoints live in the iqms_api package (api.py is its entry point).
+    from iqms_api.routes import forecasts
+    _API = forecasts
     return _API
 
 

@@ -12,6 +12,9 @@ os.environ.setdefault('DB_PASSWORD', 'test-password')  # ... or without a DB pas
 API_PATH=Path(__file__).resolve().parents[1]/'Queue-Management-System-v2-main/Queue-Management-System-v2-main/api.py'
 spec=importlib.util.spec_from_file_location('forecast_api_test',API_PATH)
 api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)
+# The endpoints live in the iqms_api package (api.py is its entry point).
+from iqms_api.routes import administration, forecasts  # noqa: E402
+from iqms_api.schemas import SetLanesRequest  # noqa: E402
 
 
 class FakeConnection:
@@ -36,7 +39,7 @@ class SharedForecastTests(unittest.TestCase):
                     'forecast_json':build_payload(rows,[8]*8,3,'Europe/Paris',self.now)}
 
     def test_nonlinear_lane_scenarios_preserved_when_current_wait_is_zero(self):
-        with patch.object(api,'_forecast_state',return_value=self.state):response=api.forecast()
+        with patch.object(forecasts,'_forecast_state',return_value=self.state):response=forecasts.forecast()
         self.assertEqual(response['wait_10_min'],0)
         scenarios=response['lane_scenarios']
         self.assertEqual(scenarios[0]['est_wait_min'],14)
@@ -44,18 +47,18 @@ class SharedForecastTests(unittest.TestCase):
         self.assertTrue(scenarios[3]['is_current'])
 
     def test_fixed_and_arbitrary_horizons_agree_for_same_snapshot(self):
-        with patch.object(api,'_forecast_state',return_value=self.state):
-            fixed=api.forecast()
+        with patch.object(forecasts,'_forecast_state',return_value=self.state):
+            fixed=forecasts.forecast()
             for minutes,key in [(0,'wait_now_min'),(5,'wait_5_min'),(10,'wait_10_min'),(15,'wait_15_min')]:
-                self.assertEqual(api.forecast_wait(minutes)['wait_min'],fixed[key])
-            chart=api.forecast_chart()
+                self.assertEqual(forecasts.forecast_wait(minutes)['wait_min'],fixed[key])
+            chart=forecasts.forecast_chart()
             self.assertEqual(chart['slots'][3]['wait_min'],fixed['wait_10_min'])
             self.assertEqual(chart['current_lanes'],4)
 
     def test_lane_change_updates_waits_without_changing_input_age(self):
         conn=FakeConnection(self.state)
-        with patch.object(api,'_conn',return_value=conn):
-            api.set_lanes(api.SetLanesRequest(lanes=2))
+        with patch.object(administration,'_conn',return_value=conn):
+            administration.set_lanes(SetLanesRequest(lanes=2))
         self.assertEqual(self.state['open_lanes'],2)
         self.assertEqual(self.state['wait_10m'],9)
         self.assertEqual(self.state['updated_at'],self.now)
@@ -65,24 +68,24 @@ class SharedForecastTests(unittest.TestCase):
     def test_stale_lane_change_rejected_without_mutation(self):
         self.state['forecast_json']['as_of']=(self.now-timedelta(minutes=20)).isoformat()
         conn=FakeConnection(self.state)
-        with patch.object(api,'_conn',return_value=conn),self.assertRaises(HTTPException) as caught:
-            api.set_lanes(api.SetLanesRequest(lanes=2))
+        with patch.object(administration,'_conn',return_value=conn),self.assertRaises(HTTPException) as caught:
+            administration.set_lanes(SetLanesRequest(lanes=2))
         self.assertEqual(caught.exception.status_code,409)
         self.assertEqual(self.state['open_lanes'],4)
         self.assertFalse(conn.committed)
         self.assertTrue(freshness(self.state)['stale'])
 
     def test_missing_forecast_is_unknown_not_zero_or_500(self):
-        with patch.object(api,'_forecast_state',return_value={'open_lanes':3,'wait_0m':None}):
-            response=api.forecast()
+        with patch.object(forecasts,'_forecast_state',return_value={'open_lanes':3,'wait_0m':None}):
+            response=forecasts.forecast()
         self.assertIsNone(response['wait_now_min'])
         self.assertEqual(response['lane_scenarios'],[])
         self.assertTrue(response['stale'])
 
     def test_invalid_and_unavailable_horizons(self):
         for minutes in [-1,float('nan'),float('inf')]:
-            with patch.object(api,'_forecast_state',return_value=self.state),self.assertRaises(HTTPException) as caught:
-                api.forecast_wait(minutes)
+            with patch.object(forecasts,'_forecast_state',return_value=self.state),self.assertRaises(HTTPException) as caught:
+                forecasts.forecast_wait(minutes)
             self.assertEqual(caught.exception.status_code,422)
         self.assertIsNone(wait_at_horizon(self.state,1000)['wait_min'])
 
