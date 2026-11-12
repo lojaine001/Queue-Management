@@ -73,6 +73,12 @@ if (-not $apiKey) { $preflight += "IQMS_API_KEY is missing from .env (the API re
 $dbPassword = if ($env:DB_PASSWORD) { $env:DB_PASSWORD } else { $dotEnv["DB_PASSWORD"] }
 if (-not $dbPassword -or $dbPassword -eq "change-me") { $preflight += "DB_PASSWORD is missing from .env (no service has a default any more). See .env.example." }
 if ($dotEnv["CORS_ALLOWED_ORIGINS"] -match '\*') { $preflight += "CORS_ALLOWED_ORIGINS must list explicit origins, not '*'." }
+# A .env in a subfolder hides the root .env from every program started there.
+$extraEnv = @(Get-ChildItem -Path $rootDir -Filter ".env" -File -Recurse -Force -Depth 4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $envPath -and $_.FullName -notmatch '\\(node_modules|venv|\.venv|\.git)\\' })
+foreach ($f in $extraEnv) {
+    $preflight += "Second .env found: $($f.FullName.Substring($rootDir.Length + 1)). Programs in that folder would ignore the root .env. Run .\tools\merge_env.ps1 (report), then .\tools\merge_env.ps1 -Apply."
+}
 if (-not (Test-Path $caddyExe)) { $preflight += "Caddy not found at $caddyExe. Run .\tools\install.ps1 to download it." }
 if ($preflight.Count) {
     Write-Host "`n[ERROR] Not starting; nothing was stopped:" -ForegroundColor Red

@@ -16,7 +16,7 @@
           tools\regression_baseline.txt
       S7  IQMS-Web production build succeeds
       S8  outer gitlink == Queue-Management HEAD, working trees clean (WARN)
-      S9  Caddy installed; IQMS_API_KEY and DB_PASSWORD set; no CORS wildcard (WARN)
+      S9  Caddy installed; IQMS_API_KEY and DB_PASSWORD set; no CORS wildcard; one .env (WARN)
     Live (skipped when the services are not running)
       L1  ports 8000 / 8501 / 3001 listening
       L2  /health, web root and /api proxy answer 200
@@ -222,7 +222,10 @@ $envFile = Join-Path $qm ".env"
 if (-not ((Test-Path $envFile) -and ((Get-Content $envFile) -match '^\s*IQMS_API_KEY\s*=\s*\S+'))) { $s9 += "IQMS_API_KEY not set in .env (the API will not start)" }
 if (-not ((Test-Path $envFile) -and ((Get-Content $envFile) -match '^\s*DB_PASSWORD\s*=\s*(?!change-me\s*$)\S+'))) { $s9 += "DB_PASSWORD not set in .env (services will not start)" }
 if ((Test-Path $envFile) -and ((Get-Content $envFile) -match '^\s*CORS_ALLOWED_ORIGINS\s*=.*\*')) { $s9 += "CORS_ALLOWED_ORIGINS contains '*' (the API will not start)" }
-if ($s9.Count) { Add-Result "S9" "WARN" ($s9 -join '; ') } else { Add-Result "S9" "PASS" "Caddy installed, IQMS_API_KEY and DB_PASSWORD set, CORS explicit" }
+$extraEnv = @(Get-ChildItem -Path $qm -Filter ".env" -File -Recurse -Force -Depth 4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $envFile -and $_.FullName -notmatch '\\(node_modules|venv|\.venv|\.git)\\' })
+if ($extraEnv.Count) { $s9 += "second .env hides the root one: $(($extraEnv | ForEach-Object { $_.FullName.Substring($qm.Length + 1) }) -join ', ') (run tools\merge_env.ps1)" }
+if ($s9.Count) { Add-Result "S9" "WARN" ($s9 -join '; ') } else { Add-Result "S9" "PASS" "Caddy installed, IQMS_API_KEY and DB_PASSWORD set, CORS explicit, one .env" }
 
 # ---------------------------------------------------------------- live checks
 Write-Host "`n--- Live checks ---" -ForegroundColor Cyan

@@ -123,7 +123,10 @@ Because Caddy adds the key to the two push calls, anyone with the URL can still 
 unsubscribe from alerts through the web app; that is the feature. `/set-lanes` and
 `/alert-response` are refused without the key, and so is every POST sent straight to port 8000.
 
-**Setting secrets.** Secrets go in `.env`, which is not in git (template: `.env.example`):
+**Setting secrets.** Secrets go in the one `.env` at the project root, which is not in git
+(template: `.env.example`). Never put a second `.env` in a subfolder: programs started there would
+read it instead and ignore the root one. `start_all.ps1` refuses to start if it finds one, and
+`.\tools\merge_env.ps1` merges it into the root file (report first; `-Apply` to merge).
 - `IQMS_API_KEY`: required, the API refuses to start without it. `install.ps1` adds a random one.
   To make a new one: `python -c "import secrets; print(secrets.token_urlsafe(32))"`, put it in
   `.env`, then run `.\start_all.ps1` (the API and Caddy read it when they start).
