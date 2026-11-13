@@ -47,3 +47,6 @@ urllib3==1.26.20                 # camera_snapshot.py
 #   torch, torchvision, lap  only imported by parts of the bundled uniface copy that are not used
 #   uniface (pip)            the bundled copy in ./uniface is the one imported
 #   playwright               only scripts/iphone.py, a developer tool
+# Database migrations (db/README.md)
+alembic==1.18.4
+SQLAlchemy==2.0.48

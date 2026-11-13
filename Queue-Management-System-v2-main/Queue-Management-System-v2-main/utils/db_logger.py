@@ -14,6 +14,11 @@ load_dotenv(find_dotenv(usecwd=True))
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
 
 
+class MissingTables(RuntimeError):
+    """The database was never migrated: a setup error, so the camera stops instead of
+    counting people without saving them (unlike a database outage)."""
+
+
 class DBLogger:
     def __init__(self):
         self.enabled = False
@@ -33,124 +38,29 @@ class DBLogger:
             self.conn.autocommit = True
             self.cursor = self.conn.cursor()
             self.cursor.execute("SET timezone = %s", (STORE_TZ,))
-            self._create_table()
+            self._require_tables()
             self.enabled = True
             print(f"[DB] Connected to PostgreSQL [OK] (timezone={STORE_TZ})")
+        except MissingTables:
+            raise
         except Exception as e:
             print(f"[DB] WARNING: Could not connect to PostgreSQL -- running without DB. Error: {e}")
 
-    def _create_table(self):
-        self.cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
+    # The tables come from the database migrations (db/); see db/README.md.
+    REQUIRED_TABLES = ("entrance_events", "queue_state_snapshots", "service_events", "lane_events")
 
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS entrance_events (
-                id            BIGSERIAL,
-                timestamp     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                track_id      INT,
-                gender        VARCHAR(20),
-                age_estimate  FLOAT,
-                confidence    FLOAT,
-                camera_id     VARCHAR(100),
-                dwell_seconds FLOAT DEFAULT 0
+    def _require_tables(self):
+        self.cursor.execute(
+            "SELECT t FROM unnest(%s::text[]) AS t WHERE to_regclass('public.' || t) IS NULL",
+            (list(self.REQUIRED_TABLES),),
+        )
+        missing = [row[0] for row in self.cursor.fetchall()]
+        if missing:
+            raise MissingTables(
+                f"Database table(s) missing: {', '.join(missing)}; run "
+                "`alembic -c db/alembic.ini upgrade head` from the project root "
+                "(on Docker the migrate service does it)."
             )
-        """)
-
-        self.cursor.execute("""
-            DO $$ BEGIN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'entrance_events'
-                    AND column_name = 'timestamp'
-                    AND data_type = 'timestamp without time zone'
-                ) THEN
-                    ALTER TABLE entrance_events
-                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
-                    USING timestamp AT TIME ZONE 'UTC';
-                END IF;
-            END $$;
-        """)
-
-        self.cursor.execute("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'entrance_events'
-                    AND column_name = 'has_bag'
-                ) THEN
-                    ALTER TABLE entrance_events ADD COLUMN has_bag BOOLEAN DEFAULT FALSE;
-                END IF;
-            END $$;
-        """)
-
-        self.cursor.execute("""
-            SELECT create_hypertable('entrance_events', 'timestamp',
-                if_not_exists => TRUE,
-                migrate_data  => TRUE);
-        """)
-
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS queue_state_snapshots (
-                id             BIGSERIAL,
-                timestamp      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                camera_id      VARCHAR(100),
-                queue_count    INT          NOT NULL DEFAULT 0,
-                avg_dwell_sec  FLOAT        DEFAULT 0,
-                max_dwell_sec  FLOAT        DEFAULT 0,
-                active_lanes   INT          DEFAULT 2
-            )
-        """)
-
-        self.cursor.execute("""
-            DO $$ BEGIN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'queue_state_snapshots'
-                    AND column_name = 'timestamp'
-                    AND data_type = 'timestamp without time zone'
-                ) THEN
-                    ALTER TABLE queue_state_snapshots
-                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
-                    USING timestamp AT TIME ZONE 'UTC';
-                END IF;
-            END $$;
-        """)
-
-        self.cursor.execute("""
-            SELECT create_hypertable('queue_state_snapshots', 'timestamp',
-                if_not_exists => TRUE,
-                migrate_data  => TRUE);
-        """)
-
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS service_events (
-                id             BIGSERIAL,
-                timestamp      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                camera_id      VARCHAR(100),
-                track_id       INT,
-                total_dwell_sec FLOAT       DEFAULT 0
-            )
-        """)
-
-        self.cursor.execute("""
-            DO $$ BEGIN
-                IF EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'service_events'
-                    AND column_name = 'timestamp'
-                    AND data_type = 'timestamp without time zone'
-                ) THEN
-                    ALTER TABLE service_events
-                    ALTER COLUMN timestamp TYPE TIMESTAMPTZ
-                    USING timestamp AT TIME ZONE 'UTC';
-                END IF;
-            END $$;
-        """)
-
-        self.cursor.execute("""
-            SELECT create_hypertable('service_events', 'timestamp',
-                if_not_exists => TRUE,
-                migrate_data  => TRUE);
-        """)
 
     def insert_entrance(self, track_id, gender, age, confidence, camera_id,
                         dwell_seconds=None, entry_time=None, has_bag=False):
@@ -251,24 +161,6 @@ class DBLogger:
         except Exception as e:
             print(f"[DB] get_today_entry_timestamps error: {e}")
             return []
-
-    def _ensure_lane_events(self):
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS lane_events (
-                id           BIGSERIAL,
-                timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                camera_id    VARCHAR(100),
-                active_lanes INT         NOT NULL,
-                note         TEXT
-            )
-        """)
-        try:
-            self.cursor.execute("""
-                SELECT create_hypertable('lane_events', 'timestamp',
-                    if_not_exists => TRUE, migrate_data => TRUE)
-            """)
-        except Exception:
-            pass
 
     def get_current_lanes(self, camera_id, default=2):
         if not self.enabled:

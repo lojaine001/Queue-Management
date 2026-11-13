@@ -75,8 +75,9 @@ downloads missing ones (set `HF_TOKEN` for a private repo; SHA256 values in `too
 are checked when filled in).
 
 ### Database
-`install.ps1` creates the database named in `.env` (`DB_NAME`, default `iqms`). The apps enable
-TimescaleDB and create their tables on first start.
+`install.ps1` creates the database named in `.env` (`DB_NAME`, default `iqms`) and creates its
+tables with the migrations in `db/` (`alembic upgrade head`); the apps do not create tables.
+An existing database from before `db/` is marked once instead: see `db/README.md`.
 
 ### No NPU
 Set `openvino_device: CPU` and `openvino_precision: FP32` in both `config2.yml` files.

@@ -22,24 +22,14 @@ def _conn():
     )
 
 def ensure_table():
+    """lane_events comes from the database migrations (db/); stop with a clear message
+    when the database was never migrated."""
     with _conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS lane_events (
-                    id           BIGSERIAL,
-                    timestamp    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    camera_id    VARCHAR(100),
-                    active_lanes INT         NOT NULL,
-                    note         TEXT
-                )
-            """)
-            try:
-                cur.execute("""
-                    SELECT create_hypertable('lane_events','timestamp',
-                        if_not_exists=>TRUE, migrate_data=>TRUE)
-                """)
-            except Exception:
-                pass
+            cur.execute("SELECT to_regclass('public.lane_events')")
+            if cur.fetchone()[0] is None:
+                raise RuntimeError("Table lane_events is missing; run "
+                                   "`alembic -c db/alembic.ini upgrade head` (see db/README.md).")
 
 def get_current(camera_id):
     with _conn() as conn:

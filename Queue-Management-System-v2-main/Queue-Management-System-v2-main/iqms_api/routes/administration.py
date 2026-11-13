@@ -50,14 +50,6 @@ def post_alert_response(body: AlertResponse):
     try:
         with _conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS alert_responses (
-                        id SERIAL PRIMARY KEY,
-                        response TEXT NOT NULL,
-                        lane_id TEXT,
-                        responded_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
                 cur.execute(
                     "INSERT INTO alert_responses (response, lane_id) VALUES (%s, %s)",
                     (body.response, body.lane_id),

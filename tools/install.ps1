@@ -184,8 +184,28 @@ else {
         if ($exists -eq "1") { Ok "database '$dbName' exists" }
         else { Run "create database $dbName" { & $psql.FullName @pgArgs -d postgres -c "CREATE DATABASE $dbName;" } }
         $ts = & $psql.FullName @pgArgs -d postgres -c "SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb';"
-        if ($ts -eq "1") { Ok "TimescaleDB available (the apps enable it on first start)" }
+        if ($ts -eq "1") { Ok "TimescaleDB available" }
         else { Todo "TimescaleDB is not installed in PostgreSQL. Install it; the apps need time_bucket and hypertables." }
+
+        # Tables come from the migrations in db\ (db\README.md), not from the apps.
+        if ($ts -eq "1") {
+            $alembic = @((Join-Path $qmDir "venv\Scripts\python.exe"), "-m", "alembic", "-c", (Join-Path $root "db\alembic.ini"))
+            # "marked" + "has tables": 01 = tables from before db\ but no version (production before the switch).
+            $state = & $psql.FullName @pgArgs -d $dbName -c "SELECT (to_regclass('public.alembic_version') IS NOT NULL)::int::text || (to_regclass('public.entrance_events') IS NOT NULL)::int::text;"
+            if ($state -eq "01") {
+                Todo "Database '$dbName' has tables but no migration version. Mark it once (changes no table): cd `"$root`"; & `"$($alembic[0])`" -m alembic -c `"$($alembic[4])`" stamp 0001_baseline"
+            }
+            else {
+                Push-Location $root
+                try { Run "database migrations (alembic upgrade head)" { & $alembic[0] $alembic[1..($alembic.Count - 1)] upgrade head } }
+                finally { Pop-Location }
+            }
+        }
+        else {
+            Push-Location $root
+            try { Run "database migrations (alembic upgrade head)" { & $alembic[0] $alembic[1..($alembic.Count - 1)] upgrade head } }
+            finally { Pop-Location }
+        }
     }
     Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
 }

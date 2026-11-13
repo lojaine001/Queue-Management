@@ -328,28 +328,6 @@ def save_prediction(wait_15m: float, wait_30m: float, prophet_yhat: float) -> No
         now_utc = datetime.now(timezone.utc)
         pred_for = now_utc + timedelta(minutes=15)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS queue_predictions (
-                id               BIGSERIAL,
-                predicted_at     TIMESTAMPTZ NOT NULL,
-                prediction_for   TIMESTAMPTZ NOT NULL,
-                prophet_yhat     NUMERIC(8,2),
-                est_wait_minutes NUMERIC(8,2),
-                wait_15m         NUMERIC(8,2),
-                wait_30m         NUMERIC(8,2),
-                status           VARCHAR(10)
-            )
-        """)
-        cur.execute("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'queue_predictions' AND column_name = 'pipeline_source'
-                ) THEN
-                    ALTER TABLE queue_predictions ADD COLUMN pipeline_source VARCHAR(20);
-                END IF;
-            END $$;
-        """)
-        cur.execute("""
             INSERT INTO queue_predictions
                 (predicted_at, prediction_for, prophet_yhat, est_wait_minutes, wait_15m, wait_30m, status, pipeline_source)
             VALUES (%s, %s, %s, %s, %s, %s, 'OK', 'pipeline_v2')

@@ -588,7 +588,7 @@ python predict_runner.py    # from Queue-Management-System-v2-main/
 
 **Database:** `iqms` (PostgreSQL + TimescaleDB extension)
 
-All tables are created automatically on first application startup. All time columns use `TIMESTAMPTZ`. `DO $$ ... $$` migration blocks run on every startup to auto-convert any legacy `TIMESTAMP` columns.
+Tables are created and changed only by the migrations in `db/` (Alembic, see `db/README.md`): `alembic -c db/alembic.ini upgrade head`, run by `install.ps1` on Windows and by the `migrate` service on Docker. The applications only check at start-up that the tables they use exist. `0001_baseline` is production's structure as of 2026-11-13, so the column lists below can differ slightly from it; the migration is the reference.
 
 ### 7.1 `entrance_events` (hypertable, partitioned by `timestamp`)
 

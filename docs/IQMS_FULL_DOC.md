@@ -649,7 +649,7 @@ CREATE DATABASE iqms;
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 ```
 
-All tables are created automatically on first pipeline startup.
+Tables come from the database migrations in `db/` (`alembic -c db/alembic.ini upgrade head`), not from the applications; see `db/README.md`.
 
 ### 10.2 Python environment
 

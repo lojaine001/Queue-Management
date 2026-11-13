@@ -29,9 +29,6 @@ def refresh_statistics():
             rows=cur.fetchall();peak=max((n for _,n in rows),default=0)
             hourly=[dict(hour=t.strftime('%H:00'),count=n,is_peak=n==peak and peak>0) for t,n in rows]
             payload=dict(gender=gender,age=age)
-            cur.execute('''CREATE TABLE IF NOT EXISTS dashboard_statistics (
-                id INTEGER PRIMARY KEY CHECK(id=1),updated_at TIMESTAMPTZ NOT NULL,
-                camera_id TEXT NOT NULL,demographics JSONB NOT NULL,entries_hour JSONB NOT NULL)''')
             cur.execute('''INSERT INTO dashboard_statistics VALUES (1,NOW(),%s,%s,%s)
                 ON CONFLICT(id) DO UPDATE SET updated_at=EXCLUDED.updated_at,camera_id=EXCLUDED.camera_id,
                 demographics=EXCLUDED.demographics,entries_hour=EXCLUDED.entries_hour''',(camera,Json(payload),Json(hourly)))

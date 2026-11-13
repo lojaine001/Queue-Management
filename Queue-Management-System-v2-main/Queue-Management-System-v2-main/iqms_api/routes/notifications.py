@@ -8,38 +8,23 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..db import _conn, _http_error
 from ..schemas import PushSubscribeRequest, PushUnsubscribeRequest
 from ..security import require_api_key
+from prediction.schema_check import require_tables
 
 router = APIRouter()
 
 
-def _ensure_push_table():
+def _check_push_table():
     with _conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS push_subscriptions (
-                    endpoint      TEXT PRIMARY KEY,
-                    p256dh        TEXT NOT NULL,
-                    auth          TEXT NOT NULL,
-                    threshold_min DOUBLE PRECISION NOT NULL,
-                    horizon_min   INTEGER NOT NULL,
-                    -- Server-side rising-edge tracker, one per subscription --
-                    -- same "fire only on crossing into alert, not every poll"
-                    -- rule the frontend's own alert effect already follows.
-                    was_over      BOOLEAN NOT NULL DEFAULT FALSE,
-                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
-        conn.commit()
+            require_tables(cur, "push_subscriptions")
 
 
 try:
-    _ensure_push_table()
+    _check_push_table()
 except Exception as exc:
-    # Don't crash the whole API on startup if the DB isn't reachable yet --
-    # every other endpoint needs it too and already fails per-request
-    # instead, so match that rather than taking the app down entirely.
-    print(f"[push] Could not ensure push_subscriptions table exists: {exc}")
+    # Don't crash the whole API on startup (database not reachable yet, or not
+    # migrated): the push endpoints fail per request instead, like every other one.
+    print(f"[push] push_subscriptions not usable: {exc}")
 
 
 @router.get("/vapid-public-key")

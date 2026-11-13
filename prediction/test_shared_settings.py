@@ -7,6 +7,7 @@ class Cursor:
     def __enter__(self):return self
     def __exit__(self,*args):pass
     def execute(self,sql,args=None):self.calls.append((sql,args))
+    def fetchall(self):return []  # the table check: no table missing
 
 
 class Connection:

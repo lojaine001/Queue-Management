@@ -8,6 +8,7 @@ import psycopg2
 import psycopg2.extras
 from prediction.pipeline import DB_CONFIG
 from prediction.forecast_state import finite, freshness, scenario_for
+from prediction.schema_check import require_tables
 
 # arrival_coefficient: the single operator-set multiplier on blended arrivals, applied once
 # in wait_forecast.prepare_arrivals; every screen and alert reads that one publication.
@@ -25,25 +26,15 @@ def connect():
 
 
 def ensure_schema(conn):
+    """Check the forecast tables exist (they come from db/ migrations) and make sure the
+    settings row exists with every setting, adding defaults for settings added later."""
     with conn.cursor() as cur:
-        cur.execute('''CREATE TABLE IF NOT EXISTS forecast_settings (
-            id INTEGER PRIMARY KEY DEFAULT 1 CHECK(id=1), revision BIGINT NOT NULL DEFAULT 1,
-            config JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())''')
+        require_tables(cur, 'forecast_settings', 'dashboard_state', 'wait_forecast_runs')
         cur.execute('INSERT INTO forecast_settings (id,config) VALUES (1,%s) ON CONFLICT(id) DO NOTHING',
                     (psycopg2.extras.Json(DEFAULT_SETTINGS),))
         # Settings added after a row was stored get their default; existing values win.
         cur.execute('UPDATE forecast_settings SET config=%s::jsonb || config WHERE NOT config ?& %s',
                     (psycopg2.extras.Json(DEFAULT_SETTINGS), list(DEFAULT_SETTINGS)))
-        cur.execute('''CREATE TABLE IF NOT EXISTS dashboard_state (
-            id INTEGER PRIMARY KEY DEFAULT 1, updated_at TIMESTAMPTZ,
-            queue_now INTEGER, service_min FLOAT, wait_0m FLOAT, wait_5m FLOAT, wait_10m FLOAT, wait_15m FLOAT,
-            lane1_wait_15m FLOAT,lane2_wait_15m FLOAT,lane3_wait_15m FLOAT,lane4_wait_15m FLOAT,
-            open_lanes INTEGER,demographics_json TEXT,entries_hour_json TEXT,forecast_json JSONB)''')
-        cur.execute('ALTER TABLE dashboard_state ADD COLUMN IF NOT EXISTS forecast_json JSONB')
-        cur.execute('''CREATE TABLE IF NOT EXISTS wait_forecast_runs (
-            publication_id TEXT PRIMARY KEY, published_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-            settings_revision BIGINT NOT NULL, selected_lanes INTEGER NOT NULL, payload JSONB NOT NULL)''')
-        cur.execute('CREATE INDEX IF NOT EXISTS wait_forecast_runs_published_idx ON wait_forecast_runs(published_at DESC)')
     conn.commit()
 
 
