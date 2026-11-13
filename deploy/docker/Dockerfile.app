@@ -23,6 +23,7 @@ RUN pip install -r deploy/docker/requirements-app.txt
 # Code (venvs, logs, models, .env and other machine files are excluded by .dockerignore)
 COPY prediction/ prediction/
 COPY run_scheduler.py ./
+COPY db/ db/
 COPY Queue-Management-System-v2-main/Queue-Management-System-v2-main/ Queue-Management-System-v2-main/Queue-Management-System-v2-main/
 
 # Run as a normal user; the folders that keep data are volumes in docker-compose.yml.

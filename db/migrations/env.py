@@ -1,5 +1,6 @@
 """Alembic environment: connects with the same DB_* settings as the rest of IQMS."""
 import os
+from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
@@ -12,6 +13,10 @@ try:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 except ImportError:
     pass
+
+# Log what runs ("Running upgrade ... -> 0001_baseline"), as set in alembic.ini.
+if context.config.config_file_name:
+    fileConfig(context.config.config_file_name, disable_existing_loggers=False)
 
 
 def _url() -> URL:

@@ -22,6 +22,7 @@ x-app: &app
   restart: unless-stopped
   depends_on:
     db: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
   volumes:
     - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/models:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/models
     - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots
@@ -38,6 +39,7 @@ x-camera: &camera
   restart: unless-stopped
   depends_on:
     db: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
   logging: *logging
   deploy:
     resources:
@@ -65,6 +67,17 @@ services:
       timeout: 5s
       retries: 10
     logging: *logging
+
+  # Applies the database migrations (db/migrations) once, then exits. Every other
+  # service waits for it to finish successfully. A new database gets all its tables;
+  # an up-to-date one is left unchanged.
+  migrate:
+    <<: *app
+    command: ["python", "-m", "alembic", "-c", "/app/db/alembic.ini", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      db: { condition: service_healthy }
+    volumes: []
 
   api:
     <<: *app

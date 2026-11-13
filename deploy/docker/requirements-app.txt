@@ -28,3 +28,7 @@ psycopg2-binary==2.9.11
 python-dotenv==1.2.2
 requests==2.33.1
 urllib3==1.26.20
+
+# Database migrations (db/, run by the migrate service)
+alembic==1.18.4
+SQLAlchemy==2.0.48

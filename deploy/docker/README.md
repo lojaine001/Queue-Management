@@ -7,6 +7,7 @@ no Windows services, no `start_all.ps1`. Docker is the service manager: every co
 | Service | What it runs | Port (this machine only) |
 |---|---|---|
 | `db` | PostgreSQL 17 + TimescaleDB | 127.0.0.1:5432 (`DB_HOST_PORT`) |
+| `migrate` | applies the database migrations (`db/`), then exits; the others wait for it | - |
 | `api` | API (`uvicorn api:app`) | 127.0.0.1:8000 |
 | `scheduler` | forecast every 3 min (`run_scheduler.py`) | - |
 | `push_alerts` | web push alerts | - |
@@ -103,6 +104,11 @@ Dump on the current machine (the services can keep running):
 ```powershell
 & "C:\Program Files\PostgreSQL\17\bin\pg_dump.exe" -U postgres -d iqms -Fc -f $HOME\iqms_audit\iqms.dump
 ```
+The current machine must be marked with the database version first (once, see
+`db/README.md`), so the dump carries it; check before dumping:
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -U postgres -d iqms -tAc "SELECT version_num FROM alembic_version"   # 0001_baseline (or later)
+```
 Copy `iqms.dump` to `~/iqms/` on the new machine, then:
 ```bash
 docker compose up -d db
@@ -113,6 +119,13 @@ docker compose exec db psql -U postgres -d iqms -c "SELECT timescaledb_post_rest
 ```
 For the switch-over itself, take a last dump right before stopping the old machine, so no
 data is lost between the two.
+
+After the restore, `docker compose up -d` runs the `migrate` service first: it finds the
+version in the restored database and only applies migrations added since. Without the
+version (old machine not marked), it stops with "relation ... already exists" and no other
+service starts: mark the restored database with
+`docker compose run --rm migrate python -m alembic -c /app/db/alembic.ini stamp 0001_baseline`
+and start again.
 
 ## 4. Start and check
 
