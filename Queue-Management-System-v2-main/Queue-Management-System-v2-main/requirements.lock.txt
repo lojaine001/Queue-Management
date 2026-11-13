@@ -173,3 +173,4 @@ alembic==1.18.4
 greenlet==3.5.6
 Mako==1.4.3
 SQLAlchemy==2.0.48
+tomli==2.5.0
