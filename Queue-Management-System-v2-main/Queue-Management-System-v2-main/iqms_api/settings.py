@@ -70,4 +70,6 @@ DB_CONFIG = dict(
 LANE_MAX_CAPACITY = 10  # denominator for fill bar
 STORE_TZ = os.getenv("STORE_TZ", "Europe/Paris")
 CHECKOUT_CAM_ID = os.getenv("CHECKOUT_CAM_ID", "Bosch_Camera_exit")
+# The entrance camera's id, as the forecast reads it (prediction/arrival_calibration.py).
+ENTRANCE_CAM_ID = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
 BUCKET_MIN = int(os.getenv("BUCKET_MINUTES", 3))

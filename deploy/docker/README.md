@@ -134,6 +134,8 @@ and start again.
 docker compose up -d --build      # first time: builds the images (about 15 min, about 15 GB of disk)
 docker compose ps                 # every service "Up", the checked ones "(healthy)"
 curl -s localhost:8000/health     # {"status":"ok", ... "db_pool": ...}
+curl -s localhost:8000/health/ready     # "ready", schema_version = schema_expected
+curl -s localhost:8000/health/workers   # every part "ok" (see the main README for the limits)
 docker compose logs --tail 50 camera_checkout   # "[ORT] Requested provider: cuda", "Snapshot saved"
 ```
 Then open the public link. Without data (a brand-new database) the forecast logs

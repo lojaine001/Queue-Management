@@ -107,7 +107,18 @@ The `.bat` files do the same for double-clicking.
 |---|---|
 | http://localhost:3001 | web / phone app (Caddy: reachable only from this machine and through ngrok) |
 | http://localhost:8501 | operator dashboard |
-| http://localhost:8000/health | API health, including `db_pool`: connections in use out of the maximum |
+| http://localhost:8000/health | API process up, including `db_pool`: connections in use out of the maximum |
+| http://localhost:8000/health/ready | 200 when the database answers and is at the migration version in `db/`; 503 with the reason |
+| http://localhost:8000/health/workers | 200 when every background part is producing; 503 naming the late one (below) |
+
+`/health/workers` reads each part's last sign of life: both cameras' snapshots (every 10 s; `ok`
+under 60 s), the scheduler's heartbeat file (under 120 s, not stopped), the newest forecast
+publication (under 3 runs, at least 10 min) and the push checker's heartbeat file (under 120 s).
+Each part is `ok`, `stale` (late) or `missing` (never seen in the last day). The camera ids are
+`CHECKOUT_CAM_ID` and `CAM_ID` in `.env` and must be the ids the cameras write. The limits can be
+changed in `.env` (`HEALTH_CAMERA_MAX_AGE_SEC`, `HEALTH_SCHEDULER_MAX_AGE_SEC`,
+`HEALTH_PUSH_MAX_AGE_SEC`, `HEALTH_FORECAST_MAX_AGE_SEC`). These answers show statuses and times
+only, never error messages, since they are public through the web link like every GET.
 
 ## 3. Security
 

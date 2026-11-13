@@ -28,7 +28,7 @@ import json
 import os
 import time
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg2
@@ -40,6 +40,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 from prediction.forecast_state import wait_at_horizon
+from prediction.runtime import RUNTIME, write_json
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -179,9 +180,22 @@ def main():
     while True:
         try:
             check_once()
+            last_check = "ok"
         except Exception as exc:
             print(f"[{_now()}] check_once() failed: {exc}")
+            last_check = "failed"
+        _write_heartbeat(args.interval, last_check)
         time.sleep(args.interval)
+
+
+def _write_heartbeat(interval_sec: int, last_check: str) -> None:
+    """Sign of life for GET /health/workers (rewritten after every check)."""
+    try:
+        write_json(RUNTIME / "push_alerts.json", {
+            "heartbeat": datetime.now(timezone.utc).isoformat(), "pid": os.getpid(),
+            "interval_sec": interval_sec, "last_check": last_check})
+    except Exception as exc:  # never stop sending alerts because of the heartbeat
+        print(f"[{_now()}] heartbeat not written: {exc}")
 
 
 if __name__ == "__main__":
