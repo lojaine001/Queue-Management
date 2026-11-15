@@ -704,25 +704,51 @@ class FisheyeDetector(AbstractModel):
         else:
             self._backend = 'ultralytics'
             self._ensure_ultralytics_on_sys_path()
+            import torch
             from ultralytics import YOLO  # type: ignore
             self._ultra_model = YOLO(self._model_path)
+            self._ultra_net = None
+            if str(self._model_path).lower().endswith('.pt') and getattr(self._ultra_model, 'model', None) is not None:
+                dev = torch.device(self._device)
+                self._ultra_device = dev
+                self._ultra_net = self._ultra_model.model.to(dev).float().fuse().eval()
 
     def _init_wbf_backend(self) -> None:
-        self._ensure_yolor_on_sys_path()
-        self._ensure_ultralytics_on_sys_path()
-        import torch
-        from models.experimental import attempt_load as load_yolor  # type: ignore
-        from ultralytics import YOLO  # type: ignore
-
-        dev = torch.device(self._device)
-        use_half = dev.type == 'cuda'
-        self._yolor_dtype = torch.float16 if use_half else torch.float32
-        self._yolor_device = dev
-        self._yolor_model = load_yolor(self._wbf_models_cfg['yolor'], map_location=dev).to(
-            device=dev, dtype=self._yolor_dtype
-        ).eval()
-        self._y10_model = YOLO(self._wbf_models_cfg['y10'])
-        self._y13_model = YOLO(self._wbf_models_cfg['y13'])
+        yr_path = self._wbf_models_cfg.get('yolor') or 'models/yolor_d6_best_checkpoint.onnx'
+        y10_path = self._wbf_models_cfg.get('y10') or 'models/yolov10_x_best_checkpoint.onnx'
+        y13_path = self._wbf_models_cfg.get('y13') or 'models/yolov13_l_best_checkpoint.onnx'
+        self._wbf_sub_detectors = [
+            FisheyeDetector(
+                model_path=yr_path,
+                obj_class_score_th=min(self._obj_class_score_th, self._wbf_confs[0]),
+                iou_th=self._wbf_ious[0],
+                providers=self._providers,
+                img_size=self._default_img_size,
+                person_class_ids=list(self._explicit_person_class_ids) if self._explicit_person_class_ids else None,
+                detector_backend='auto',
+                device=self._device,
+            ),
+            FisheyeDetector(
+                model_path=y10_path,
+                obj_class_score_th=min(self._obj_class_score_th, self._wbf_confs[1]),
+                iou_th=self._wbf_ious[1],
+                providers=self._providers,
+                img_size=self._default_img_size,
+                person_class_ids=list(self._explicit_person_class_ids) if self._explicit_person_class_ids else None,
+                detector_backend='auto',
+                device=self._device,
+            ),
+            FisheyeDetector(
+                model_path=y13_path,
+                obj_class_score_th=min(self._obj_class_score_th, self._wbf_confs[2]),
+                iou_th=self._wbf_ious[2],
+                providers=self._providers,
+                img_size=self._default_img_size,
+                person_class_ids=list(self._explicit_person_class_ids) if self._explicit_person_class_ids else None,
+                detector_backend='auto',
+                device=self._device,
+            ),
+        ]
 
     def _init_rapid_backend(self) -> None:
         import types
@@ -1036,6 +1062,28 @@ class FisheyeDetector(AbstractModel):
         return results
 
     def _call_ultralytics(self, image: np.ndarray) -> List[Box]:
+        if getattr(self, '_ultra_net', None) is not None:
+            import torch
+
+            img_h, img_w = image.shape[:2]
+            sz = self._default_img_size
+            lb_img, ratio, pad = letterbox_image(image, new_shape=(sz, sz))
+            rgb = cv2.cvtColor(lb_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            chw = np.ascontiguousarray(rgb.transpose(2, 0, 1))
+            tensor = torch.from_numpy(chw).to(device=self._ultra_device, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                raw = self._ultra_net(tensor)
+            if isinstance(raw, dict):
+                raw = raw.get('one2one', next(iter(raw.values())))
+            pred = raw[0] if isinstance(raw, (list, tuple)) else raw
+            return self._decode_yolo_onnx_outputs(
+                [pred.float().cpu().numpy()],
+                (img_h, img_w),
+                (sz, sz),
+                ratio,
+                pad,
+            )
+
         preds = self._ultra_model.predict(
             source=image,
             imgsz=self._default_img_size,
@@ -1077,76 +1125,38 @@ class FisheyeDetector(AbstractModel):
         )
 
     def _call_wbf(self, image: np.ndarray) -> List[Box]:
-        import torch
-
         img_h, img_w = image.shape[:2]
-        sz = self._default_img_size
-        lb_img, ratio, pad = letterbox_image(image, new_shape=(sz, sz))
-        rgb = cv2.cvtColor(lb_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        chw = np.ascontiguousarray(rgb.transpose(2, 0, 1))
-        tensor_f32 = torch.from_numpy(chw).to(device=self._yolor_device, dtype=torch.float32).unsqueeze(0)
-        tensor_yr = tensor_f32.to(dtype=self._yolor_dtype)
+        all_boxes: List[List[List[float]]] = []
+        all_scores: List[List[float]] = []
+        all_classes: List[List[int]] = []
 
-        with torch.no_grad():
-            yr_raw = self._yolor_model(tensor_yr)[0].float().cpu().numpy()
-        yr_pred = yr_raw[0]
-        cxcywh = yr_pred[:, :4]
-        x1 = cxcywh[:, 0] - cxcywh[:, 2] / 2.0
-        y1 = cxcywh[:, 1] - cxcywh[:, 3] / 2.0
-        x2 = cxcywh[:, 0] + cxcywh[:, 2] / 2.0
-        y2 = cxcywh[:, 1] + cxcywh[:, 3] / 2.0
-        yr_boxes_xyxy = np.stack([x1, y1, x2, y2], axis=-1)[None, :, :]
-        yr_cls_scores = (yr_pred[:, 4:5] * yr_pred[:, 5:]).T[None, :, :]
-        yr_nms = nms_raw_outputs(
-            yr_boxes_xyxy.astype(np.float32),
-            yr_cls_scores.astype(np.float32),
-            iou_th=self._wbf_ious[0],
-            score_th=self._wbf_confs[0],
-        )
-        yr_boxes, yr_scores, yr_classes = [], [], []
-        if len(yr_nms) > 0:
-            yr_boxes = unscale_letterbox_coords(yr_nms[:, 3:7], (img_h, img_w), ratio, pad).tolist()
-            yr_scores = yr_nms[:, 2].astype(float).tolist()
-            yr_classes = yr_nms[:, 1].astype(int).tolist()
-
-        def _extract_ultra(model_obj, conf_t: float, iou_t: float):
-            res = model_obj.predict(
-                source=tensor_f32, imgsz=sz, conf=conf_t, iou=iou_t,
-                device=self._device, verbose=False,
-            )
+        for det in self._wbf_sub_detectors:
+            boxes = det(image=image)
             b_list, s_list, c_list = [], [], []
-            for r in res:
-                b_np = r.boxes.xyxy.cpu().numpy()
-                s_np = r.boxes.conf.cpu().numpy()
-                c_np = r.boxes.cls.cpu().numpy().astype(int)
-                keep = s_np >= conf_t
-                if np.any(keep):
-                    scaled = unscale_letterbox_coords(b_np[keep], (img_h, img_w), ratio, pad)
-                    b_list.extend(scaled.tolist())
-                    s_list.extend(s_np[keep].astype(float).tolist())
-                    c_list.extend(c_np[keep].tolist())
-            return b_list, s_list, c_list
+            for b in boxes:
+                if b.classid != 0:
+                    continue
+                b_list.append([
+                    float(np.clip(b.x1 / max(img_w, 1), 0.0, 1.0)),
+                    float(np.clip(b.y1 / max(img_h, 1), 0.0, 1.0)),
+                    float(np.clip(b.x2 / max(img_w, 1), 0.0, 1.0)),
+                    float(np.clip(b.y2 / max(img_h, 1), 0.0, 1.0)),
+                ])
+                s_list.append(float(b.score))
+                c_list.append(0)
+            all_boxes.append(b_list)
+            all_scores.append(s_list)
+            all_classes.append(c_list)
 
-        y10_boxes, y10_scores, y10_classes = _extract_ultra(self._y10_model, self._wbf_confs[1], self._wbf_ious[1])
-        y13_boxes, y13_scores, y13_classes = _extract_ultra(self._y13_model, self._wbf_confs[2], self._wbf_ious[2])
-
-        all_boxes = [yr_boxes, y10_boxes, y13_boxes]
-        all_scores = [yr_scores, y10_scores, y13_scores]
-        all_classes = [yr_classes, y10_classes, y13_classes]
-        norm_boxes = [
-            [[b[0] / img_w, b[1] / img_h, b[2] / img_w, b[3] / img_h] for b in boxes]
-            for boxes in all_boxes
-        ]
         fused_norm, fused_scores, fused_labels = weighted_boxes_fusion_np(
-            norm_boxes, all_scores, all_classes,
+            all_boxes, all_scores, all_classes,
             weights=self._wbf_weights,
             iou_thr=self._wbf_iou,
         )
         if len(fused_norm) == 0:
             return []
         fused_xyxy = fused_norm * np.array([img_w, img_h, img_w, img_h], dtype=np.float32)
-        person_classes = self._resolve_person_class_ids(5)
-        return self._build_boxes_from_arrays(fused_xyxy, fused_scores, fused_labels, person_classes)
+        return self._build_boxes_from_arrays(fused_xyxy, fused_scores, fused_labels, {0})
 
     @staticmethod
     def _rot_to_aabb(

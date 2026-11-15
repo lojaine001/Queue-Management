@@ -14,8 +14,16 @@ password: 'Cam10003!'
 #   rapid       RAPiD rotation-aware fisheye detector (.ckpt, e.g. pL1_MWHB1024_Mar11_4000.ckpt)
 detector_backend: auto
 
-# Active single-model path (.onnx, .pt, .engine, or .ckpt)
-custom_model: models/yolov9_s_discrete_headpose_nonms_1x3x480x640.onnx
+# Active single-model path (.onnx, .pt, .engine, or .ckpt) in Fisheye-Detector/models/:
+#   - models/rapid_pL1_MWHB1024_Mar11_4000.onnx   (RAPiD 1024x1024 ONNX for OpenVINO / CUDA / CPU)
+#   - models/yolov10_x_best_checkpoint.onnx       (UT_AICITY2025 YOLOv10-X 1280x1280 ONNX)
+#   - models/yolov13_l_best_checkpoint.onnx       (UT_AICITY2025 YOLOv13-L 1280x1280 ONNX)
+#   - models/yolor_d6_best_checkpoint.onnx        (UT_AICITY2025 YOLOR-D6 1280x1280 ONNX)
+#   - models/pL1_MWHB1024_Mar11_4000.ckpt         (RAPiD 1024x1024 PyTorch checkpoint)
+#   - models/yolov10_x_best_checkpoint.pt         (UT_AICITY2025 YOLOv10-X PyTorch checkpoint)
+#   - models/yolov13_l_best_checkpoint.pt         (UT_AICITY2025 YOLOv13-L PyTorch checkpoint)
+#   - models/yolor_d6_best_checkpoint.pt          (UT_AICITY2025 YOLOR-D6 PyTorch checkpoint)
+custom_model: models/rapid_pL1_MWHB1024_Mar11_4000.onnx
 disable_headpose_identification_mode: True
 
 # Inference image size (1280 for UT_AICITY2025_Track4 YOLO models; 1024 for RAPiD; 640 for standard YOLO)
@@ -30,12 +38,12 @@ detect_full_res: True
 # person_class_ids: [3, 0]
 
 # Optional 3-model WBF ensemble configuration (used when detector_backend: wbf)
-# wbf_models:
-#   yolor: models/YoloR-d6-e90.pt
-#   y10:   models/yolov10_x_best_checkpoint.pt
-#   y13:   models/yolov13_l_best_checkpoint.pt
-# wbf_weights: [9.0, 9.0, 9.0]
-# wbf_iou: 0.65
+wbf_models:
+  yolor: models/yolor_d6_best_checkpoint.onnx
+  y10:   models/yolov10_x_best_checkpoint.onnx
+  y13:   models/yolov13_l_best_checkpoint.onnx
+wbf_weights: [9.0, 9.0, 9.0]
+wbf_iou: 0.65
 
 # Optional RAPiD configuration (used when detector_backend: rapid or custom_model ends with .ckpt)
 # rapid_dir: ../RAPiD
