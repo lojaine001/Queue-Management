@@ -396,9 +396,10 @@ def main():
         polygons.append(polygon.copy())
         polygon.clear()
 
+    _face_providers = ['CPUExecutionProvider'] if str(device or '').strip().lower() == 'cpu' else None
     face_analyzer = FaceAnalyzer(
-        detector=RetinaFace(confidence_threshold=face_score),
-        age_gender=AgeGender(),
+        detector=RetinaFace(confidence_threshold=face_score, providers=_face_providers),
+        age_gender=AgeGender(providers=_face_providers),
     )
     face_worker = FaceWorker(face_analyzer)
 

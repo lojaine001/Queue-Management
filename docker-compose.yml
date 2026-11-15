@@ -1,4 +1,4 @@
-# IQMS on Docker Engine (Linux, e.g. inside WSL) with an NVIDIA GPU for the cameras.
+# IQMS on Docker Engine (Linux, e.g. inside WSL) with an NVIDIA GPU or CPU for the cameras.
 #
 #   docker compose up -d --build        start everything (builds the images the first time)
 #   docker compose ps                   status, including health
@@ -154,22 +154,33 @@ services:
   camera_checkout:
     <<: *camera
     image: iqms-camera-checkout:latest
-    build: { context: ., dockerfile: deploy/docker/Dockerfile.camera, args: { CAMERA: checkout } }
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.camera
+      args:
+        CAMERA: checkout
+        CAMERA_DEVICE: ${CAMERA_DEVICE:-cuda}
     working_dir: /app/Head-Detector
-    command: ["python", "main.py", "--execution_provider", "cuda", "--no-view-img"]
+    command: ["python", "main.py", "--execution_provider", "${CAMERA_DEVICE:-cuda}", "--no-view-img"]
     volumes:
       - ./Head-Detector/config.yml:/app/Head-Detector/config.yml:ro
       - ./Head-Detector/config2.yml:/app/Head-Detector/config2.yml:ro
       - ./Head-Detector/models:/app/Head-Detector/models:ro
       - ./Head-Detector/LOGs:/app/Head-Detector/LOGs
+      - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots
     profiles: ["cameras"]
 
   camera_entrance:
     <<: *camera
     image: iqms-camera-entrance:latest
-    build: { context: ., dockerfile: deploy/docker/Dockerfile.camera, args: { CAMERA: entrance } }
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.camera
+      args:
+        CAMERA: entrance
+        CAMERA_DEVICE: ${CAMERA_DEVICE:-cuda}
     working_dir: /app/Queue-Management-System-v2-main/Queue-Management-System-v2-main
-    command: ["python", "queue_management_v2.py", "--device", "cuda", "--no-view-img"]
+    command: ["python", "queue_management_v2.py", "--device", "${CAMERA_DEVICE:-cuda}", "--no-view-img"]
     volumes:
       - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/config.yml:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/config.yml:ro
       - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/config2.yml:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/config2.yml:ro

@@ -1,0 +1,25 @@
+# CPU-only override for the camera containers (no NVIDIA GPU / NVIDIA Container Toolkit needed).
+#
+# Activated in .env so `docker compose up -d --build` works unchanged:
+#   CAMERA_DEVICE=cpu
+#   COMPOSE_FILE=docker-compose.yml:deploy/docker/docker-compose.cpu.yml
+#
+# Or explicitly on the command line:
+#   docker compose -f docker-compose.yml -f deploy/docker/docker-compose.cpu.yml up -d --build
+
+services:
+  camera_checkout:
+    build:
+      args:
+        CAMERA: checkout
+        CAMERA_DEVICE: ${CAMERA_DEVICE:-cpu}
+    command: ["python", "main.py", "--execution_provider", "${CAMERA_DEVICE:-cpu}", "--no-view-img"]
+    deploy: !reset {}
+
+  camera_entrance:
+    build:
+      args:
+        CAMERA: entrance
+        CAMERA_DEVICE: ${CAMERA_DEVICE:-cpu}
+    command: ["python", "queue_management_v2.py", "--device", "${CAMERA_DEVICE:-cpu}", "--no-view-img"]
+    deploy: !reset {}

@@ -1,6 +1,6 @@
-# Entrance camera image (queue_management_v2.py), NVIDIA GPU. Linux, Python 3.10.
+# Entrance camera image (queue_management_v2.py), NVIDIA GPU or CPU. Linux, Python 3.10.
 # Same versions as the entrance part of Queue-Management-System-v2-main/.../requirements.txt, except:
-#   onnxruntime-gpu instead of onnxruntime-openvino + openvino (NVIDIA CUDA instead of the Intel NPU)
+#   onnxruntime-gpu (or onnxruntime when built with CAMERA_DEVICE=cpu) instead of onnxruntime-openvino + openvino
 #   opencv-python-headless instead of opencv-python (no preview window in a container)
 opencv-python-headless==4.13.0.92
 numpy==2.2.6

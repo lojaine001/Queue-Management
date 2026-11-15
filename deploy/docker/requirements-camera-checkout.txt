@@ -1,6 +1,6 @@
-# Checkout camera image (Head-Detector/main.py), NVIDIA GPU. Linux, Python 3.10.
+# Checkout camera image (Head-Detector/main.py), NVIDIA GPU or CPU. Linux, Python 3.10.
 # Same versions as Head-Detector/requirements.txt, except:
-#   onnxruntime-gpu instead of onnxruntime-openvino + openvino (NVIDIA CUDA instead of the Intel NPU)
+#   onnxruntime-gpu (or onnxruntime when built with CAMERA_DEVICE=cpu) instead of onnxruntime-openvino + openvino
 #   opencv-python-headless instead of opencv-python (no preview window in a container)
 #   torch from the CPU-only index: it is only imported, by the disabled OWLv2 detector
 onnx==1.12.0

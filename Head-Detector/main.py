@@ -292,8 +292,8 @@ def detect(image, model, disable_HI=False):
 def commandline_args():
     parser = argparse.ArgumentParser()
     # parser.add_argument('--pretrained_weights', type=str, default='yolov9-t.pt', help='model.pt path(s)')
-    parser.add_argument('--inference_type', type=str, choices=['fp32','fp16', 'int8'], default='fp32', help='Inference type. Default: fp16')
-    parser.add_argument('--execution_provider', type=str, choices=['cpu', 'cuda', 'tensorrt', 'openvino'], default='openvino', help='Execution provider for ONNXRuntime. Default: openvino.')
+    parser.add_argument('--inference_type', type=str.lower, choices=['fp32','fp16', 'int8'], default='fp32', help='Inference type. Default: fp16')
+    parser.add_argument('--execution_provider', type=str.lower, choices=['cpu', 'cuda', 'tensorrt', 'openvino'], default='openvino', help='Execution provider for ONNXRuntime. Default: openvino.')
     parser.add_argument('--custom_weights', type=str, default='best.pt', help='model.pt path(s)')
     parser.add_argument('--source', type=str, default='inference/images', help='source')  # file/folder, 0 for webcam
     # parser.add_argument('--out', type=str, help='path to save demo') # file/folder, 0 for webcam
