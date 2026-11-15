@@ -841,10 +841,7 @@ def torch_safe_load(weight, safe_only=False):
                 with open(file, "rb") as f:
                     ckpt = torch.load(f, pickle_module=safe_pickle)
             else:
-                try:
-                    ckpt = torch.load(file, map_location="cpu", weights_only=False)
-                except TypeError:
-                    ckpt = torch.load(file, map_location="cpu")
+                ckpt = torch.load(file, map_location="cpu")
 
     except ModuleNotFoundError as e:  # e.name is missing module name
         if e.name == "models":
