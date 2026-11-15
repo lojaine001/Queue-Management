@@ -1,7 +1,10 @@
-from PIL import Image
+from PIL import Image, ImageOps
 import random
 import torch
-from torchvision import transforms
+try:
+    from torchvision import transforms
+except ImportError:
+    transforms = None  # type: ignore
 
 from utils.iou_mask import iou_mask, iou_rle
 
@@ -59,7 +62,10 @@ def rect_to_square(img, labels, target_size, pad_value=0, aug=False):
     resize_scale = target_size / max(ori_w,ori_h)
     # unpad_w, unpad_h = target_size * w / max(w,h), target_size * h / max(w,h)
     unpad_w, unpad_h = int(ori_w*resize_scale), int(ori_h*resize_scale)
-    img = transforms.functional.resize(img, (unpad_h,unpad_w))
+    if transforms is not None:
+        img = transforms.functional.resize(img, (unpad_h,unpad_w))
+    else:
+        img = img.resize((unpad_w, unpad_h), Image.BILINEAR)
 
     # pad to square
     if aug:
@@ -72,7 +78,10 @@ def rect_to_square(img, labels, target_size, pad_value=0, aug=False):
     right = target_size - unpad_w - left
     bottom = target_size - unpad_h - top
 
-    img = transforms.functional.pad(img, padding=(left,top,right,bottom), fill=0)
+    if transforms is not None:
+        img = transforms.functional.pad(img, padding=(left,top,right,bottom), fill=0)
+    else:
+        img = ImageOps.expand(img, border=(left, top, right, bottom), fill=0)
     # record the padding info
     img_tl = (left, top) # start of the true image
     img_wh = (unpad_w, unpad_h)

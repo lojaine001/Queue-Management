@@ -197,6 +197,25 @@ class TestFisheyeDetector(unittest.TestCase):
         )
         self.assertEqual((x1, y1, x2, y2), (170, 160, 230, 240))
 
+    def test_rapid_onnx_output_decoding(self):
+        """RAPiD ONNX [1, A, 6] output runs rotated NMS and returns Box(classid=0, rbox=...)."""
+        out = np.zeros((1, 1500, 6), dtype=np.float32)
+        # Anchor 0: cx=320, cy=320, w=60, h=80, angle=0 deg, score=0.88
+        out[0, 0] = [320.0, 320.0, 60.0, 80.0, 0.0, 0.88]
+        # Anchor 1: duplicate overlapping anchor at cx=322, cy=321, score=0.70 -> suppressed by rotated NMS
+        out[0, 1] = [322.0, 321.0, 60.0, 80.0, 0.0, 0.70]
+
+        sess = DummyOnnxSession([1, 3, 640, 640], [out])
+        det = self._make_stub_detector(sess, model_path="rapid_pL1_MWHB1024.onnx")
+        img = np.zeros((640, 640, 3), dtype=np.uint8)
+        boxes = det(image=img)
+
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0].classid, 0)
+        self.assertAlmostEqual(boxes[0].score, 0.88, places=4)
+        self.assertEqual((boxes[0].x1, boxes[0].y1, boxes[0].x2, boxes[0].y2), (290, 280, 350, 360))
+        self.assertIsNotNone(boxes[0].rbox)
+
 
 if __name__ == "__main__":
     unittest.main()

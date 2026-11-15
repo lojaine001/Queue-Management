@@ -20,9 +20,15 @@ from tqdm import tqdm
 
 import pickle
 from copy import deepcopy
-from pycocotools import mask as maskUtils
-from torchvision.utils import save_image
-from torchvision.ops import roi_pool, roi_align, ps_roi_pool, ps_roi_align
+try:
+    from pycocotools import mask as maskUtils
+except ImportError:
+    maskUtils = None  # type: ignore
+try:
+    from torchvision.utils import save_image
+    from torchvision.ops import roi_pool, roi_align, ps_roi_pool, ps_roi_align
+except ImportError:
+    save_image = roi_pool = roi_align = ps_roi_pool = ps_roi_align = None  # type: ignore
 
 from utils.general import xyxy2xywh, xywh2xyxy
 from utils.torch_utils import torch_distributed_zero_first

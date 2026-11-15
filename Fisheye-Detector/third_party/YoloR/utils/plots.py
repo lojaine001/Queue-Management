@@ -8,19 +8,23 @@ from copy import copy
 from pathlib import Path
 
 import cv2
-import matplotlib
-import matplotlib.pyplot as plt
+try:
+    import matplotlib
+    import matplotlib.pyplot as plt
+    matplotlib.use('Agg')  # for writing to files only
+except ImportError:
+    matplotlib = plt = None  # type: ignore
 import numpy as np
 import torch
 import yaml
 from PIL import Image
-from scipy.signal import butter, filtfilt
+try:
+    from scipy.signal import butter, filtfilt
+except ImportError:
+    butter = filtfilt = None  # type: ignore
 
 from utils.general import xywh2xyxy, xyxy2xywh
 from utils.metrics import fitness
-
-# Settings
-matplotlib.use('Agg')  # for writing to files only
 
 
 def color_list():

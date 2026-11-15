@@ -660,8 +660,13 @@ class FisheyeDetector(AbstractModel):
             repo_root / 'UT_AICITY2025_Track4' / 'train' / 'YoloR',
         ])
         for cand in candidates:
-            if cand.is_dir() and str(cand) not in sys.path:
-                sys.path.insert(0, str(cand))
+            if cand.is_dir():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                yolor_utils = str(cand / 'utils')
+                if 'utils' in sys.modules and hasattr(sys.modules['utils'], '__path__'):
+                    if yolor_utils not in sys.modules['utils'].__path__:
+                        sys.modules['utils'].__path__.append(yolor_utils)
 
     def _init_pytorch_or_trt_backend(self) -> None:
         model_name = Path(self._model_path).name.lower()
@@ -728,18 +733,17 @@ class FisheyeDetector(AbstractModel):
         if str(rapid_dir) not in sys.path:
             sys.path.insert(0, str(rapid_dir))
 
-        from models.rapid import RAPiD  # type: ignore
-        from utils import utils as rutils  # type: ignore
+        if self._default_img_size == 1280:
+            self._default_img_size = 1024  # RAPiD default input size
+
+        from models.rapid_export import RAPiD  # type: ignore
 
         dev_str = 'cuda' if str(self._device).startswith('cuda') else 'cpu'
         self._rapid_device = dev_str
-        self._rapid_utils = rutils
-        self._rapid_model = RAPiD(backbone=self._rapid_backbone)
+        self._rapid_model = RAPiD(input_hw=(self._default_img_size, self._default_img_size))
         state = torch.load(str(weights_path), map_location='cpu', weights_only=True)['model']
         self._rapid_model.load_state_dict(state)
         self._rapid_model.eval().to(dev_str)
-        if self._default_img_size == 1280:
-            self._default_img_size = 1024  # RAPiD default input size
 
     def _resolve_person_class_ids(self, num_classes: Optional[int] = None) -> set[int]:
         if self._explicit_person_class_ids is not None:
@@ -1034,27 +1038,25 @@ class FisheyeDetector(AbstractModel):
 
     def _call_yolor(self, image: np.ndarray) -> List[Box]:
         import torch
-        from utils.general import non_max_suppression  # type: ignore
 
         img_h, img_w = image.shape[:2]
-        lb_img, ratio, pad = letterbox_image(image, new_shape=(self._default_img_size, self._default_img_size))
+        sz = self._default_img_size
+        lb_img, ratio, pad = letterbox_image(image, new_shape=(sz, sz))
         rgb = cv2.cvtColor(lb_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         chw = np.ascontiguousarray(rgb.transpose(2, 0, 1))
         tensor = torch.from_numpy(chw).to(device=self._yolor_device, dtype=self._yolor_dtype).unsqueeze(0)
         with torch.no_grad():
             pred = self._yolor_model(tensor)[0]
-        nms = non_max_suppression(pred, conf_thres=self._obj_class_score_th, iou_thres=self._iou_th)
-        det = nms[0] if nms and nms[0] is not None and len(nms[0]) else None
-        if det is None:
-            return []
-        det_np = det.cpu().numpy()
-        xyxy = unscale_letterbox_coords(det_np[:, :4], (img_h, img_w), ratio, pad)
-        person_classes = self._resolve_person_class_ids(None)
-        return self._build_boxes_from_arrays(xyxy, det_np[:, 4], det_np[:, 5].astype(int), person_classes)
+        return self._decode_yolo_onnx_outputs(
+            [pred.float().cpu().numpy()],
+            (img_h, img_w),
+            (sz, sz),
+            ratio,
+            pad,
+        )
 
     def _call_wbf(self, image: np.ndarray) -> List[Box]:
         import torch
-        from utils.general import non_max_suppression  # type: ignore
 
         img_h, img_w = image.shape[:2]
         sz = self._default_img_size
@@ -1065,14 +1067,26 @@ class FisheyeDetector(AbstractModel):
         tensor_yr = tensor_f32.to(dtype=self._yolor_dtype)
 
         with torch.no_grad():
-            yr_raw = self._yolor_model(tensor_yr)[0]
-        yr_nms = non_max_suppression(yr_raw, conf_thres=self._wbf_confs[0], iou_thres=self._wbf_ious[0])
+            yr_raw = self._yolor_model(tensor_yr)[0].float().cpu().numpy()
+        yr_pred = yr_raw[0]
+        cxcywh = yr_pred[:, :4]
+        x1 = cxcywh[:, 0] - cxcywh[:, 2] / 2.0
+        y1 = cxcywh[:, 1] - cxcywh[:, 3] / 2.0
+        x2 = cxcywh[:, 0] + cxcywh[:, 2] / 2.0
+        y2 = cxcywh[:, 1] + cxcywh[:, 3] / 2.0
+        yr_boxes_xyxy = np.stack([x1, y1, x2, y2], axis=-1)[None, :, :]
+        yr_cls_scores = (yr_pred[:, 4:5] * yr_pred[:, 5:]).T[None, :, :]
+        yr_nms = nms_raw_outputs(
+            yr_boxes_xyxy.astype(np.float32),
+            yr_cls_scores.astype(np.float32),
+            iou_th=self._wbf_ious[0],
+            score_th=self._wbf_confs[0],
+        )
         yr_boxes, yr_scores, yr_classes = [], [], []
-        if yr_nms and yr_nms[0] is not None and len(yr_nms[0]):
-            det_np = yr_nms[0].cpu().numpy()
-            yr_boxes = unscale_letterbox_coords(det_np[:, :4], (img_h, img_w), ratio, pad).tolist()
-            yr_scores = det_np[:, 4].astype(float).tolist()
-            yr_classes = det_np[:, 5].astype(int).tolist()
+        if len(yr_nms) > 0:
+            yr_boxes = unscale_letterbox_coords(yr_nms[:, 3:7], (img_h, img_w), ratio, pad).tolist()
+            yr_scores = yr_nms[:, 2].astype(float).tolist()
+            yr_classes = yr_nms[:, 1].astype(int).tolist()
 
         def _extract_ultra(model_obj, conf_t: float, iou_t: float):
             res = model_obj.predict(
@@ -1126,16 +1140,15 @@ class FisheyeDetector(AbstractModel):
 
     def _call_rapid(self, image: np.ndarray) -> List[Box]:
         import torch
-        import torchvision.transforms.functional as tvf  # type: ignore
-        from PIL import Image
 
         img_h, img_w = image.shape[:2]
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
-        square, _, pad_info = self._rapid_utils.rect_to_square(pil, None, self._default_img_size, 0)
-        x = tvf.to_tensor(square).unsqueeze(0).to(self._rapid_device)
+        sz = self._default_img_size
+        lb_img, ratio, pad = letterbox_image(image, new_shape=(sz, sz), color=(0, 0, 0))
+        rgb = cv2.cvtColor(lb_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        chw = np.ascontiguousarray(rgb.transpose(2, 0, 1))
+        x = torch.from_numpy(chw).unsqueeze(0).to(self._rapid_device)
         with torch.no_grad():
-            out = self._rapid_model(x).cpu().squeeze()
+            out = self._rapid_model(x).cpu().squeeze(0)
         if out.ndim == 1:
             out = out.unsqueeze(0)
         out = out[out[:, 5] >= self._obj_class_score_th]
@@ -1144,16 +1157,19 @@ class FisheyeDetector(AbstractModel):
         dts = rotated_nms(out.numpy(), thres=self._iou_th)
         if len(dts) == 0:
             return []
-        unpadded = self._rapid_utils.detection2original(
-            torch.from_numpy(dts), pad_info.squeeze()
-        ).numpy().reshape(-1, 6)
+        rx, ry = max(ratio[0], 1e-9), max(ratio[1], 1e-9)
+        dw, dh = pad
         results: List[Box] = []
-        for cx, cy, w, h, a, s in unpadded:
+        for cx_lb, cy_lb, w_lb, h_lb, a, s in dts.reshape(-1, 6):
             if float(s) < self._obj_class_score_th:
                 continue
-            x1, y1, x2, y2 = self._rot_to_aabb(cx, cy, w, h, a, img_w, img_h)
-            icx = int(round(float(cx)))
-            icy = int(round(float(cy)))
+            cx = (float(cx_lb) - dw) / rx
+            cy = (float(cy_lb) - dh) / ry
+            w = float(w_lb) / rx
+            h = float(h_lb) / ry
+            x1, y1, x2, y2 = self._rot_to_aabb(cx, cy, w, h, float(a), img_w, img_h)
+            icx = int(round(cx))
+            icy = int(round(cy))
             results.append(
                 Box(
                     classid=0,
@@ -1164,7 +1180,7 @@ class FisheyeDetector(AbstractModel):
                     y2=y2,
                     cx=icx,
                     cy=icy,
-                    rbox=(float(cx), float(cy), float(w), float(h), float(a)),
+                    rbox=(cx, cy, w, h, float(a)),
                 )
             )
         return results

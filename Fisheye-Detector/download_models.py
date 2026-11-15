@@ -47,28 +47,65 @@ AICITY_GDRIVE_CHECKPOINTS = {
 }
 
 
+def _atomic_rename_with_retry(src: Path, dst: Path, retries: int = 15, delay: float = 1.0) -> None:
+    import time
+    for attempt in range(retries):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            try:
+                shutil.copyfile(src, dst)
+                try:
+                    src.unlink()
+                except PermissionError:
+                    pass
+                return
+            except PermissionError:
+                if attempt == retries - 1:
+                    raise
+                time.sleep(delay)
+
+
+def _replace_with_retry(src: Path, dst: Path, retries: int = 5) -> None:
+    import time
+    for attempt in range(retries):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == retries - 1:
+                raise
+            time.sleep(1.0)
+
+
 def download_url(url: str, dest: Path) -> None:
     if dest.exists() and dest.stat().st_size > 1_000_000:
         print(f"[skip] {dest.name} already exists ({dest.stat().st_size / (1024*1024):.1f} MB)")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
     print(f"[download] {dest.name} <- {url}")
-    with requests.get(url, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total > 0:
-                    pct = downloaded * 100.0 / total
-                    print(f"\r  {downloaded / (1024*1024):6.1f} / {total / (1024*1024):6.1f} MB ({pct:5.1f}%)", end="", flush=True)
-        print()
-    tmp.replace(dest)
+    try:
+        with requests.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0))
+            downloaded = 0
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pct = downloaded * 100.0 / total
+                        print(f"\r  {downloaded / (1024*1024):6.1f} / {total / (1024*1024):6.1f} MB ({pct:5.1f}%)", end="", flush=True)
+            print()
+    except BaseException:
+        try:
+            dest.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        raise
     print(f"[done] {dest} ({dest.stat().st_size / (1024*1024):.1f} MB)")
 
 
@@ -103,24 +140,33 @@ def download_gdrive(file_id: str, dest: Path) -> None:
 
     resp.raise_for_status()
     total = int(resp.headers.get("content-length", 0))
-    tmp = dest.with_suffix(dest.suffix + ".part")
     downloaded = 0
     print(f"[download] {dest.name} (Google Drive id={file_id})")
-    with open(tmp, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1024 * 1024):
-            if not chunk:
-                continue
-            f.write(chunk)
-            downloaded += len(chunk)
-            if total > 0:
-                pct = downloaded * 100.0 / total
-                print(f"\r  {downloaded / (1024*1024):6.1f} / {total / (1024*1024):6.1f} MB ({pct:5.1f}%)", end="", flush=True)
-    print()
+    try:
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total > 0:
+                    pct = downloaded * 100.0 / total
+                    print(f"\r  {downloaded / (1024*1024):6.1f} / {total / (1024*1024):6.1f} MB ({pct:5.1f}%)", end="", flush=True)
+        print()
+    except BaseException:
+        resp.close()
+        try:
+            dest.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        raise
     resp.close()
-    if tmp.stat().st_size < 100_000:
-        tmp.unlink(missing_ok=True)
+    if dest.stat().st_size < 100_000:
+        try:
+            dest.unlink(missing_ok=True)
+        except PermissionError:
+            pass
         raise RuntimeError(f"Google Drive returned an HTML page instead of binary weights for {dest.name} (id={file_id}).")
-    tmp.replace(dest)
     print(f"[done] {dest} ({dest.stat().st_size / (1024*1024):.1f} MB)")
 
 

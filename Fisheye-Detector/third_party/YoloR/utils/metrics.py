@@ -1,6 +1,9 @@
 # Model validation metrics
 
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None  # type: ignore
 import numpy as np
 
 

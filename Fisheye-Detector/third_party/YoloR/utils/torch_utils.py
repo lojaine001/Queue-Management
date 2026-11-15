@@ -11,7 +11,10 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
+try:
+    import torchvision
+except ImportError:
+    torchvision = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
