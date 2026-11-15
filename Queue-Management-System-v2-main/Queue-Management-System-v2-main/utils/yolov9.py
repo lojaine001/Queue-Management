@@ -9,6 +9,9 @@ ROOT = pyrootutils.setup_root(
     dotenv=True,
 )
 
+import ctypes
+import glob
+import importlib.util
 import cv2
 import time
 import yaml
@@ -19,6 +22,16 @@ from typing import Tuple, List
 
 def _register_windows_runtime_dirs() -> None:
     if os.name != 'nt':
+        ov_spec = importlib.util.find_spec('openvino')
+        if ov_spec and ov_spec.origin:
+            ov_libs = os.path.join(os.path.dirname(os.path.abspath(ov_spec.origin)), 'libs')
+            if os.path.isdir(ov_libs):
+                for pattern in ('libtbb.so*', 'libopenvino.so*', 'libopenvino_c.so*'):
+                    for so_path in sorted(glob.glob(os.path.join(ov_libs, pattern))):
+                        try:
+                            ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
+                        except OSError:
+                            continue
         return
 
     candidate_dirs = []

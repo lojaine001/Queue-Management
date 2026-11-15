@@ -14,7 +14,7 @@ no Windows services, no `start_all.ps1`. Docker is the service manager: every co
 | `dashboard` | Streamlit operator dashboard | 127.0.0.1:8501 |
 | `web` | built web app + `/api` proxy (Caddy) | 127.0.0.1:3001 |
 | `ngrok` | public link to `web` (profile `tunnel`) | - |
-| `camera_checkout`, `camera_entrance` | camera pipelines on GPU (`cuda`, default) or CPU (`cpu`) (profile `cameras`) | - |
+| `camera_checkout`, `camera_entrance` | camera pipelines on GPU (`cuda`, default), Intel Xeon/CPU (`openvino`), or plain CPU (`cpu`) (profile `cameras`) | - |
 
 ## 1. Prepare the machine (once)
 
@@ -90,16 +90,19 @@ COMPOSE_PROFILES=cameras,tunnel        # so `docker compose up -d` starts the ca
 NGROK_AUTHTOKEN=<the ngrok token>      # ngrok config check shows where it is on the old machine
 NGROK_DOMAIN=<the reserved domain>.ngrok-free.dev
 ```
-**CPU-only mode (no NVIDIA GPU):** add these two lines to `.env` so `docker compose up -d --build`
-builds the lightweight CPU camera images (`python:3.10-slim` + `onnxruntime` CPU, avoiding the ~4 GB
-CUDA image) and runs the cameras without reserving an NVIDIA GPU:
+**CPU-only / Intel Xeon mode (no NVIDIA GPU):** add these two lines to `.env` so
+`docker compose up -d --build` builds the lightweight CPU/OpenVINO camera images
+(`python:3.10-slim` + `onnxruntime-openvino` + `openvino`, avoiding the ~4 GB CUDA image) and runs
+the cameras on OpenVINO CPU (`OPENVINO_DEVICE=CPU`, `OPENVINO_PRECISION=FP32`) without reserving an
+NVIDIA GPU (use `CAMERA_DEVICE=cpu` instead of `openvino` for plain ONNX Runtime CPU):
 ```
-CAMERA_DEVICE=cpu
+CAMERA_DEVICE=openvino
 COMPOSE_FILE=docker-compose.yml:deploy/docker/docker-compose.cpu.yml
 ```
 `DB_HOST` and the push key path are set by `docker-compose.yml` and need no change. The camera
-logins stay in each `config.yml`. The cameras run on CUDA (`CAMERA_DEVICE=cuda`, default) or CPU
-(`CAMERA_DEVICE=cpu`), so `openvino_device` in `config2.yml` is ignored.
+logins stay in each `config.yml`. In Docker, `OPENVINO_DEVICE` defaults to `CPU` and
+`OPENVINO_PRECISION` defaults to `FP32` (overriding the Windows `NPU`/`FP16` values in
+`config2.yml`).
 
 ## 3. Move the data from the current machine
 

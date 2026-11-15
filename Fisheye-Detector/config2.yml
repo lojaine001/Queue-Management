@@ -1,0 +1,108 @@
+# (conf, area, ratio)
+snapshot_classes:
+  [
+    'TaxiSign'
+  ]
+
+# Tracker backend: norfair | sort | bytetrack
+tracker: norfair
+
+track_all: False
+
+debug_mode: True
+
+show_ids: False
+
+show_rejected_track_overlay: False
+
+# OpenVINO execution provider settings (used when --execution_provider openvino)
+# NPU needs the *_nonms_* model (see tools/npu/convert_head_for_npu.py): the
+# original *_post_* model's in-graph NMS crashes the NPU (DEVICE_LOST).
+openvino_device: NPU       # CPU | GPU | NPU (MYRIAD is accepted as a legacy alias)
+openvino_precision: FP16   # FP32 | FP16 (use FP16 on NPU/GPU)
+
+# Main-loop throttle. Set to 0 for no artificial cap.
+processing_fps: 0
+
+max_age: 4
+
+max_distance_between_points: 6
+
+save_one: True
+
+# Set to False to disable saving debug snapshot images to disk
+save_snapshots: False
+
+pretrained_classes:
+  [
+    'car', 'bus', 'train', 'truck', 'boat'
+  ]
+
+
+min_iou: 0.1
+
+tip_offset: 0.5
+
+# ── Equipment classifier ──────────────────────────────────────────────────────
+# Path to a custom YOLOv8-style ONNX model trained on:
+#   class 0 → trolley, class 1 → store_basket, class 2 → personal_bag
+# Leave empty ("") to skip model-based classification.
+equipment_model: ""
+
+# Minimum detection confidence for the ONNX model
+equipment_score_thresh: 0.40
+
+# Set to true to use the colour-heuristic fallback (no model needed).
+# Thresholds are approximate — tune for your specific camera/lighting.
+equipment_heuristic: false
+
+# Show equipment label below dwell time on the video overlay
+show_equipment_labels: false
+
+# ── OWLv2 zero-shot caddy/basket detection ───────────────────────────────────
+# Runs alongside the main YOLO loop at very low frame rate to detect
+# trolleys and baskets without any training data.
+# Set owlv2_enabled to false to disable entirely.
+# owlv2_interval_frames: run OWLv2 every N frames (3fps × 30 = every 10s).
+# owlv2_score_thresh: minimum confidence (0–1); 0.15 is a safe default.
+owlv2_enabled:         false
+owlv2_interval_frames: 30
+owlv2_score_thresh:    0.10
+
+# ── Queue quality filter ──────────────────────────────────────────────────────
+# Tracks shorter than this (seconds) are passer-by noise; excluded from
+# service_events and queue snapshot counts.
+queue_min_dwell_sec: 3.0
+
+# Lower threshold used only for the live queue_state_snapshots count.
+queue_snapshot_min_dwell_sec: 1.0
+
+# How often (seconds) to write a queue_state_snapshots row while running.
+snapshot_interval: 2
+
+# Rolling window (seconds) for "is this lane currently active" — a lane
+# counts as open if it's had a tracked person within the last N seconds.
+# This is what active_lanes in queue_state_snapshots is actually derived
+# from now. 120s (2 min) sits in the middle of a 1-3 min range: long enough
+# that a lane doesn't flicker closed between two customers, short enough to
+# reflect a lane that's genuinely been closed for a while.
+lane_active_window_sec: 120
+
+# ── Caddy / basket dataset collection ────────────────────────────────────────
+# Save one raw frame every N seconds to caddy_frames/ for future training.
+# Set caddy_collect_interval_sec to 0 to disable collection entirely.
+# Collection stops automatically when the folder reaches caddy_collect_max_gb GB.
+caddy_collect_interval_sec: 0
+caddy_collect_max_gb: 2.0
+
+# ── Evaluation: per-frame timing log ─────────────────────────────────────────
+# When true, a background thread appends one CSV row per processed frame to
+# LOGs/frame_log_<camID>_<YYYYMMDD>.csv: wall_ts, loop_sec, frame_seq (camera
+# frame counter, repeated value = same frame processed twice), n_dets, n_tracks.
+# ~130 MB/day at the live loop rate (~33 rows/s), so only switch it on while
+# recording evaluation clips.
+frame_log_enabled: false
+
+
+
+

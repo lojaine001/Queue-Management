@@ -1,10 +1,10 @@
-# Camera image for NVIDIA GPU (cuda, default) or CPU-only (cpu): one Dockerfile, two cameras.
+# Camera image for NVIDIA GPU (cuda, default), Intel Xeon/CPU via OpenVINO (openvino), or plain CPU (cpu).
 #   GPU (default):
 #     docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=checkout -t iqms-camera-checkout .
 #     docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=entrance -t iqms-camera-entrance .
-#   CPU (lightweight python:3.10-slim base + onnxruntime CPU, no CUDA image download):
-#     docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=checkout --build-arg CAMERA_DEVICE=cpu -t iqms-camera-checkout .
-#     docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=entrance --build-arg CAMERA_DEVICE=cpu -t iqms-camera-entrance .
+#   OpenVINO CPU (e.g. Intel Xeon) or plain CPU (lightweight python:3.10-slim base, no CUDA image download):
+#     docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=checkout --build-arg CAMERA_DEVICE=openvino -t iqms-camera-checkout .
+#     docker build -f deploy/docker/Dockerfile.camera --build-arg CAMERA=entrance --build-arg CAMERA_DEVICE=openvino -t iqms-camera-entrance .
 # The two cameras need different package versions (numpy 1.x vs 2.x), hence two images.
 # Build context: the repository root.
 ARG CAMERA_DEVICE=cuda
@@ -13,15 +13,17 @@ FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04 AS base-cuda
 ENV DEBIAN_FRONTEND=noninteractive
 # Ubuntu 22.04 ships Python 3.10, the version production uses.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-pip tzdata libglib2.0-0 libgl1 curl \
+ && apt-get install -y --no-install-recommends python3 python3-pip tzdata libglib2.0-0 libgl1 libgomp1 curl \
  && ln -sf /usr/bin/python3 /usr/local/bin/python \
  && rm -rf /var/lib/apt/lists/*
 
 FROM python:3.10.16-slim-bookworm AS base-cpu
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata libglib2.0-0 libgl1 curl \
+ && apt-get install -y --no-install-recommends tzdata libglib2.0-0 libgl1 libgomp1 curl \
  && rm -rf /var/lib/apt/lists/*
+
+FROM base-cpu AS base-openvino
 
 FROM base-${CAMERA_DEVICE}
 
@@ -40,25 +42,35 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 WORKDIR /app
 COPY deploy/docker/requirements-camera-${CAMERA}.txt deploy/docker/
 RUN case "$CAMERA_DEVICE" in \
-      [Cc][Pp][Uu]) sed 's/^onnxruntime-gpu==/onnxruntime==/' deploy/docker/requirements-camera-${CAMERA}.txt > /tmp/requirements.txt ;; \
-      *)            cp deploy/docker/requirements-camera-${CAMERA}.txt /tmp/requirements.txt ;; \
+      [Cc][Pp][Uu]|[Oo][Pp][Ee][Nn][Vv][Ii][Nn][Oo]) \
+        sed 's/^onnxruntime-gpu==1\.23\.0$/onnxruntime-openvino==1.23.0\nopenvino==2025.3.0/' \
+            deploy/docker/requirements-camera-${CAMERA}.txt > /tmp/requirements.txt ;; \
+      *) \
+        cp deploy/docker/requirements-camera-${CAMERA}.txt /tmp/requirements.txt ;; \
     esac \
  && python -m pip install -r /tmp/requirements.txt \
- && rm /tmp/requirements.txt
+ && rm /tmp/requirements.txt \
+ && python -c "import importlib.util, pathlib; spec = importlib.util.find_spec('openvino'); \
+    p = pathlib.Path(spec.origin).resolve().parent / 'libs' if (spec and spec.origin) else None; \
+    pathlib.Path('/etc/ld.so.conf.d/openvino.conf').write_text(str(p) + '\n') if (p and p.is_dir()) else None" \
+ && ldconfig
 
 COPY shared_tracking/ shared_tracking/
 COPY Head-Detector/ Head-Detector/
+COPY Fisheye-Detector/ Fisheye-Detector/
 COPY Queue-Management-System-v2-main/Queue-Management-System-v2-main/ Queue-Management-System-v2-main/Queue-Management-System-v2-main/
 
 RUN useradd --create-home --uid 1000 iqms \
  && mkdir -p Head-Detector/models Head-Detector/LOGs Head-Detector/ov_cache \
+             Fisheye-Detector/models Fisheye-Detector/LOGs Fisheye-Detector/ov_cache \
              Queue-Management-System-v2-main/Queue-Management-System-v2-main/models \
              Queue-Management-System-v2-main/Queue-Management-System-v2-main/LOGs \
              Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots \
+             Queue-Management-System-v2-main/Queue-Management-System-v2-main/ov_cache \
  && chown -R iqms:iqms /app
 USER iqms
 
-# docker-compose.yml sets working_dir and command per camera (CAMERA_DEVICE=cuda or cpu):
+# docker-compose.yml sets working_dir and command per camera (CAMERA_DEVICE=cuda, openvino, or cpu):
 #   checkout: Head-Detector,  python main.py --execution_provider ${CAMERA_DEVICE:-cuda} --no-view-img
 #   entrance: Queue-Management-System-v2-main/..., python queue_management_v2.py --device ${CAMERA_DEVICE:-cuda} --no-view-img
 CMD ["python", "-c", "print('Set the camera command in docker-compose.yml')"]

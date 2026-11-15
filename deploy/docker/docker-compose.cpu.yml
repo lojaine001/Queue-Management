@@ -1,7 +1,7 @@
-# CPU-only override for the camera containers (no NVIDIA GPU / NVIDIA Container Toolkit needed).
+# CPU / Intel Xeon override for the camera containers (no NVIDIA GPU / NVIDIA Container Toolkit needed).
 #
 # Activated in .env so `docker compose up -d --build` works unchanged:
-#   CAMERA_DEVICE=cpu
+#   CAMERA_DEVICE=openvino   # (recommended on Intel Xeon / Intel CPU; or `cpu` for plain ONNX Runtime CPU)
 #   COMPOSE_FILE=docker-compose.yml:deploy/docker/docker-compose.cpu.yml
 #
 # Or explicitly on the command line:
@@ -12,14 +12,14 @@ services:
     build:
       args:
         CAMERA: checkout
-        CAMERA_DEVICE: ${CAMERA_DEVICE:-cpu}
-    command: ["python", "main.py", "--execution_provider", "${CAMERA_DEVICE:-cpu}", "--no-view-img"]
+        CAMERA_DEVICE: ${CAMERA_DEVICE:-openvino}
+    command: ["python", "main.py", "--execution_provider", "${CAMERA_DEVICE:-openvino}", "--no-view-img"]
     deploy: !reset {}
 
   camera_entrance:
     build:
       args:
         CAMERA: entrance
-        CAMERA_DEVICE: ${CAMERA_DEVICE:-cpu}
-    command: ["python", "queue_management_v2.py", "--device", "${CAMERA_DEVICE:-cpu}", "--no-view-img"]
+        CAMERA_DEVICE: ${CAMERA_DEVICE:-openvino}
+    command: ["python", "queue_management_v2.py", "--device", "${CAMERA_DEVICE:-openvino}", "--no-view-img"]
     deploy: !reset {}

@@ -252,9 +252,6 @@ class AbstractModel(ABC):
         return provider
 
     def _preload_openvino_runtime(self) -> None:
-        if sys.platform != 'win32':
-            return
-
         provider_names = [self._provider_name(provider) for provider in (self._providers or [])]
         if 'OpenVINOExecutionProvider' not in provider_names:
             return
@@ -267,6 +264,18 @@ class AbstractModel(ABC):
         ov_dir = Path(ov_spec.origin).resolve().parent
         ov_libs = ov_dir / 'libs'
         ort_capi = Path(ort_spec.origin).resolve().parent / 'capi'
+
+        if sys.platform != 'win32':
+            for so_dir in (ov_libs, ort_capi):
+                if not so_dir.is_dir():
+                    continue
+                for pattern in ('libtbb.so*', 'libopenvino.so*', 'libopenvino_c.so*'):
+                    for so_path in sorted(so_dir.glob(pattern)):
+                        try:
+                            ctypes.CDLL(str(so_path), mode=ctypes.RTLD_GLOBAL)
+                        except OSError:
+                            continue
+            return
 
         self._provider_dll_handles = []
         for dll_dir in [ov_libs, ort_capi]:

@@ -349,8 +349,8 @@ def main():
     max_age = config2.get('max_age', 10)
     processing_fps = float(config2.get('processing_fps', 0))
     snapshot_class_only = config2.get('snapshot_classes', [])
-    openvino_device     = config2.get('openvino_device', 'CPU').upper()     # CPU / GPU / MYRIAD
-    openvino_precision  = config2.get('openvino_precision', 'FP32').upper() # FP32 / FP16
+    openvino_device     = str(os.getenv('OPENVINO_DEVICE') or config2.get('openvino_device', 'CPU')).upper()     # CPU / GPU / MYRIAD / NPU
+    openvino_precision  = str(os.getenv('OPENVINO_PRECISION') or config2.get('openvino_precision', 'FP32')).upper() # FP32 / FP16
     save_one = config2.get('save_one', True)
     save_snapshots = config2.get('save_snapshots', False)
     show_rejected_track_overlay = config2.get('show_rejected_track_overlay', False)

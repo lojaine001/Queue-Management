@@ -31,6 +31,7 @@ import datasets as ds  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HEAD_DIR = REPO_ROOT / 'Head-Detector'
+FISHEYE_DIR = REPO_ROOT / 'Fisheye-Detector'
 ENTRANCE_DIR = REPO_ROOT / 'Queue-Management-System-v2-main' / 'Queue-Management-System-v2-main'
 LIVE_SIZE = (640, 480)
 
@@ -97,10 +98,53 @@ def build_entrance(model_path, device):
     return detect, settings
 
 
+def build_fisheye(model_path, device):
+    sys.path.insert(0, str(FISHEYE_DIR))
+    from utils.queue_utils import get_config
+    from utils.yolo import FisheyeDetector
+    cfg = get_config(str(FISHEYE_DIR / 'config.yml'))
+    score_th = float(cfg.get('score', 0.15))
+    disable_hi = cfg.get('disable_headpose_identification_mode', True)
+    backend = cfg.get('detector_backend', 'auto')
+    img_size = int(cfg.get('img_size', 1280))
+    iou_th = float(cfg.get('iou_threshold', 0.45))
+    person_class_ids = cfg.get('person_class_ids', None)
+    model = FisheyeDetector(
+        model_path=str(model_path),
+        obj_class_score_th=min(score_th, 0.35),
+        attr_class_score_th=0.70,
+        providers=providers_for(device),
+        iou_th=iou_th,
+        img_size=img_size,
+        person_class_ids=person_class_ids,
+        detector_backend=backend,
+        wbf_models=cfg.get('wbf_models', None),
+        wbf_weights=cfg.get('wbf_weights', [9.0, 9.0, 9.0]),
+        wbf_iou=float(cfg.get('wbf_iou', 0.65)),
+        rapid_dir=cfg.get('rapid_dir', None),
+        rapid_backbone=cfg.get('rapid_backbone', 'dark53'),
+        device='cuda:0' if device == 'cuda' else 'cpu',
+    )
+
+    def detect(img):
+        out = []
+        for b in model(image=img, disable_headpose_identification_mode=disable_hi):
+            if b.classid != 0 or b.score < score_th:
+                continue
+            out.append([b.x1, b.y1, b.x2, b.y2, b.score])
+        return out
+
+    settings = {
+        'score': score_th, 'iou_threshold': iou_th, 'img_size': img_size,
+        'detector_backend': getattr(model, '_backend', backend), 'classes_kept': [0],
+    }
+    return detect, settings
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--detector', choices=['head', 'entrance'], required=True)
-    ap.add_argument('--model', required=True, help='.onnx file of that detector')
+    ap.add_argument('--detector', choices=['head', 'entrance', 'fisheye'], required=True)
+    ap.add_argument('--model', required=True, help='model file (.onnx, .pt, .engine, .ckpt)')
     ap.add_argument('--root', default=ds.DEFAULT_ROOT)
     ap.add_argument('--dataset', choices=ds.DATASETS, default='WEPDTOF')
     ap.add_argument('--scenes', nargs='*', help='default: every scene of the dataset')
@@ -112,8 +156,8 @@ def main():
     model_path = Path(args.model)
     if not model_path.exists():
         sys.exit(f'Model not found: {model_path}')
-    build = build_head if args.detector == 'head' else build_entrance
-    detect, settings = build(model_path, args.device)
+    builders = {'head': build_head, 'entrance': build_entrance, 'fisheye': build_fisheye}
+    detect, settings = builders[args.detector](model_path, args.device)
 
     scenes = ds.list_scenes(args.dataset, args.root)
     if args.scenes:

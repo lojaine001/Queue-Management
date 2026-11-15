@@ -36,6 +36,8 @@ x-camera: &camera
   environment:
     DB_HOST: db
     DB_PORT: "5432"
+    OPENVINO_DEVICE: ${OPENVINO_DEVICE:-CPU}
+    OPENVINO_PRECISION: ${OPENVINO_PRECISION:-FP32}
   restart: unless-stopped
   depends_on:
     db: { condition: service_healthy }

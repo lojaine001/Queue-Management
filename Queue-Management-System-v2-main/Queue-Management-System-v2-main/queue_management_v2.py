@@ -372,14 +372,16 @@ def main():
     else:
         print("[COUNTER] ROI counting mode")
 
+    openvino_device    = str(os.getenv('OPENVINO_DEVICE') or config2.get('openvino_device', 'CPU')).upper()
+    openvino_precision = str(os.getenv('OPENVINO_PRECISION') or config2.get('openvino_precision', 'FP32')).upper()
     detector = OnnxDetector(
         device=device,
         model_path=pretrained_model,
         score_threshold=score,
         conf_threshold=min_score,
         iou_threshold=iou_score,
-        openvino_device=config2.get('openvino_device', 'CPU'),
-        openvino_precision=config2.get('openvino_precision', 'FP32'),
+        openvino_device=openvino_device,
+        openvino_precision=openvino_precision,
     )
 
     points = stored_config.get('points', [])
@@ -396,7 +398,8 @@ def main():
         polygons.append(polygon.copy())
         polygon.clear()
 
-    _face_providers = ['CPUExecutionProvider'] if str(device or '').strip().lower() == 'cpu' else None
+    _dev_lower = str(device or '').strip().lower()
+    _face_providers = ['CPUExecutionProvider'] if _dev_lower in ('cpu', 'openvino') else None
     face_analyzer = FaceAnalyzer(
         detector=RetinaFace(confidence_threshold=face_score, providers=_face_providers),
         age_gender=AgeGender(providers=_face_providers),
