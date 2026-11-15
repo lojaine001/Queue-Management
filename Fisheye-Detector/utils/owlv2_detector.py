@@ -29,7 +29,11 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
 
 from .equipment_classifier import (
     EQUIPMENT_NONE,
@@ -83,7 +87,7 @@ class OWLv2Detector:
         model_id: str = _MODEL_ID,
     ) -> None:
         self.score_thresh = score_thresh
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or ("cuda" if (torch is not None and torch.cuda.is_available()) else "cpu")
         self._processor = None
         self._model = None
         self._model_id = model_id

@@ -454,6 +454,25 @@ class AbstractModel(ABC):
                 enable_fallback=False,
             )
 
+    @abstractmethod
+    def __call__(
+        self,
+        *,
+        input_datas: List[np.ndarray],
+    ) -> List[np.ndarray]:
+        datas = {
+            f'{input_name}': input_data
+            for input_name, input_data in zip(self._input_names, input_datas)
+        }
+        outputs = [
+            output
+            for output in self._model(
+                output_names=self._output_names,
+                input_feed=datas,
+            )
+        ]
+        return outputs
+
 
 class FisheyeDetector(AbstractModel):
     """Fisheye person/pedestrian detector with the exact same API as `Head-Detector/utils/yolo.py`'s `YOLOv9`.
@@ -1049,6 +1068,17 @@ class FisheyeDetector(AbstractModel):
         person_classes = self._resolve_person_class_ids(5)
         return self._build_boxes_from_arrays(fused_xyxy, fused_scores, fused_labels, person_classes)
 
+    @staticmethod
+    def _rot_to_aabb(
+        cx: float, cy: float, w: float, h: float, angle_deg: float, img_w: int, img_h: int
+    ) -> Tuple[int, int, int, int]:
+        pts = cv2.boxPoints(((float(cx), float(cy)), (float(w), float(h)), float(angle_deg)))
+        x1 = int(round(float(np.clip(pts[:, 0].min(), 0, img_w))))
+        y1 = int(round(float(np.clip(pts[:, 1].min(), 0, img_h))))
+        x2 = int(round(float(np.clip(pts[:, 0].max(), 0, img_w))))
+        y2 = int(round(float(np.clip(pts[:, 1].max(), 0, img_h))))
+        return x1, y1, x2, y2
+
     def _call_rapid(self, image: np.ndarray) -> List[Box]:
         import torch
         import torchvision.transforms.functional as tvf  # type: ignore
@@ -1074,11 +1104,7 @@ class FisheyeDetector(AbstractModel):
         for cx, cy, w, h, a, s in unpadded:
             if float(s) < self._obj_class_score_th:
                 continue
-            pts = cv2.boxPoints(((float(cx), float(cy)), (float(w), float(h)), float(a)))
-            x1 = int(round(float(np.clip(pts[:, 0].min(), 0, img_w))))
-            y1 = int(round(float(np.clip(pts[:, 1].min(), 0, img_h))))
-            x2 = int(round(float(np.clip(pts[:, 0].max(), 0, img_w))))
-            y2 = int(round(float(np.clip(pts[:, 1].max(), 0, img_h))))
+            x1, y1, x2, y2 = self._rot_to_aabb(cx, cy, w, h, a, img_w, img_h)
             icx = int(round(float(cx)))
             icy = int(round(float(cy)))
             results.append(

@@ -176,13 +176,20 @@ def main():
             if img is None:
                 continue
             H, W = img.shape[:2]
-            small = cv2.resize(img, LIVE_SIZE)
-            t = time.perf_counter()
-            dets = detect(small)
-            infer_ms.append((time.perf_counter() - t) * 1000)
-            sx, sy = W / LIVE_SIZE[0], H / LIVE_SIZE[1]
-            for x1, y1, x2, y2, s in dets:
-                rows.append([x1 * sx, y1 * sy, x2 * sx, y2 * sy, s])
+            if args.detector == 'fisheye':
+                t = time.perf_counter()
+                dets = detect(img)
+                infer_ms.append((time.perf_counter() - t) * 1000)
+                for x1, y1, x2, y2, s in dets:
+                    rows.append([x1, y1, x2, y2, s])
+            else:
+                small = cv2.resize(img, LIVE_SIZE)
+                t = time.perf_counter()
+                dets = detect(small)
+                infer_ms.append((time.perf_counter() - t) * 1000)
+                sx, sy = W / LIVE_SIZE[0], H / LIVE_SIZE[1]
+                for x1, y1, x2, y2, s in dets:
+                    rows.append([x1 * sx, y1 * sy, x2 * sx, y2 * sy, s])
             files.append(fr.file_name)
             counts.append(len(dets))
         offsets = np.zeros(len(files) + 1, np.int64)

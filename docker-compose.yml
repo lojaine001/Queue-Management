@@ -162,13 +162,17 @@ services:
       args:
         CAMERA: checkout
         CAMERA_DEVICE: ${CAMERA_DEVICE:-cuda}
-    working_dir: /app/Head-Detector
+    working_dir: /app/${CHECKOUT_DETECTOR_DIR:-Head-Detector}
     command: ["python", "main.py", "--execution_provider", "${CAMERA_DEVICE:-cuda}", "--no-view-img"]
     volumes:
       - ./Head-Detector/config.yml:/app/Head-Detector/config.yml:ro
       - ./Head-Detector/config2.yml:/app/Head-Detector/config2.yml:ro
       - ./Head-Detector/models:/app/Head-Detector/models:ro
       - ./Head-Detector/LOGs:/app/Head-Detector/LOGs
+      - ./Fisheye-Detector/config.yml:/app/Fisheye-Detector/config.yml:ro
+      - ./Fisheye-Detector/config2.yml:/app/Fisheye-Detector/config2.yml:ro
+      - ./Fisheye-Detector/models:/app/Fisheye-Detector/models:ro
+      - ./Fisheye-Detector/LOGs:/app/Fisheye-Detector/LOGs
       - ./Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots:/app/Queue-Management-System-v2-main/Queue-Management-System-v2-main/snapshots
     profiles: ["cameras"]
 
