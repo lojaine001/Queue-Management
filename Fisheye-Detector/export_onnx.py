@@ -122,18 +122,54 @@ def export_yolor_to_onnx(weights_path: Path, out_path: Path, img_size: int = 128
 
 
 def export_ultralytics_to_onnx(weights_path: Path, out_path: Path, img_size: int = 1280, opset: int = 13) -> Path:
+    from copy import deepcopy
+    import inspect
+    import torch
+    import onnx
+
     y13_dir = FISHEYE_DIR / "third_party" / "YoloV13"
     if y13_dir.is_dir() and str(y13_dir) not in sys.path:
         sys.path.insert(0, str(y13_dir))
     from ultralytics import YOLO  # type: ignore
-    import shutil
+    from ultralytics.nn.modules import C2f, Classify, Detect, RTDETRDecoder  # type: ignore
 
-    model = YOLO(str(weights_path))
-    exported = Path(model.export(format="onnx", imgsz=img_size, opset=opset, simplify=False))
-    if exported.resolve() != out_path.resolve():
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(exported), str(out_path))
-    print(f"[done] Exported Ultralytics ONNX model: {out_path} ({out_path.stat().st_size / (1024*1024):.1f} MB)")
+    yolo = YOLO(str(weights_path))
+    model = deepcopy(yolo.model).to("cpu")
+    for p in model.parameters():
+        p.requires_grad = False
+    model.eval()
+    model.float()
+    model = model.fuse()
+    for m in model.modules():
+        if isinstance(m, Classify):
+            m.export = True
+        if isinstance(m, (Detect, RTDETRDecoder)):
+            m.dynamic = False
+            m.export = True
+            m.format = "onnx"
+            m.max_det = 300
+        elif isinstance(m, C2f):
+            m.forward = m.forward_split
+
+    dummy_input = torch.zeros(1, 3, img_size, img_size, dtype=torch.float32)
+    for _ in range(2):
+        _ = model(dummy_input)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[export] Exporting Ultralytics {weights_path.name} ({img_size}x{img_size}) -> {out_path} ...")
+    export_kwargs = dict(
+        verbose=False,
+        opset_version=opset,
+        do_constant_folding=True,
+        input_names=["images"],
+        output_names=["output0"],
+    )
+    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+        export_kwargs["dynamo"] = False
+    torch.onnx.export(model, dummy_input, str(out_path), **export_kwargs)
+    onnx_model = onnx.load(str(out_path))
+    onnx.checker.check_model(onnx_model)
+    print(f"[done] Exported and verified Ultralytics ONNX model: {out_path} ({out_path.stat().st_size / (1024*1024):.1f} MB)")
     return out_path
 
 
