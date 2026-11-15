@@ -1099,7 +1099,9 @@ class FisheyeDetector(AbstractModel):
         dts = rotated_nms(out.numpy(), thres=self._iou_th)
         if len(dts) == 0:
             return []
-        unpadded = self._rapid_utils.unpad_output(torch.from_numpy(dts), pad_info).numpy()
+        unpadded = self._rapid_utils.detection2original(
+            torch.from_numpy(dts), pad_info.squeeze()
+        ).numpy().reshape(-1, 6)
         results: List[Box] = []
         for cx, cy, w, h, a, s in unpadded:
             if float(s) < self._obj_class_score_th:
