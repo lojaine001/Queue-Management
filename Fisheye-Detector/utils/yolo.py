@@ -652,8 +652,10 @@ class FisheyeDetector(AbstractModel):
         candidates = []
         if env_dir:
             candidates.append(Path(env_dir))
-        repo_root = Path(__file__).resolve().parents[2]
+        fisheye_dir = Path(__file__).resolve().parents[1]
+        repo_root = fisheye_dir.parent
         candidates.extend([
+            fisheye_dir / 'third_party' / 'YoloR',
             repo_root.parent / 'UT_AICITY2025_Track4' / 'train' / 'YoloR',
             repo_root / 'UT_AICITY2025_Track4' / 'train' / 'YoloR',
         ])
@@ -700,12 +702,15 @@ class FisheyeDetector(AbstractModel):
         import types
         import torch
 
-        repo_root = Path(__file__).resolve().parents[2]
+        fisheye_dir = Path(__file__).resolve().parents[1]
+        repo_root = fisheye_dir.parent
         rapid_dir = Path(
             self._rapid_dir
             or os.getenv('RAPID_DIR')
-            or (repo_root.parent / 'RAPiD')
+            or (fisheye_dir / 'third_party' / 'RAPiD')
         )
+        if not rapid_dir.is_dir() and (repo_root.parent / 'RAPiD').is_dir():
+            rapid_dir = repo_root.parent / 'RAPiD'
         if not rapid_dir.is_dir() and (repo_root / 'RAPiD').is_dir():
             rapid_dir = repo_root / 'RAPiD'
 
@@ -882,9 +887,49 @@ class FisheyeDetector(AbstractModel):
             xyxy = unscale_letterbox_coords(keep[:, 3:7], orig_hw, ratio, pad)
             return self._build_boxes_from_arrays(xyxy, keep[:, 2], keep[:, 1].astype(int), person_classes)
 
-        # Case 2: End-to-End YOLOv10 ONNX [1, N, 6] or [N, 6] -> [x1, y1, x2, y2, score, class_id]
+        # Case 2: End-to-End YOLOv10 ONNX [1, N, 6] ([x1, y1, x2, y2, score, class_id])
+        #         OR RAPiD ONNX [1, A, 6] ([cx, cy, w, h, angle_deg, score])
         if (out0.ndim == 3 and out0.shape[-1] == 6) or (out0.ndim == 2 and out0.shape[-1] == 6):
             preds = out0[0] if out0.ndim == 3 else out0
+            is_rapid_onnx = (
+                'rapid' in Path(self._model_path).name.lower()
+                or preds.shape[0] > 1000
+            )
+            if is_rapid_onnx:
+                keep = preds[preds[:, 5] >= self._obj_class_score_th]
+                if len(keep) == 0:
+                    return []
+                if len(keep) > 1000:
+                    keep = keep[np.argsort(-keep[:, 5], kind='stable')[:1000]]
+                dts = rotated_nms(keep.astype(np.float32), thres=self._iou_th)
+                if len(dts) == 0:
+                    return []
+                results: List[Box] = []
+                rx, ry = max(ratio[0], 1e-9), max(ratio[1], 1e-9)
+                dw, dh = pad
+                for cx_lb, cy_lb, w_lb, h_lb, a_deg, sc in dts:
+                    if float(sc) < self._obj_class_score_th:
+                        continue
+                    cx = (float(cx_lb) - dw) / rx
+                    cy = (float(cy_lb) - dh) / ry
+                    w = float(w_lb) / rx
+                    h = float(h_lb) / ry
+                    x1, y1, x2, y2 = self._rot_to_aabb(cx, cy, w, h, float(a_deg), orig_hw[1], orig_hw[0])
+                    results.append(
+                        Box(
+                            classid=0,
+                            score=float(sc),
+                            x1=x1,
+                            y1=y1,
+                            x2=x2,
+                            y2=y2,
+                            cx=int(round(cx)),
+                            cy=int(round(cy)),
+                            rbox=(cx, cy, w, h, float(a_deg)),
+                        )
+                    )
+                return results
+
             keep = preds[preds[:, 4] >= self._obj_class_score_th]
             if len(keep) == 0:
                 return []
