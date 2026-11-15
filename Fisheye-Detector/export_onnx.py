@@ -67,7 +67,64 @@ def export_rapid_to_onnx(weights_path: Path, out_path: Path, img_size: int = 102
     return out_path
 
 
+def export_yolor_to_onnx(weights_path: Path, out_path: Path, img_size: int = 1280, opset: int = 12) -> Path:
+    import inspect
+    import torch
+    import torch.nn as nn
+    import onnx
+
+    yolor_dir = FISHEYE_DIR / "third_party" / "YoloR"
+    if str(yolor_dir) not in sys.path:
+        sys.path.insert(0, str(yolor_dir))
+
+    import models  # type: ignore
+    from models.experimental import attempt_load  # type: ignore
+    from utils.activations import Hardswish  # type: ignore
+    from utils.general import check_img_size  # type: ignore
+
+    device = torch.device("cpu")
+    model = attempt_load(str(weights_path), map_location=device)
+    gs = int(max(model.stride))
+    sz = check_img_size(img_size, gs)
+    dummy_input = torch.zeros(1, 3, sz, sz, device=device)
+
+    for _, m in model.named_modules():
+        m._non_persistent_buffers_set = set()
+        if isinstance(m, models.common.Conv) and isinstance(m.act, nn.Hardswish):
+            m.act = Hardswish()
+    model.model[-1].export = False  # Keep Detect inference concatenation [1, A, 5+C]
+    _ = model(dummy_input)
+
+    class _YoloRInferenceWrapper(nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
+
+        def forward(self, x):
+            return self.base(x)[0]
+
+    wrapped = _YoloRInferenceWrapper(model).eval()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[export] Exporting YOLOR {weights_path.name} ({sz}x{sz}) -> {out_path} ...")
+    export_kwargs = dict(
+        verbose=False,
+        opset_version=opset,
+        input_names=["images"],
+        output_names=["output"],
+    )
+    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+        export_kwargs["dynamo"] = False
+    torch.onnx.export(wrapped, dummy_input, str(out_path), **export_kwargs)
+    onnx_model = onnx.load(str(out_path))
+    onnx.checker.check_model(onnx_model)
+    print(f"[done] Exported and verified YOLOR ONNX model: {out_path} ({out_path.stat().st_size / (1024*1024):.1f} MB)")
+    return out_path
+
+
 def export_ultralytics_to_onnx(weights_path: Path, out_path: Path, img_size: int = 1280, opset: int = 13) -> Path:
+    y13_dir = FISHEYE_DIR / "third_party" / "YoloV13"
+    if y13_dir.is_dir() and str(y13_dir) not in sys.path:
+        sys.path.insert(0, str(y13_dir))
     from ultralytics import YOLO  # type: ignore
     import shutil
 
@@ -93,6 +150,7 @@ def main() -> None:
         sys.exit(f"Weights file not found: {weights_path}")
 
     is_rapid = weights_path.suffix.lower() == ".ckpt" or "rapid" in weights_path.name.lower() or "pl1_" in weights_path.name.lower()
+    is_yolor = "yolor" in weights_path.name.lower()
     img_size = args.img_size or (1024 if is_rapid else 1280)
     if args.output:
         out_path = Path(args.output)
@@ -103,6 +161,8 @@ def main() -> None:
 
     if is_rapid:
         export_rapid_to_onnx(weights_path, out_path, img_size=img_size, opset=args.opset)
+    elif is_yolor:
+        export_yolor_to_onnx(weights_path, out_path, img_size=img_size, opset=min(args.opset, 12))
     else:
         export_ultralytics_to_onnx(weights_path, out_path, img_size=img_size, opset=args.opset)
 

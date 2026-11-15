@@ -668,6 +668,25 @@ class FisheyeDetector(AbstractModel):
                     if yolor_utils not in sys.modules['utils'].__path__:
                         sys.modules['utils'].__path__.append(yolor_utils)
 
+    @staticmethod
+    def _ensure_ultralytics_on_sys_path(prefer_v10: bool = False) -> None:
+        if importlib.util.find_spec('ultralytics') is not None:
+            return
+        fisheye_dir = Path(__file__).resolve().parents[1]
+        repo_root = fisheye_dir.parent
+        # Note: YoloV13 fork supports both YOLOv13 and YOLOv10 checkpoints
+        sub = 'YoloV10' if prefer_v10 else 'YoloV13'
+        candidates = [
+            fisheye_dir / 'third_party' / sub,
+            fisheye_dir / 'third_party' / 'YoloV13',
+            repo_root.parent / 'UT_AICITY2025_Track4' / 'train' / sub,
+            repo_root / 'UT_AICITY2025_Track4' / 'train' / sub,
+        ]
+        for cand in candidates:
+            if (cand / 'ultralytics').is_dir() and str(cand) not in sys.path:
+                sys.path.insert(0, str(cand))
+                break
+
     def _init_pytorch_or_trt_backend(self) -> None:
         model_name = Path(self._model_path).name.lower()
         if self._backend == 'yolor' or ('yolor' in model_name and self._backend == 'auto'):
@@ -684,11 +703,13 @@ class FisheyeDetector(AbstractModel):
             ).eval()
         else:
             self._backend = 'ultralytics'
+            self._ensure_ultralytics_on_sys_path()
             from ultralytics import YOLO  # type: ignore
             self._ultra_model = YOLO(self._model_path)
 
     def _init_wbf_backend(self) -> None:
         self._ensure_yolor_on_sys_path()
+        self._ensure_ultralytics_on_sys_path()
         import torch
         from models.experimental import attempt_load as load_yolor  # type: ignore
         from ultralytics import YOLO  # type: ignore
