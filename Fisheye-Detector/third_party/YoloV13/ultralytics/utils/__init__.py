@@ -49,7 +49,10 @@ MACOS, LINUX, WINDOWS = (platform.system() == x for x in ["Darwin", "Linux", "Wi
 ARM64 = platform.machine() in {"arm64", "aarch64"}  # ARM64 booleans
 PYTHON_VERSION = platform.python_version()
 TORCH_VERSION = torch.__version__
-TORCHVISION_VERSION = importlib.metadata.version("torchvision")  # faster than importing torchvision
+try:
+    TORCHVISION_VERSION = importlib.metadata.version("torchvision")  # faster than importing torchvision
+except importlib.metadata.PackageNotFoundError:
+    TORCHVISION_VERSION = "0.0.0"
 IS_VSCODE = os.environ.get("TERM_PROGRAM", False) == "vscode"
 HELP_MSG = """
     Examples for running Ultralytics:
@@ -802,7 +805,12 @@ def get_user_config_dir(sub_dir="yolov13"):
         path = Path("/tmp") / sub_dir if is_dir_writeable("/tmp") else Path().cwd() / sub_dir
 
     # Create the subdirectory if it does not exist
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        import tempfile
+        path = Path(tempfile.gettempdir()) / sub_dir
+        path.mkdir(parents=True, exist_ok=True)
 
     return path
 

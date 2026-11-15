@@ -7,7 +7,10 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
-import thop
+try:
+    import thop
+except ImportError:
+    thop = None  # type: ignore
 import torch
 import torch.nn as nn
 

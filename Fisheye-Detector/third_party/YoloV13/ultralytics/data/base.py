@@ -11,7 +11,10 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None  # type: ignore
 from torch.utils.data import Dataset
 
 from ultralytics.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS

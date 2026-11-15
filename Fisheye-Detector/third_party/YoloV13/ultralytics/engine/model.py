@@ -8,7 +8,12 @@ import numpy as np
 import torch
 from PIL import Image
 
-from huggingface_hub import PyTorchModelHubMixin
+try:
+    from huggingface_hub import PyTorchModelHubMixin
+except ImportError:
+    class PyTorchModelHubMixin:  # type: ignore
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__()
 
 from ultralytics.cfg import TASK2DATA, get_cfg, get_save_dir
 from ultralytics.engine.results import Results

@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Union
 
 import numpy as np
-import thop
+try:
+    import thop
+except ImportError:
+    thop = None  # type: ignore
 import torch
 import torch.distributed as dist
 import torch.nn as nn
