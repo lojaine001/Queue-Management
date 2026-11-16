@@ -32,8 +32,13 @@ def live_lanes() -> dict:
     """
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            snap_row = snapshots.latest(cur, CHECKOUT_CAM_ID)
-            ds = dashboard.live_inputs(cur)
+            return read_live_lanes(cur)
+
+
+def read_live_lanes(cur) -> dict:
+    """live_lanes() inside an open transaction (the v1 dashboard reads it with the rest)."""
+    snap_row = snapshots.latest(cur, CHECKOUT_CAM_ID)
+    ds = dashboard.live_inputs(cur)
 
     total_queue = int(snap_row["queue_count"] or 0) if snap_row else (int(ds["queue_now"] or 0) if ds else 0)
     # Use 5-min forecast wait; fall back to service_min
@@ -84,7 +89,12 @@ def current_alert() -> dict:
     """The alert level from the published forecast (same source as the forecast tab)."""
     with _conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            state = dashboard.wait_in_15_min(cur)
+            return read_alert(cur)
+
+
+def read_alert(cur) -> dict:
+    """current_alert() inside an open transaction."""
+    state = dashboard.wait_in_15_min(cur)
 
     if not state or state["wait_15m"] is None:
         return {"level": None, "message": "No forecast data yet.", "predicted_wait_min": None, "horizon_min": 15}

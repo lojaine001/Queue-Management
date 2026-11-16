@@ -274,6 +274,75 @@ class ReportServiceTests(ServiceTestCase):
         self.assertFalse(conn.used)
 
 
+class DashboardServiceTests(ServiceTestCase):
+    """GET /v1/dashboard/live: the Live screen in one answer, read at one moment."""
+    service_module = "dashboard"
+
+    def answers(self, snapshot_age_sec=(5, 8), state=None):
+        """Rows in the order the service reads them, inside its one transaction."""
+        from datetime import datetime, timedelta, timezone
+        from iqms_api import settings
+        now = datetime.now(timezone.utc)
+        if state is None:
+            state = {"open_lanes": 2, "queue_now": 7, "updated_at": now,
+                     "wait_0m": 4.2, "wait_5m": 6.0, "wait_10m": 7.5, "wait_15m": 10.4}
+        seen = [{"camera_id": settings.CHECKOUT_CAM_ID, "last_seen": now - timedelta(seconds=snapshot_age_sec[0])},
+                {"camera_id": settings.ENTRANCE_CAM_ID, "last_seen": now - timedelta(seconds=snapshot_age_sec[1])}]
+        return [
+            {"queue_count": 7, "lane_counts": '{"1": 3, "2": 4}'},              # live lanes: newest snapshot
+            {"queue_now": 7, "service_min": 2.0, "wait_5m": state.get("wait_5m")},  # live lanes: dashboard_state
+            {"wait_15m": state.get("wait_15m"), "updated_at": now},             # alert
+            state,                                                              # forecast state
+            seen,                                                               # cameras
+        ]
+
+    def test_one_read_only_transaction(self):
+        conn = self.use_connection(FakeConnection(rows=self.answers()))
+        self.service.live_dashboard()
+        self.assertEqual(conn.statements[0][0], "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        self.assertEqual(len(conn.statements), 6)  # the SET + five reads, all on one connection
+        self.assertEqual(conn.commits, 0)          # nothing written (the pool ends the transaction)
+
+    def test_shape_and_levels(self):
+        self.use_connection(FakeConnection(rows=self.answers()))
+        r = self.service.live_dashboard()
+        self.assertEqual(set(r), {"api_version", "generated_at", "lanes", "queue", "forecast", "alert", "cameras"})
+        self.assertEqual(r["api_version"], 1)
+        self.assertEqual([l["waiting"] for l in r["lanes"]], [3, 4, 0, 0])
+        self.assertEqual(r["queue"]["total_in_queue"], 7)
+        self.assertEqual([(w["horizon_min"], w["level"]) for w in r["forecast"]["waits"]],
+                         [(0, None), (5, "yellow"), (10, "orange"), (15, "red")])  # the /alerts thresholds
+        self.assertNotIn("wait_15_min", r["forecast"])  # only in "waits", not twice
+        self.assertEqual(r["alert"]["level"], "red")
+        self.assertEqual(r["forecast"]["waits"][3]["level"], r["alert"]["level"])  # same rule, same answer
+
+    def test_cameras_show_status_and_age_only(self):
+        self.use_connection(FakeConnection(rows=self.answers(snapshot_age_sec=(240, 3))))
+        cams = self.service.live_dashboard()["cameras"]
+        self.assertEqual(set(cams), {"checkout", "entrance"})
+        self.assertEqual(set(cams["checkout"]), {"status", "age_sec"})  # no camera id, no error text
+        self.assertEqual(cams["checkout"]["status"], "stale")            # frozen for 4 minutes
+        self.assertEqual(cams["entrance"]["status"], "ok")
+
+    def test_no_forecast_yet(self):
+        self.use_connection(FakeConnection(rows=self.answers(state={})))
+        waits = self.service.live_dashboard()["forecast"]["waits"]
+        self.assertEqual([(w["wait_min"], w["level"]) for w in waits], [(None, None)] * 4)  # unknown, not 0
+
+
+@unittest.skipIf(__import__("tests.test_api_auth", fromlist=["TestClient"]).TestClient is None,
+                 "fastapi TestClient needs httpx")
+class DashboardRouteTests(unittest.TestCase):
+    def test_route_is_v1_and_public_read(self):
+        from tests.test_api_auth import TestClient
+        api = load_api("api_services_test_v1_route")
+        from iqms_api.services import dashboard
+        with mock.patch.object(dashboard, "live_dashboard", return_value={"api_version": 1}):
+            client = TestClient(api.app)
+            r = client.get("/v1/dashboard/live")  # public address: /api/v1/dashboard/live (Caddy removes /api)
+        self.assertEqual((r.status_code, r.json()), (200, {"api_version": 1}))
+
+
 class ErrorMappingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

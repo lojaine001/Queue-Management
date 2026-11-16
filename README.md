@@ -110,6 +110,7 @@ The `.bat` files do the same for double-clicking.
 | http://localhost:8000/health | API process up, including `db_pool`: connections in use out of the maximum |
 | http://localhost:8000/health/ready | 200 when the database answers and is at the migration version in `db/`; 503 with the reason |
 | http://localhost:8000/health/workers | 200 when every background part is producing; 503 naming the late one (below) |
+| http://localhost:8000/v1/dashboard/live | API v1: everything the Live screen shows in one answer read at one moment (lanes, queue, forecast waits with their alert level, current alert, cameras' freshness). Public address: `/api/v1/dashboard/live`. The unversioned endpoints keep working unchanged |
 
 `/health/workers` reads each part's last sign of life: both cameras' snapshots (every 10 s; `ok`
 under 60 s), the scheduler's heartbeat file (under 120 s, not stopped), the newest forecast

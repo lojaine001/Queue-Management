@@ -11,6 +11,7 @@ Layout:
     schemas.py       request bodies
     routes/          the HTTP side, one module per area; each defines `router` and
                      calls its service
+                     (routes/v1.py: API version 1, under /v1 = public /api/v1)
     services/        what each endpoint does: rules and one transaction per request
     repositories/    the SQL, one module per table group; functions take a cursor
 """
@@ -21,9 +22,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import settings
 from .db import DB_POOL, PoolBusy, _pool_busy_handler
-from .routes import administration, exports, forecasts, health, live, notifications, reports, snapshots
+from .routes import administration, exports, forecasts, health, live, notifications, reports, snapshots, v1
 
-ROUTERS = [health, notifications, live, forecasts, reports, snapshots, administration, exports]
+ROUTERS = [health, notifications, live, forecasts, reports, snapshots, administration, exports, v1]
 
 
 def create_app() -> FastAPI:

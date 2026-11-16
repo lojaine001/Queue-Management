@@ -24,7 +24,11 @@ def current_state() -> dict:
 
 def forecast() -> dict:
     """The waits now and in 5/10/15 minutes for the open lanes, and every lane scenario."""
-    state = current_state()
+    return forecast_from_state(current_state())
+
+
+def forecast_from_state(state: dict) -> dict:
+    """forecast() for a dashboard_state row already read (the v1 dashboard reads it with the rest)."""
     scenario = scenario_for(state)
 
     def value(key):

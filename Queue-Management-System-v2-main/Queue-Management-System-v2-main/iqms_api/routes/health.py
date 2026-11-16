@@ -20,6 +20,7 @@ from prediction.runtime import ROOT, RUNTIME, read_json
 
 from .. import health_checks as hc
 from ..db import DB_POOL, _conn
+from ..repositories import snapshots
 from ..settings import CHECKOUT_CAM_ID, ENTRANCE_CAM_ID
 
 router = APIRouter()
@@ -79,12 +80,7 @@ def health_workers():
         with _conn() as conn:
             with conn.cursor() as cur:
                 # Only the last day is searched (recent chunks); older = "missing".
-                cur.execute("""
-                    SELECT camera_id, max(timestamp) FROM queue_state_snapshots
-                    WHERE camera_id = ANY(%s) AND timestamp > now() - interval '1 day'
-                    GROUP BY camera_id
-                """, ([CHECKOUT_CAM_ID, ENTRANCE_CAM_ID],))
-                last_snapshot = dict(cur.fetchall())
+                last_snapshot = snapshots.last_seen(cur, [CHECKOUT_CAM_ID, ENTRANCE_CAM_ID])
                 cur.execute("SELECT max(published_at) FROM wait_forecast_runs "
                             "WHERE published_at > now() - interval '1 day'")
                 last_forecast = cur.fetchone()[0]

@@ -9,4 +9,5 @@ answer's data. When it refuses a request it raises errors.BadRequest / Conflict.
     live.py             live lanes and alert level
     forecasts.py        published forecast: scenarios, horizons, charts
     reports.py          day recap and the background statistics
+    dashboard.py        v1 live dashboard: the Live screen in one consistent answer
 """
