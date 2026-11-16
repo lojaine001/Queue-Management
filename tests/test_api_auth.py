@@ -50,7 +50,7 @@ def load_api(name='api_auth_test', **env):
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)  # api.py: the entry point uvicorn uses
         from iqms_api import db, main, security, settings
-        from iqms_api.routes import forecasts
+        from iqms_api.services import forecasts
         app = main.create_app()
     # settings.API_KEY is read once per process, so use it rather than assuming TEST_KEY.
     return types.SimpleNamespace(app=app, db=db, security=security, forecasts=forecasts, key=settings.API_KEY)
@@ -134,7 +134,7 @@ class ApiKeyTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'VAPID_PUBLIC_KEY': 'public-test-key'}):
             r = self.client.get('/vapid-public-key')
         self.assertEqual((r.status_code, r.json()['public_key']), (200, 'public-test-key'))
-        with mock.patch.object(self.api.forecasts, '_forecast_state', return_value=fresh_state()):
+        with mock.patch.object(self.api.forecasts, 'current_state', return_value=fresh_state()):
             self.assertEqual(self.client.get('/forecast').status_code, 200)
 
     def test_every_route_that_changes_data_requires_the_key_and_reads_do_not(self):

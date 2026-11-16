@@ -156,6 +156,62 @@ class KpiServiceTests(ServiceTestCase):
         self.assertEqual(conn.statements, [])
 
 
+class LiveServiceTests(ServiceTestCase):
+    service_module = "live"
+
+    def test_lane_status_thresholds(self):
+        s = self.service.lane_status
+        self.assertEqual(s(0.0, 0), "closed")
+        self.assertEqual(s(0.0, 1), "open")
+        self.assertEqual(s(4.0, 3), "open")
+        self.assertEqual(s(4.1, 0), "busy")
+        self.assertEqual(s(0.0, 4), "busy")
+        self.assertEqual(s(7.0, 7), "busy")
+        self.assertEqual(s(7.1, 0), "busy_high")
+        self.assertEqual(s(0.0, 8), "busy_high")
+
+    def test_alert_level_boundaries(self):
+        level = lambda wait: self.service.alert_level(wait)[0]
+        self.assertEqual([level(w) for w in (10.1, 10.0, 7.1, 7.0, 5.1, 5.0, 0.0)],
+                         ["red", "orange", "orange", "yellow", "yellow", None, None])
+
+    def test_every_lane_read_from_the_camera_counts(self):
+        # lane_counts as the checkout camera writes it: JSON text keyed "1".."4"
+        self.use_connection(FakeConnection(rows=[
+            {"queue_count": 11, "lane_counts": '{"1": 0, "2": 3, "3": 0, "4": 8}'},
+            {"queue_now": 9, "service_min": 2.0, "wait_5m": 6.0},
+        ]))
+        result = self.service.live_lanes()
+        self.assertEqual([l["waiting"] for l in result["lanes"]], [0, 3, 0, 8])
+        self.assertEqual([l["status"] for l in result["lanes"]], ["closed", "busy", "closed", "busy_high"])
+        self.assertEqual(result["snapshot"], {"total_in_queue": 11, "avg_wait_min": 6.0, "open_lanes": 2})
+
+    def test_before_any_forecast_or_snapshot(self):
+        self.use_connection(FakeConnection(rows=[None, None]))
+        result = self.service.live_lanes()
+        self.assertEqual(result["snapshot"], {"total_in_queue": 0, "avg_wait_min": 1.0, "open_lanes": 0})
+        self.use_connection(FakeConnection(rows=[None]))
+        self.assertEqual(self.service.current_alert()["message"], "No forecast data yet.")
+
+
+class ForecastServiceTests(ServiceTestCase):
+    service_module = "forecasts"
+
+    def test_bad_day_refused_without_database(self):
+        conn = self.use_connection(FakeConnection())
+        with self.assertRaises(self.errors.BadRequest) as caught:
+            self.service.day_wait_chart("12-11-2026")
+        self.assertEqual(caught.exception.detail, "date must be in YYYY-MM-DD format")
+        self.assertFalse(conn.used)
+
+    def test_entries_chart_passes_the_period(self):
+        from datetime import datetime
+        conn = self.use_connection(FakeConnection(rows=[[{"slot": datetime(2026, 11, 14, 9, 3), "entries": 4}]]))
+        self.assertEqual(self.service.entries_chart("2 days", "%d/%m %H:%M"),
+                         {"slots": [{"time": "14/11 09:03", "entries": 4}]})
+        self.assertEqual(conn.statements[0][1], ("2 days",))
+
+
 class ErrorMappingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

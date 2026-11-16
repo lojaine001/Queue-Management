@@ -2,6 +2,25 @@
 from __future__ import annotations
 
 
+def forecast_state(cur) -> dict:
+    """The row plus the revision of the settings now saved (to tell a forecast made with
+    older settings)."""
+    cur.execute("SELECT d.*, f.revision AS current_settings_revision FROM dashboard_state d LEFT JOIN forecast_settings f ON f.id=d.id WHERE d.id=1")
+    return cur.fetchone() or {}
+
+
+def live_inputs(cur):
+    """People waiting now, service time and the 5-minute wait (or None before the first forecast)."""
+    cur.execute("SELECT queue_now, service_min, wait_5m FROM dashboard_state WHERE id = 1")
+    return cur.fetchone()
+
+
+def wait_in_15_min(cur):
+    """The forecast wait in 15 minutes and when it was published (or None)."""
+    cur.execute("SELECT wait_15m, updated_at FROM dashboard_state WHERE id = 1")
+    return cur.fetchone()
+
+
 def lock_state(cur) -> dict:
     """The row, locked until the transaction ends (so two lane changes cannot interleave)."""
     cur.execute("SELECT * FROM dashboard_state WHERE id = 1 FOR UPDATE")
