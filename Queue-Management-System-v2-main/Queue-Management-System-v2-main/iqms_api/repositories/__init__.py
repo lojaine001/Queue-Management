@@ -4,6 +4,7 @@ and runs one query, so the service that calls it decides the transaction.
     dashboard.py   dashboard_state (lanes, forecast state)
     alerts.py      alert_responses
     push.py        push_subscriptions
+    kpis.py        KPI reads (entrance, checkout wait and queue, lanes, alerts)
 """
 from __future__ import annotations
 
