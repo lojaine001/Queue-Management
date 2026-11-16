@@ -63,7 +63,7 @@ class PushAlignmentTests(unittest.TestCase):
 
     def test_push_wait_equals_phone_endpoint(self):
         api = load_api()
-        with patch.object(api, '_forecast_state', return_value=self.state):
+        with patch.object(api.service, 'current_state', return_value=self.state):
             for minutes in (0, 5, 10, 15):
                 self.assertEqual(self.checker._wait_for_horizon(self.state, minutes), api.forecast_wait(minutes)['wait_min'])
 

@@ -15,6 +15,7 @@ api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)
 # The endpoints live in the iqms_api package (api.py is its entry point).
 from iqms_api.routes import administration, forecasts  # noqa: E402
 from iqms_api.services import administration as administration_service  # noqa: E402
+from iqms_api.services import forecasts as forecasts_service  # noqa: E402
 from iqms_api.schemas import SetLanesRequest  # noqa: E402
 
 
@@ -40,7 +41,7 @@ class SharedForecastTests(unittest.TestCase):
                     'forecast_json':build_payload(rows,[8]*8,3,'Europe/Paris',self.now)}
 
     def test_nonlinear_lane_scenarios_preserved_when_current_wait_is_zero(self):
-        with patch.object(forecasts,'_forecast_state',return_value=self.state):response=forecasts.forecast()
+        with patch.object(forecasts_service,'current_state',return_value=self.state):response=forecasts.forecast()
         self.assertEqual(response['wait_10_min'],0)
         scenarios=response['lane_scenarios']
         self.assertEqual(scenarios[0]['est_wait_min'],14)
@@ -48,7 +49,7 @@ class SharedForecastTests(unittest.TestCase):
         self.assertTrue(scenarios[3]['is_current'])
 
     def test_fixed_and_arbitrary_horizons_agree_for_same_snapshot(self):
-        with patch.object(forecasts,'_forecast_state',return_value=self.state):
+        with patch.object(forecasts_service,'current_state',return_value=self.state):
             fixed=forecasts.forecast()
             for minutes,key in [(0,'wait_now_min'),(5,'wait_5_min'),(10,'wait_10_min'),(15,'wait_15_min')]:
                 self.assertEqual(forecasts.forecast_wait(minutes)['wait_min'],fixed[key])
@@ -77,7 +78,7 @@ class SharedForecastTests(unittest.TestCase):
         self.assertTrue(freshness(self.state)['stale'])
 
     def test_missing_forecast_is_unknown_not_zero_or_500(self):
-        with patch.object(forecasts,'_forecast_state',return_value={'open_lanes':3,'wait_0m':None}):
+        with patch.object(forecasts_service,'current_state',return_value={'open_lanes':3,'wait_0m':None}):
             response=forecasts.forecast()
         self.assertIsNone(response['wait_now_min'])
         self.assertEqual(response['lane_scenarios'],[])
@@ -85,7 +86,7 @@ class SharedForecastTests(unittest.TestCase):
 
     def test_invalid_and_unavailable_horizons(self):
         for minutes in [-1,float('nan'),float('inf')]:
-            with patch.object(forecasts,'_forecast_state',return_value=self.state),self.assertRaises(HTTPException) as caught:
+            with patch.object(forecasts_service,'current_state',return_value=self.state),self.assertRaises(HTTPException) as caught:
                 forecasts.forecast_wait(minutes)
             self.assertEqual(caught.exception.status_code,422)
         self.assertIsNone(wait_at_horizon(self.state,1000)['wait_min'])
