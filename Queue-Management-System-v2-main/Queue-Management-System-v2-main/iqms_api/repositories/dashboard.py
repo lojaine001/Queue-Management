@@ -21,6 +21,12 @@ def wait_in_15_min(cur):
     return cur.fetchone()
 
 
+def statistics(cur) -> dict:
+    """dashboard_statistics: the background traffic / demographic snapshot ({} before the first)."""
+    cur.execute('SELECT * FROM dashboard_statistics WHERE id=1')
+    return dict(cur.fetchone() or {})
+
+
 def lock_state(cur) -> dict:
     """The row, locked until the transaction ends (so two lane changes cannot interleave)."""
     cur.execute("SELECT * FROM dashboard_state WHERE id = 1 FOR UPDATE")
