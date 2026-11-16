@@ -104,6 +104,58 @@ class NotificationServiceTests(ServiceTestCase):
         self.assertEqual(conn.commits, 1)
 
 
+class ExportServiceTests(ServiceTestCase):
+    service_module = "exports"
+
+    def test_period_bounds(self):
+        from datetime import date
+        b = self.service.period_bounds
+        self.assertEqual(b("day", "2026-11-12"), (date(2026, 11, 12), date(2026, 11, 13)))
+        self.assertEqual(b("week", "2026-11-15"), (date(2026, 11, 9), date(2026, 11, 16)))  # Sunday -> its Monday
+        self.assertEqual(b("week", "2026-11-09"), (date(2026, 11, 9), date(2026, 11, 16)))  # Monday itself
+        self.assertEqual(b("month", "2026-12-31"), (date(2026, 12, 1), date(2027, 1, 1)))   # year rollover
+        self.assertEqual(b("month", "2028-02-10"), (date(2028, 2, 1), date(2028, 3, 1)))
+
+    def test_bad_requests_refused_in_the_same_order_without_database(self):
+        conn = self.use_connection(FakeConnection())
+        cases = [  # (args, expected detail): the first mistake in this order is reported
+            (("year", "bad-date", "bogus", "xlsx", "fr"), "Only format=csv is supported currently"),
+            (("year", "bad-date", "bogus", "csv", "fr"), "period must be day, week, or month"),
+            (("week", "2026-13-01", "bogus", "csv", "fr"), "date must be YYYY-MM-DD"),
+            (("week", "2026-11-12", "customers,bogus", "csv", "fr"), "Unknown KPI(s): ['bogus']"),
+        ]
+        for args, detail in cases:
+            with self.assertRaises(self.errors.BadRequest) as caught:
+                self.service.csv_file(*args)
+            self.assertEqual(caught.exception.detail, detail)
+        with self.assertRaises(self.errors.BadRequest):
+            self.service.preview("day", "2026-11-12", "nope", "en")
+        self.assertFalse(conn.used)
+
+
+class KpiServiceTests(ServiceTestCase):
+    service_module = "kpis"
+
+    def test_day_series_has_every_hour_even_when_data_is_sparse(self):
+        from datetime import date, datetime
+        conn = FakeConnection(rows=[
+            [{"bucket": datetime(2026, 11, 12, 9), "avg_wait_min": 1.5, "max_wait_min": 4.0}],  # by hour
+            {"avg_wait_min": 1.5, "max_wait_min": 4.0},                                         # overall
+        ])
+        with conn.cursor() as cur:
+            result = self.service.kpi_wait(cur, date(2026, 11, 12), date(2026, 11, 13), "hour")
+        self.assertEqual(len(result["by_hour"]), 24)
+        self.assertEqual(result["by_hour"][9], {"hour": "09:00", "avg_wait_min": 1.5, "max_wait_min": 4.0})
+        self.assertEqual(result["by_hour"][10], {"hour": "10:00", "avg_wait_min": None, "max_wait_min": None})
+        self.assertEqual((result["avg_wait_min"], result["max_wait_min"]), (1.5, 4.0))
+
+    def test_no_day_means_no_query(self):
+        conn = FakeConnection()
+        with conn.cursor() as cur:
+            self.assertEqual(self.service.kpi_queue(cur, None, None)["by_hour"], [])
+        self.assertEqual(conn.statements, [])
+
+
 class ErrorMappingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

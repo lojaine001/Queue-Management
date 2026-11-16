@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from prediction.forecast_state import freshness
 
 from ..db import _conn, _http_error
-from ..kpis import kpi_queue, kpi_wait
+from ..services.kpis import kpi_queue, kpi_wait
 from ..settings import BUCKET_MIN
 
 router = APIRouter()
