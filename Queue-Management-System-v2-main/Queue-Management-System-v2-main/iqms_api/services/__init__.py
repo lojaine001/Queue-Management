@@ -1,0 +1,7 @@
+"""Services: what each endpoint does, without HTTP. A service opens the connection,
+calls the repositories inside one transaction, applies the rules, and returns the
+answer's data. When it refuses a request it raises errors.BadRequest / Conflict.
+
+    administration.py   lane changes, answers to alerts
+    notifications.py    web push subscriptions
+"""

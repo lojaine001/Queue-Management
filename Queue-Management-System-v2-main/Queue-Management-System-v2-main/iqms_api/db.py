@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from .db_pool import DbPool, PoolBusy
+from .errors import ServiceError
 from .settings import DB_CONFIG, STORE_TZ
 
 # One shared pool instead of a new connection per request (see db_pool.py).
@@ -27,7 +28,12 @@ def _conn():
 
 
 def _http_error(exc: Exception) -> HTTPException:
-    """What an endpoint answers when something fails: 503 while the pool is busy, else 500."""
+    """What an endpoint answers when something fails: the service's own refusal (400, 409),
+    503 while the pool is busy, else 500."""
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, ServiceError):
+        return HTTPException(status_code=exc.status_code, detail=exc.detail)
     if isinstance(exc, PoolBusy):
         return HTTPException(status_code=503, detail="The database is busy; try again in a few seconds.",
                              headers={"Retry-After": "5"})
