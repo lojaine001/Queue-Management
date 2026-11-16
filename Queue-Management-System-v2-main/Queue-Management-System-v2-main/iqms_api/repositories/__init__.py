@@ -1,10 +1,16 @@
-"""Database reads shared by several endpoints."""
+"""Repositories: the SQL. One module per table group; each function takes an open cursor
+and runs one query, so the service that calls it decides the transaction.
+
+    dashboard.py   dashboard_state (lanes, forecast state)
+    alerts.py      alert_responses
+    push.py        push_subscriptions
+"""
 from __future__ import annotations
 
 import psycopg2
 import psycopg2.extras
 
-from .db import _conn
+from ..db import _conn
 
 
 def _forecast_state():

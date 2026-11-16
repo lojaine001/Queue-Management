@@ -7,10 +7,13 @@ Layout:
     settings.py      .env, required secrets, constants, import paths
     security.py      API key check for the endpoints that change data
     db.py            shared connection pool (db_pool.py) and error mapping
+    errors.py        why a service refused a request (BadRequest 400, Conflict 409)
     schemas.py       request bodies
     kpis.py          KPI queries shared by the recap and the export
-    repositories.py  database reads shared by several endpoints
-    routes/          one module per area; each defines `router`
+    routes/          the HTTP side, one module per area; each defines `router` and
+                     calls its service
+    services/        what each endpoint does: rules and one transaction per request
+    repositories/    the SQL, one module per table group; functions take a cursor
 """
 from __future__ import annotations
 
