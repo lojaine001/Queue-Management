@@ -212,6 +212,68 @@ class ForecastServiceTests(ServiceTestCase):
         self.assertEqual(conn.statements[0][1], ("2 days",))
 
 
+class ReportServiceTests(ServiceTestCase):
+    service_module = "reports"
+
+    def recap_rows(self, total, yesterday, trend, hours):
+        """Answers in the order the recap reads them (ref_date given, so no latest-day read)."""
+        from datetime import datetime
+        return [
+            {"total": total}, {"total": yesterday}, trend,
+            {"hour": datetime(2026, 11, 12, 18), "cnt": 227},       # busiest hour
+            {"avg_min": 0.2}, {"lanes_count": 3}, {"lane_id": "2", "cnt": 400},
+            {"alert_slots": 4},
+            [{"equipment_type": "trolley", "cnt": 92}],
+            hours,
+        ]
+
+    def test_day_is_passed_as_a_parameter_not_written_into_the_sql(self):
+        from datetime import date
+        conn = self.use_connection(FakeConnection(rows=self.recap_rows(1842, 1335, [], [])))
+        self.service.day_recap("2026-11-12")
+        for sql, params in conn.statements:
+            self.assertNotIn("2026-11-12", sql)
+            self.assertNotIn("2026-11-11", sql)
+        days = [p for _, params in conn.statements for p in (params or ())]
+        self.assertIn(date(2026, 11, 12), days)
+        self.assertIn(date(2026, 11, 11), days)  # yesterday's total
+
+    def test_recap_figures(self):
+        from datetime import date, datetime
+        trend = [{"day": date(2026, 11, 10), "cnt": 2903}, {"day": date(2026, 11, 12), "cnt": 1842}]
+        hours = [{"hour": datetime(2026, 11, 12, 17), "cnt": 150}, {"hour": datetime(2026, 11, 12, 18), "cnt": 227}]
+        self.use_connection(FakeConnection(rows=self.recap_rows(1842, 1335, trend, hours)))
+        r = self.service.day_recap("2026-11-12")
+        self.assertEqual(r["date"], "12 Nov 2026")
+        self.assertEqual(r["vs_yesterday_pct"], 38)
+        self.assertEqual([t["count"] for t in r["trend_7d"]], [0, 0, 0, 0, 2903, 0, 1842])  # missing days = 0
+        self.assertEqual(r["trend_7d"][0]["date"], "2026-11-06")
+        self.assertEqual((r["peak_hour"], r["peak_hour_end"], r["peak_pct_of_total"]), ("18:00", "19:00", 12))
+        self.assertEqual(r["alert_minutes"], 4 * self.service.BUCKET_MIN)
+        self.assertEqual([(e["type"], e["count"], e["percent"]) for e in r["equipment"]],
+                         [("trolley", 92, 5), ("store_basket", 0, 0)])
+        self.assertEqual([h["is_peak"] for h in r["entries_by_hour"]], [False, True])
+
+    def test_nobody_yesterday_gives_no_percentage(self):
+        self.use_connection(FakeConnection(rows=self.recap_rows(50, 0, [], [])))
+        self.assertIsNone(self.service.day_recap("2026-10-23")["vs_yesterday_pct"])
+
+    def test_no_data_at_all_falls_back_to_today(self):
+        conn = self.use_connection(FakeConnection(rows=[None]))  # no entrance event at all
+        r = self.service.day_recap(None)
+        self.assertEqual((r["total_customers"], r["trend_7d"], r["vs_yesterday_pct"]), (0, [], None))
+        conditions = [sql for sql, _ in conn.statements]
+        self.assertTrue(any("timestamp >= CURRENT_DATE" in s for s in conditions))
+        self.assertTrue(any("DATE(prediction_for) = CURRENT_DATE" in s for s in conditions))
+
+    def test_bad_date_refused_without_database(self):
+        conn = self.use_connection(FakeConnection())
+        for bad in ("not-a-date", "2026-11-31", "2026-11-12' OR '1'='1"):
+            with self.assertRaises(self.errors.BadRequest):
+                self.service.day_recap(bad)
+        self.assertFalse(conn.used)
+
+
 class ErrorMappingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

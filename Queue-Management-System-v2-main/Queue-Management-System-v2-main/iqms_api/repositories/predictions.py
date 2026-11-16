@@ -14,3 +14,19 @@ def for_day(cur, day) -> list[dict]:
         ORDER BY prediction_for ASC, predicted_at DESC
     """, (day,))
     return cur.fetchall()
+
+
+def alert_slots_on(cur, day) -> int:
+    """Slots predicted in ALERT on `day` (None: today), any run."""
+    if day is None:
+        condition, params = "DATE(prediction_for) = CURRENT_DATE", ()
+    else:
+        condition, params = "DATE(prediction_for) = %s", (day,)
+    cur.execute(f"""
+        SELECT COUNT(*) AS alert_slots
+        FROM queue_predictions
+        WHERE {condition}
+          AND status = 'ALERT'
+    """, params)
+    row = cur.fetchone()
+    return int((row["alert_slots"] or 0) if row else 0)

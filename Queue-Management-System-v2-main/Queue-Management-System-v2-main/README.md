@@ -29,6 +29,9 @@ Camera feed (OWLv2 + tracking)
 
 ### 1. FastAPI Backend (`api.py`)
 REST API that bridges the database and the mobile app. All data the app displays is served from here.
+`api.py` is the entry point; the code is the `iqms_api/` package, in three layers:
+`routes/` (HTTP: parameters, status codes), `services/` (the rules, one transaction per
+request) and `repositories/` (the SQL). The layout is described at the top of `iqms_api/main.py`.
 
 **Endpoints:**
 | Method | Route | Description |
