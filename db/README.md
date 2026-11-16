@@ -28,6 +28,17 @@ This only creates the `alembic_version` table; no other table or row changes. Ru
 `upgrade head` on an unmarked database that already has the tables fails on the first
 table ("already exists") and changes nothing.
 
+## Migrations so far
+
+| Revision | What it does |
+|---|---|
+| `0001_baseline` | Production's structure on 2026-11-13 (13 tables, 5 hypertables) |
+| `0002_config_changes` | Table `config_changes`: who changed which setting (open lanes, forecast settings), when, old and new value. Written by `prediction/config_audit.py` in the same transaction as the change; shown in the dashboard ("Configuration change history") |
+
+On the Windows machine, apply a new migration **before** restarting with the code that
+needs it: `alembic -c db/alembic.ini upgrade head`, then `.\start_all.ps1`.
+`/health/ready` says which version the database is at and which one the code expects.
+
 ## Changing the structure
 
 1. `alembic -c db/alembic.ini revision -m "add lane_id to alert_responses"` creates the

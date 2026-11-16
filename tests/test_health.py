@@ -215,7 +215,7 @@ class HealthLogicTests(unittest.TestCase):
             self.assertEqual(self.hc.expected_schema_version(Path(d)), "0003_c")
             write_migration(d, "0003_other", "0002_b")  # two branches: no single answer
             self.assertIsNone(self.hc.expected_schema_version(Path(d)))
-        self.assertEqual(self.hc.expected_schema_version(Path("db/migrations/versions")), "0001_baseline")
+        self.assertEqual(self.hc.expected_schema_version(Path("db/migrations/versions")), "0002_config_changes")
 
 
 if __name__ == "__main__":

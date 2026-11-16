@@ -6,6 +6,7 @@ import os
 from contextlib import closing
 import psycopg2
 import psycopg2.extras
+from prediction import config_audit
 from prediction.pipeline import DB_CONFIG
 from prediction.forecast_state import finite, freshness, scenario_for
 from prediction.schema_check import require_tables
@@ -64,14 +65,19 @@ def read_settings():
             return row
 
 
-def update_settings(patch):
+def update_settings(patch, actor=None, source='dashboard'):
+    """Save forecast settings; each value that really changes is recorded in
+    config_changes (who = `actor`), in the same transaction."""
     with closing(connect()) as conn, conn:
         with conn.cursor() as cur:
             cur.execute('SELECT config FROM forecast_settings WHERE id=1 FOR UPDATE')
             config=cur.fetchone()[0]
+            old=dict(config)
             config.update(patch);validate_settings(config)
-            cur.execute('UPDATE forecast_settings SET config=%s,revision=revision+1,updated_at=NOW() WHERE id=1',
-                        (psycopg2.extras.Json(config),))
+            cur.execute('UPDATE forecast_settings SET config=%s,revision=revision+1,updated_at=NOW() WHERE id=1 '
+                        'RETURNING revision', (psycopg2.extras.Json(config),))
+            revision=cur.fetchone()[0]
+            config_audit.record_settings(cur, source, actor, old, config, revision)
 
 
 def read_state():
@@ -81,7 +87,9 @@ def read_state():
             return dict(cur.fetchone() or {})
 
 
-def select_lanes(lanes):
+def select_lanes(lanes, actor=None, source='dashboard'):
+    """Set the open lanes (and their scenario's waits); a real change is recorded in
+    config_changes (who = `actor`), in the same transaction."""
     if not 1<=int(lanes)<=int(os.getenv('MAX_LANES',4)):raise ValueError('Invalid lane count')
     with closing(connect()) as conn,conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -92,6 +100,14 @@ def select_lanes(lanes):
                             (int(lanes),*(finite(scenario.get(f'wait_{m}m')) for m in (0,5,10,15))))
             else:
                 cur.execute('''UPDATE dashboard_state SET open_lanes=%s WHERE id=1''', (int(lanes),))
+            config_audit.record(cur, source, actor, 'open_lanes', state.get('open_lanes'), int(lanes))
+
+
+def recent_changes(limit=50):
+    """The newest configuration changes (config_changes), for the dashboard's history."""
+    with closing(connect()) as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            return config_audit.recent(cur, limit)
 
 
 def publish(conn,payload):

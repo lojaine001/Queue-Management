@@ -160,6 +160,15 @@ and native apps (IQMSManager) and scripts are not affected by CORS. `*` is refus
 
 Never put the key in the web app's code or in git.
 
+**Configuration changes are recorded.** Every change to the open lanes (`/set-lanes` or the
+dashboard's lane selector) and to a forecast setting (dashboard) is stored in the table
+`config_changes`: when, the old and new value, and who as far as the system can tell. There
+are no user accounts, so "who" is the source (API or dashboard) plus the caller's address
+and app (API) or the browser's address and Windows user (dashboard). Behind Caddy and ngrok
+the API may only see a local address; the app name is then the better clue. The dashboard
+shows the last 50 changes ("Configuration change history"); there is deliberately no public
+endpoint for it, since it contains addresses.
+
 **Never expose:**
 - the Vite dev server (`npm run dev`): development only, listens on `localhost`, never tunnel it;
 - port 8000 (API), 8501 (dashboard: it can change forecast settings and has no login) and 5432

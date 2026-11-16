@@ -82,7 +82,8 @@ from prediction.runtime import RUNTIME, read_json
 from prediction.model_bundle import current_bundle
 from prediction.forecast_state import (waiting_backlog, horizon_value, payload_from, freshness, status_for,
                                        published_series, WAIT_BUSY_MIN, WAIT_ALERT_MIN)
-from prediction.shared_forecast_store import read_settings, update_settings, read_state, select_lanes
+from prediction.shared_forecast_store import (read_settings, update_settings, read_state, select_lanes,
+                                              recent_changes)
 from prediction.dwell_models import _build_dashboard_dwell_model, _build_dashboard_dwell_lstm_model
 
 CAMERA_ID = os.getenv("CAM_ID", "Bosch_Camera_Entrance")
@@ -2038,13 +2039,32 @@ if _arrivals_capped:
 
 
 
+def _dashboard_actor() -> str:
+    """Who changes a setting here (the dashboard has no login): the browser's address and
+    the Windows user running the dashboard. Recorded in config_changes."""
+    try:
+        address = st.context.ip_address or "local"
+    except Exception:
+        address = "?"
+    try:
+        import getpass
+        user = getpass.getuser()
+    except Exception:
+        user = "?"
+    return f"dashboard, browser {address}, Windows user {user}"
+
+
+def _save_settings(patch):
+    update_settings(patch, actor=_dashboard_actor())
+
+
 def _sync_days_to_qp():
     st.query_params["training_days"] = str(st.session_state.get("training_span_days", int(os.getenv("DATA_SPAN_DAYS", 30))))
 
 def _sync_lanes_to_qp():
     try:
         new_lanes = int(st.session_state["forecast_active_lanes"])
-        select_lanes(new_lanes)
+        select_lanes(new_lanes, actor=_dashboard_actor())
         st.session_state["_dashboard_last_written_lanes"] = new_lanes
     except ValueError as exc:
         st.warning(str(exc))
@@ -2058,11 +2078,11 @@ def _guard_arrival_models():
     if not current:
         current = list(_ARRIVAL_MODEL_DEFAULT)
         st.session_state["arrival_models"] = current
-    update_settings({"arrival_models": current})
+    _save_settings({"arrival_models": current})
     st.query_params["arrival_models"] = ",".join(current)
 
 def _sync_dwell_mode_to_qp():
-    update_settings({"dwell_model_mode": st.session_state["dwell_model_mode"]})
+    _save_settings({"dwell_model_mode": st.session_state["dwell_model_mode"]})
     st.query_params["dwell_mode"] = str(st.session_state.get("dwell_model_mode", "safe"))
 
 def _guard_dwell_forecast_models():
@@ -2070,7 +2090,7 @@ def _guard_dwell_forecast_models():
     if not current:
         current = list(_DWELL_FORECAST_MODEL_DEFAULT)
         st.session_state["dwell_forecast_models"] = current
-    update_settings({"dwell_forecast_models": current})
+    _save_settings({"dwell_forecast_models": current})
     st.query_params["dwell_forecast_models"] = ",".join(current)
 
 action_refresh, action_predict, action_backtest, action_param, action_days, action_model, action_smooth, action_dwell, action_dwell_models = st.columns([1, 1.2, 1.2, 1.7, 1.7, 1.8, 1.4, 1.2, 2.0])
@@ -2111,7 +2131,7 @@ with action_model:
     st.toggle(
         "Apply arrival calibration",
         key="calibration_enabled",
-        on_change=lambda: update_settings({"calibration_enabled": st.session_state["calibration_enabled"]}),
+        on_change=lambda: _save_settings({"calibration_enabled": st.session_state["calibration_enabled"]}),
         help="Apply a compatible, independently validated arrival correction on the next background publication. Raw model forecasts remain unchanged. Legacy or invalid coefficients are ignored.",
     )
     st.number_input(
@@ -2121,7 +2141,7 @@ with action_model:
         step=0.05,
         format="%.2f",
         key="arrival_coefficient",
-        on_change=lambda: update_settings({"arrival_coefficient": float(st.session_state["arrival_coefficient"])}),
+        on_change=lambda: _save_settings({"arrival_coefficient": float(st.session_state["arrival_coefficient"])}),
         help="One multiplier on blended arrivals, applied once on the next background publication; every screen and push alert reads that publication.",
     )
 with action_smooth:
@@ -2130,7 +2150,7 @@ with action_smooth:
         options=[3, 5, 15, 30],
         format_func=lambda v: f"{v} min",
         key="pred_smooth_min",
-        on_change=lambda: update_settings({"pred_smooth_min": st.session_state["pred_smooth_min"]}),
+        on_change=lambda: _save_settings({"pred_smooth_min": st.session_state["pred_smooth_min"]}),
     )
 with action_dwell:
     st.selectbox(
@@ -2242,6 +2262,34 @@ with _col_hint:
         st.info("Settings saved. The shared forecast will update on the next prediction run.")
     if _shared_freshness["stale"]:
         st.warning("Shared wait forecast or its source data is stale. Check Auto-predict.")
+
+
+# ── Configuration change history (table config_changes) ───────────────────────
+with st.expander("Configuration change history (last 50)", expanded=False):
+    st.caption("Every change to the open lanes or a forecast setting: when, from where (API or this "
+               "dashboard), by whom as far as the system can tell (there are no user accounts), "
+               "and the old and new value.")
+    try:
+        _changes = recent_changes(50)
+    except Exception as _exc:
+        st.warning(f"Change history unavailable ({type(_exc).__name__}). "
+                   "Was the database migrated? See db/README.md.")
+        _changes = []
+    if _changes:
+        _tz = os.getenv("STORE_TZ", "Europe/Paris")
+        st.dataframe(
+            pd.DataFrame([{
+                "When": pd.Timestamp(c["changed_at"]).tz_convert(_tz).strftime("%Y-%m-%d %H:%M:%S"),
+                "Setting": c["setting"],
+                "Old": json.dumps(c["old_value"]) if c["old_value"] is not None else "",
+                "New": json.dumps(c["new_value"]) if c["new_value"] is not None else "",
+                "Source": c["source"],
+                "Who": c["actor"] or "",
+            } for c in _changes]),
+            hide_index=True, width="stretch",
+        )
+    elif _changes == []:
+        st.caption("No change recorded yet.")
 
 
 # ── Live operations ────────────────────────────────────────────────────────────

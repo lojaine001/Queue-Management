@@ -60,7 +60,7 @@ class SharedForecastTests(unittest.TestCase):
     def test_lane_change_updates_waits_without_changing_input_age(self):
         conn=FakeConnection(self.state)
         with patch.object(administration_service,'_conn',return_value=conn):
-            administration.set_lanes(SetLanesRequest(lanes=2))
+            administration.set_lanes(SetLanesRequest(lanes=2), None)
         self.assertEqual(self.state['open_lanes'],2)
         self.assertEqual(self.state['wait_10m'],9)
         self.assertEqual(self.state['updated_at'],self.now)
@@ -71,7 +71,7 @@ class SharedForecastTests(unittest.TestCase):
         self.state['forecast_json']['as_of']=(self.now-timedelta(minutes=20)).isoformat()
         conn=FakeConnection(self.state)
         with patch.object(administration_service,'_conn',return_value=conn),self.assertRaises(HTTPException) as caught:
-            administration.set_lanes(SetLanesRequest(lanes=2))
+            administration.set_lanes(SetLanesRequest(lanes=2), None)
         self.assertEqual(caught.exception.status_code,409)
         self.assertEqual(self.state['open_lanes'],4)
         self.assertFalse(conn.committed)
