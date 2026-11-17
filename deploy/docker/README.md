@@ -188,5 +188,15 @@ restarting Ubuntu with the keep-alive, every container came back by itself. Earl
 Desktop, the entrance camera also ran on CUDA. Found and fixed on the way: folder owners
 (`prepare.sh`) and Ubuntu shutting down when idle (keep-alive task).
 
+CUDA 13 camera images (2026-11-17, Docker Desktop, RTX 3060 laptop, driver 592.00): both
+cameras run on CUDAExecutionProvider with CUDA 13.0.3, Python 3.12.3 and onnxruntime 1.30.0.
+Each camera's detector was run on the same 50 frames of a recorded clip with the previous
+images (CUDA 12.6.3, Python 3.10, onnxruntime 1.23.0) and with the new ones: same number of
+boxes (checkout 113, entrance 258), every box matched, at most 2 px and 0.0021 in score apart
+(last-decimal differences between onnxruntime/cuDNN versions; two runs of the same image are
+identical). Entrance camera after warm-up: detection 52–59 ms per frame (124–130 ms before),
+so no slowdown. The database is built from nothing to 0002 by `migrate`; `/health/ready`,
+`/health/workers` and `/v1/dashboard/live` answer through the web proxy.
+
 Not tested yet: a real reboot with nobody logged on, the real cameras (only reachable from the
 store network), ngrok, and the data move.
