@@ -18,8 +18,11 @@ no Windows services, no `start_all.ps1`. Docker is the service manager: every co
 
 ## 1. Prepare the machine (once)
 
-On Windows: if the machine has an NVIDIA GPU, install the latest **NVIDIA driver** (it provides
-the GPU to WSL); on a CPU-only machine, skip the NVIDIA driver and toolkit steps. Then in an
+On Windows: if the machine has an NVIDIA GPU, install the latest **NVIDIA driver** for Windows, version
+580 or newer (R595 production branch recommended): it provides the GPU to WSL. **Never install an
+NVIDIA driver inside Ubuntu/WSL** (`nvidia-driver-*`, `cuda-drivers`): it replaces the one Windows
+passes in and the GPU disappears. No CUDA toolkit is needed on the machine either: the camera
+images bring CUDA 13.0 with them; on a CPU-only machine, skip the NVIDIA driver and toolkit steps. Then in an
 administrator PowerShell: `wsl --install -d Ubuntu-24.04` and reboot.
 
 In the Ubuntu terminal:
@@ -44,9 +47,10 @@ sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart doc
 ```
 Close and reopen Ubuntu (for the docker group), then check the GPU from a container:
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:13.0.3-base-ubuntu24.04 nvidia-smi
 ```
-It must print the GPU. If it does not, fix the driver / toolkit before going on.
+It must print the GPU and "CUDA Version: 13.0" or higher. If it does not, fix the driver / toolkit
+before going on.
 
 **Starting at Windows boot, and staying up.** WSL starts Ubuntu when something runs in it and
 **shuts it down again a few seconds after the last command ends**, even with Docker running

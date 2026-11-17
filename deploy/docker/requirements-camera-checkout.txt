@@ -1,12 +1,15 @@
-# Checkout camera image (Head-Detector/main.py), NVIDIA GPU or CPU. Linux, Python 3.10.
+# Checkout camera image (Head-Detector/main.py), NVIDIA GPU or CPU. Linux: Python 3.12 on the
+# CUDA image, Python 3.10 on the CPU/OpenVINO image (every version below exists for both).
 # Same versions as Head-Detector/requirements.txt, except:
 #   onnxruntime-gpu (or onnxruntime when built with CAMERA_DEVICE=cpu) instead of onnxruntime-openvino + openvino
 #   opencv-python-headless instead of opencv-python (no preview window in a container)
 #   torch from the CPU-only index: it is only imported, by the disabled OWLv2 detector
-onnx==1.12.0
-protobuf==3.20.1                 # onnx 1.12 fails with newer protobuf
-onnxruntime-gpu==1.23.0
-numpy==1.26.4                    # stays on 1.x for onnx 1.12
+onnx==1.21.0                     # 1.12 has no Python 3.12 build; only used to read the model's input size
+protobuf==7.36.2                 # what onnx 1.21 installs, pinned
+# CUDA 13.0 build (1.27+). Keep this line exactly as is: Dockerfile.camera swaps it for
+# onnxruntime-openvino + openvino on the CPU image.
+onnxruntime-gpu==1.30.0
+numpy==1.26.4                    # unchanged: the camera code stays on numpy 1.x
 opencv-python-headless==4.10.0.84
 Pillow==12.2.0
 norfair==2.3.0

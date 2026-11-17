@@ -1,4 +1,5 @@
-# Entrance camera image (queue_management_v2.py), NVIDIA GPU or CPU. Linux, Python 3.10.
+# Entrance camera image (queue_management_v2.py), NVIDIA GPU or CPU. Linux: Python 3.12 on the
+# CUDA image, Python 3.10 on the CPU/OpenVINO image (every version below exists for both).
 # Same versions as the entrance part of Queue-Management-System-v2-main/.../requirements.txt, except:
 #   onnxruntime-gpu (or onnxruntime when built with CAMERA_DEVICE=cpu) instead of onnxruntime-openvino + openvino
 #   opencv-python-headless instead of opencv-python (no preview window in a container)
@@ -6,7 +7,9 @@ opencv-python-headless==4.13.0.92
 numpy==2.2.6
 Pillow==12.2.0
 onnx==1.21.0
-onnxruntime-gpu==1.23.0
+# CUDA 13.0 build (1.27+). Keep this line exactly as is: Dockerfile.camera swaps it for
+# onnxruntime-openvino + openvino on the CPU image.
+onnxruntime-gpu==1.30.0
 norfair==2.1.1
 scipy==1.15.3
 shapely==2.1.2

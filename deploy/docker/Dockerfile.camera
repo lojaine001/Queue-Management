@@ -9,13 +9,19 @@
 # Build context: the repository root.
 ARG CAMERA_DEVICE=cuda
 
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04 AS base-cuda
+FROM nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04 AS base-cuda
 ENV DEBIAN_FRONTEND=noninteractive
-# Ubuntu 22.04 ships Python 3.10, the version production uses.
+# CUDA 13.0 + cuDNN 9: what onnxruntime-gpu 1.27+ is built with (needs an NVIDIA driver >= 580).
+# Ubuntu 24.04 ships Python 3.12 (onnxruntime-gpu has no Python 3.10 build since 1.24).
+# Packages go into their own environment: Ubuntu 24.04 refuses pip installs into the system Python.
+# The image's unused "ubuntu" user is removed so our user can take uid 1000 (see below).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-pip tzdata libglib2.0-0 libgl1 libgomp1 curl \
- && ln -sf /usr/bin/python3 /usr/local/bin/python \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends python3 python3-venv tzdata libglib2.0-0 libgl1 libgomp1 curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/venv \
+ && ln -sf /opt/venv/bin/python /usr/local/bin/python \
+ && (userdel --remove ubuntu 2>/dev/null || true)
+ENV PATH=/opt/venv/bin:$PATH
 
 FROM python:3.10.16-slim-bookworm AS base-cpu
 ENV DEBIAN_FRONTEND=noninteractive
@@ -43,7 +49,7 @@ WORKDIR /app
 COPY deploy/docker/requirements-camera-${CAMERA}.txt deploy/docker/
 RUN case "$CAMERA_DEVICE" in \
       [Cc][Pp][Uu]|[Oo][Pp][Ee][Nn][Vv][Ii][Nn][Oo]) \
-        sed 's/^onnxruntime-gpu==1\.23\.0$/onnxruntime-openvino==1.23.0\nopenvino==2025.3.0/' \
+        sed 's/^onnxruntime-gpu==1\.30\.0$/onnxruntime-openvino==1.23.0\nopenvino==2025.3.0/' \
             deploy/docker/requirements-camera-${CAMERA}.txt > /tmp/requirements.txt ;; \
       *) \
         cp deploy/docker/requirements-camera-${CAMERA}.txt /tmp/requirements.txt ;; \
